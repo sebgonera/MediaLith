@@ -45,6 +45,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "plexos-init"
+version = "0.1.0"
+dependencies = [
+ "plexos-types",
+]
+
+[[package]]
 name = "plexos-types"
 version = "0.1.0"
 dependencies = [

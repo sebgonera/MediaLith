@@ -1,0 +1,14 @@
+[package]
+name = "plexos-init"
+version = "0.1.0"
+description = "PID 1: verity setup, filesystem assembly, and the boot plan"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+plexos-types = { path = "../plexos-types" }
+
+[lints]
+workspace = true

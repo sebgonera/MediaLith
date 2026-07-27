@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/plexos-gpu", "crates/plexos-types"]
+members = ["crates/plexos-gpu", "crates/plexos-init", "crates/plexos-types"]
 
 [workspace.package]
 edition = "2024"

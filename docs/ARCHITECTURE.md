@@ -11,8 +11,8 @@ whichever of two slots is not currently running, and activated by a reboot.
 
 ```
                     +-------------------------------------------+
-   Secure Boot ---> | UKI (signed): kernel + initramfs-less      |
-                    |               plexos-init + cmdline        |
+   Secure Boot ---> | UKI (signed, one artifact):                |
+                    |   kernel + initrd (plexos-init) + cmdline  |
                     |   cmdline carries the dm-verity root hash  |
                     +---------------------+---------------------+
                                           |
@@ -47,9 +47,11 @@ wrong. See [ADR-0004](adr/0004-verified-boot.md).
 2. `systemd-boot` selects a UKI from the ESP. Entry filenames carry a try counter, so
    a UKI that fails to boot three times is skipped in favour of the other slot. See
    [ADR-0005](adr/0005-bootloader-and-rollback.md).
-3. The kernel starts `plexos-init` as PID 1 directly — there is no initramfs.
-4. `plexos-init` sets up dm-verity over the `/usr` partition named on the command
-   line, mounts it, assembles the root tmpfs, mounts `/var`, and overlays `/etc`.
+3. The kernel starts `plexos-init` as PID 1 from the UKI's initrd section — no
+   separate initramfs artifact exists (see §3).
+4. `plexos-init` sets up dm-verity over the `/usr` partition for the slot named on the
+   command line, assembles the root at `/sysroot` — verified `/usr`, persistent `/var`,
+   `/etc` overlay — and `switch_root`s into it.
 5. `plexos-init` runs state migrations if `/var` was written by an older layout
    version ([ADR-0009](adr/0009-persistent-state.md)).
 6. Services start under `plexos-init`'s supervisor: `plexosd`, `plexos-gpu` self-test,
@@ -64,17 +66,36 @@ otherwise a broken update that still boots will never roll back. The health gate
 requires `plexosd` responding, `/var` mounted read-write, and Plex's HTTP port
 accepting a request.
 
-## 3. Why no initramfs
+## 3. No *separate* initramfs
 
-An initramfs exists to find and mount the real root. PlexOS already knows where its
-root is — the partition is identified by a Discoverable Partitions Specification type
-GUID, and the verity root hash arrives on the command line. Skipping the initramfs
-removes an entire signed artifact from the trust chain and several hundred
-milliseconds from boot.
+An earlier draft of this document claimed PlexOS has no initramfs at all and that the
+kernel execs `plexos-init` directly. That was wrong, and the correction matters enough
+to state plainly rather than quietly edit.
 
-The cost is that the kernel must have the storage and dm-verity drivers built in
-rather than as modules. For a fixed appliance target that is acceptable, and it is
-revisited if PlexOS ever supports arbitrary hardware.
+Setting up dm-verity requires userspace before the root filesystem exists. The kernel
+can create a verity device from the command line via `dm-mod.create`, but that forces
+`/usr` itself to be the root, which forecloses the tmpfs root and `/etc` overlay the
+rest of this design depends on. Something has to run first.
+
+What PlexOS actually has is an initramfs **with no separate artifact**. A Unified
+Kernel Image is a single PE binary with kernel, initrd, and command line in their own
+sections, signed as a unit. So the property the earlier claim was reaching for still
+holds exactly:
+
+- there is no separate initramfs file to sign, verify, or keep in step with the kernel;
+- the trust chain in [ADR-0004](adr/0004-verified-boot.md) is unchanged — one signature
+  over one artifact;
+- the initrd cannot be swapped independently of the kernel it shipped with.
+
+`plexos-init` therefore runs twice, in two roles. First from the initrd: set up verity,
+assemble the root at `/sysroot`, `switch_root`. Then from the verified `/usr` as the
+service manager. `crates/plexos-init/src/plan.rs` computes the first role's work as a
+plan before executing any of it, which makes the whole sequence testable and gives a
+`--dry-run`.
+
+The kernel still needs storage, erofs, and dm-verity built in rather than modular. The
+initrd is deliberately minimal — one static binary — so there is no module loading, no
+`udev`, and nothing to go stale.
 
 ## 4. Update flow
 
@@ -153,7 +174,7 @@ See [ADR-0008](adr/0008-configuration-model.md).
 | --- | --- | --- |
 | `plexos-types` | exists | Formats: partition contract, manifest, config schema, versions |
 | `plexos-gpu` | exists | GPU detection, driver selection, transcode diagnosis |
-| `plexos-init` | planned | PID 1, verity/mount setup, supervisor, health gate |
+| `plexos-init` | partial | PID 1: boot plan and state decisions done; execution and supervisor pending |
 | `plexos-update` | planned | Manifest verification, download, slot write, rollback arming |
 | `plexos-storage` | planned | Disk discovery, pools, SMART, snapshots |
 | `plexos-shares` | planned | ksmbd and NFS export configuration |
