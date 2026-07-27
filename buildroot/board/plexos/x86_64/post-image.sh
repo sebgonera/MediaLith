@@ -284,7 +284,19 @@ build_uki() {
     # port. It uses the framebuffer the firmware already set up, so it works before
     # any driver loads -- which is exactly the window where a boot failure is
     # otherwise silent and the only symptom is a blinking Caps Lock.
-    printf 'plexos.slot=a plexos.roothash=%s earlycon=efifb console=tty0 console=ttyS0,115200\n' \
+    # Console order matters, and it is not stylistic. Kernel messages go to every
+    # console listed, but userspace -- including every diagnostic plexos-init prints
+    # -- goes only to /dev/console, and the kernel associates that with the LAST
+    # console= given (Documentation/admin-guide/serial-console.rst).
+    #
+    # With tty0 first and ttyS0 last, /dev/console is the serial port. On a machine
+    # with no serial port that is a console nobody can read: the kernel's own messages
+    # appear on screen, plexos-init's do not, and a failing boot looks like a panic
+    # with no explanation. That is exactly what the first hardware boots did, and
+    # QEMU could never have shown it -- there ttyS0 is the port being captured.
+    #
+    # tty0 last. The screen is the console an appliance actually has.
+    printf 'plexos.slot=a plexos.roothash=%s earlycon=efifb console=ttyS0,115200 console=tty0\n' \
         "${ROOT_HASH}" > "${WORK}/cmdline"
 
     if [ -f "${TARGET_DIR}/usr/lib/os-release" ]; then
