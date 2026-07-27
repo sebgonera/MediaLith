@@ -38,6 +38,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cmdline;
+pub mod execute;
 pub mod plan;
 pub mod state;
 

@@ -39,6 +39,7 @@
 //!   the natural companion to [`dm`].
 
 pub mod dm;
+pub mod mount;
 pub mod verity;
 
 pub use verity::{VerityError, VeritySuperblock};

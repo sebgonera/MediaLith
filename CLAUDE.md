@@ -27,21 +27,32 @@ Everything else is cheap to revise. Prefer revising it.
   the project exists to fix.
 - Repo content is English. Conversation may be Polish.
 - `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
-  before every commit. Lints are `pedantic`, `unsafe_code` is forbidden.
+  before every commit. Lints are `pedantic`.
+- **`unsafe_code` is forbidden everywhere except `crates/plexos-sys`**, which exists so
+  that it can be. PID 1 has to issue syscalls; confining them to one small crate keeps
+  the unsafe reviewable. Every block there carries a soundness comment, enforced by
+  `clippy::undocumented_unsafe_blocks`. If you find yourself wanting `unsafe` in
+  another crate, the answer is a function in `plexos-sys`, not an exception.
 
 ## Where things stand
 
 | Component | State |
 | --- | --- |
-| `crates/plexos-types` | Done. Formats, 31 tests. |
-| `crates/plexos-gpu` | Done as a diagnostic tool, 40 tests. Never run against a real GPU. |
-| `crates/plexos-init` | Half. Computes the boot plan; does not execute it. |
-| `buildroot/` | defconfig + kernel fragment + systemd-boot package. **Never built.** |
-| `post-image.sh` | Missing. Last piece before a first build. |
+| `crates/plexos-types` | Done. Formats and the layout emitter, 41 tests. |
+| `crates/plexos-gpu` | Done as a diagnostic tool, 41 tests. Never run against a real GPU. |
+| `crates/plexos-sys` | The audited unsafe surface: verity superblock, dm ioctls, mount. 39 tests. **The ioctls and mounts have never been executed** — they need root. |
+| `crates/plexos-init` | Plans and executes. 43 tests. Never run as PID 1. |
+| `buildroot/` | defconfig, kernel fragment, systemd-boot, plexos-init package. **Build in progress; never completed.** |
+| `post-image.sh` | Written. Stages 1, 2 and 6 verified against real tools; 3, 4, 5 await the build. |
 | Installer, `plexosd`, Plex provisioning | Not started. |
 
-Next, in order: `post-image.sh`, then the execution half of `plexos-init`, then
-`package/plexos-init/` (pkg-cargo), then iterate on a real build.
+Next: finish the first Buildroot build, assemble an image, and boot it under QEMU —
+which is the first time any of the syscall code will have run at all. Then `plexosd`
+and the health gate.
+
+Nothing in `plexos-sys` or `plexos-init::execute` has executed a single syscall yet.
+Unprivileged user namespaces are blocked by AppArmor on the development machine, so
+QEMU is the first real test, not a formality.
 
 ## Known traps
 
