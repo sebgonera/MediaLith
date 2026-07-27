@@ -115,11 +115,21 @@ impl Gpu {
     }
 }
 
-/// Cosmetic device names. Absence from this list means nothing.
+/// Cosmetic device names. Absence from this list means nothing, and neither does an
+/// entry being wrong — nothing depends on it.
+///
+/// Provenance is recorded per entry, because these are exactly the sort of constant
+/// that gets copied from a forum post and never checked. `confirmed` means a capture
+/// from that machine is in the repository; `documented` means it came from a vendor
+/// list and nobody has run PlexOS on one.
 const KNOWN_MODELS: &[(u16, u16, &str)] = &[
+    // confirmed — tools/captures/huawei-wrt-wx9.txt
+    (0x8086, 0x3ea0, "Intel UHD Graphics 620 (Whiskey Lake-U)"),
+    // documented, unverified
+    (0x8086, 0x5917, "Intel UHD Graphics 620 (Kaby Lake-R)"),
+    (0x8086, 0x3e9b, "Intel UHD Graphics 630 (Coffee Lake-H)"),
     (0x8086, 0x46d0, "Intel Alder Lake-N (N100 class)"),
     (0x8086, 0x46d1, "Intel Alder Lake-N (N200 class)"),
-    (0x8086, 0x46d2, "Intel Alder Lake-N (N50 class)"),
 ];
 
 fn model_name(vendor: u16, device: u16) -> Option<String> {

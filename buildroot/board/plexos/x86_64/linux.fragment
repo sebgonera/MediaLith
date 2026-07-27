@@ -1,0 +1,131 @@
+# PlexOS kernel requirements, applied on top of the architecture default config.
+#
+# A fragment rather than a full linux.config, deliberately. A complete .config is
+# thousands of lines of architecture defaults in which the handful of options PlexOS
+# actually depends on are invisible, and every kernel bump becomes a merge conflict
+# over settings nobody chose. This file states requirements and nothing else, so a
+# reviewer can see the whole of what PlexOS needs from the kernel on one screen.
+#
+# The rule that shapes most of it: **=y, not =m**. The initrd inside the UKI is a
+# single static binary with no module loader, no udev, and no modules to load
+# (ARCHITECTURE.md §3). Anything needed to reach /usr or /var must be built in.
+
+# --- Boot ------------------------------------------------------------------
+# The kernel must be directly executable as an EFI image to live inside a UKI.
+CONFIG_EFI=y
+CONFIG_EFI_STUB=y
+CONFIG_EFI_VARS_PSTORE=n
+# The UKI carries plexos-init in its .initrd section.
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_RD_GZIP=y
+CONFIG_RD_ZSTD=y
+
+# --- Verified /usr (ADR-0004) ----------------------------------------------
+# Built in: verity has to be established before any filesystem is mounted, so it
+# cannot itself live in a module on a filesystem.
+CONFIG_MD=y
+CONFIG_BLK_DEV_DM=y
+CONFIG_DM_VERITY=y
+CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG=y
+CONFIG_CRYPTO_SHA256=y
+
+# --- Filesystems -----------------------------------------------------------
+# erofs for /usr, XFS for /var, FAT for the ESP, overlay for /etc, tmpfs for /.
+CONFIG_EROFS_FS=y
+CONFIG_EROFS_FS_ZIP=y
+CONFIG_EROFS_FS_ZIP_LZMA=y
+CONFIG_XFS_FS=y
+CONFIG_OVERLAY_FS=y
+CONFIG_TMPFS=y
+CONFIG_TMPFS_POSIX_ACL=y
+CONFIG_TMPFS_XATTR=y
+CONFIG_VFAT_FS=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ISO8859_1=y
+CONFIG_NLS_UTF8=y
+# Partition labels are how plexos-init finds a slot (ADR-0003).
+CONFIG_EFI_PARTITION=y
+
+# --- Storage ---------------------------------------------------------------
+# NVMe on the reference machine; AHCI kept for the wider x86-64 target. Both built in:
+# a kernel that cannot reach its own root is unbootable, and there is no initramfs
+# module to rescue it.
+CONFIG_BLK_DEV_NVME=y
+CONFIG_NVME_CORE=y
+CONFIG_SATA_AHCI=y
+CONFIG_ATA=y
+CONFIG_BLK_DEV_SD=y
+CONFIG_USB_STORAGE=y
+
+# --- Graphics and transcoding ----------------------------------------------
+# i915 covers Gen9.5 (Whiskey Lake UHD 620, the reference machine). xe is the newer
+# driver for Tiger Lake and later, present so one image serves both.
+CONFIG_DRM=y
+CONFIG_DRM_I915=y
+CONFIG_DRM_XE=y
+# GuC/HuC. Loading them by default is the difference between QuickSync performing as
+# it should and degrading silently.
+CONFIG_DRM_I915_FORCE_PROBE=""
+CONFIG_EXTRA_FIRMWARE_DIR="firmware"
+
+# --- Networking ------------------------------------------------------------
+# The reference laptop has no built-in Ethernet: only Intel Wireless-AC 9560 (CNVi)
+# and a Realtek USB adapter. See the note at the end of this file.
+CONFIG_PCI=y
+CONFIG_USB_SUPPORT=y
+CONFIG_USB_XHCI_HCD=y
+CONFIG_USB_RTL8152=y
+CONFIG_IWLWIFI=y
+CONFIG_IWLMVM=y
+CONFIG_CFG80211=y
+CONFIG_MAC80211=y
+# Wired adapters common on the mini-PCs PlexOS targets.
+CONFIG_E1000E=y
+CONFIG_IGB=y
+CONFIG_IGC=y
+CONFIG_R8169=y
+CONFIG_INET=y
+CONFIG_IPV6=y
+CONFIG_TCP_CONG_BBR=y
+
+# --- Sharing ---------------------------------------------------------------
+# ksmbd rather than Samba: in-kernel, and materially faster for large sequential
+# reads, which is the entire access pattern of a media library (ARCHITECTURE.md).
+CONFIG_SMB_SERVER=y
+CONFIG_NFSD=y
+CONFIG_NFSD_V4=y
+
+# --- Process isolation -----------------------------------------------------
+# Plex runs unprivileged and confined (ADR-0007).
+CONFIG_CGROUPS=y
+CONFIG_MEMCG=y
+CONFIG_CGROUP_SCHED=y
+CONFIG_SECCOMP=y
+CONFIG_SECCOMP_FILTER=y
+CONFIG_SECURITY=y
+CONFIG_SECURITY_LANDLOCK=y
+CONFIG_LSM="landlock,yama,bpf"
+
+# --- Trimming --------------------------------------------------------------
+# An appliance needs none of these, and each is attack surface plus CVE maintenance.
+CONFIG_SOUND=n
+CONFIG_DRM_NOUVEAU=n
+CONFIG_DRM_AMDGPU=n
+CONFIG_WIRELESS_WDS=n
+CONFIG_MODULES=n
+
+# ---------------------------------------------------------------------------
+# Note: the reference machine has no wired Ethernet
+# ---------------------------------------------------------------------------
+# The capture from the Huawei WRT-WX9 shows only Intel Wireless-AC 9560 plus a Realtek
+# USB adapter. That is a real constraint on testing rather than a kernel matter:
+#
+#   - Wireless is a poor transport for a media server, and 4K remuxing over it will
+#     not be a fair test of anything.
+#   - More importantly, wireless needs credentials before the network exists, which the
+#     first-boot flow in ADR-0010 assumes it already has. Provisioning Plex requires
+#     network access, so on this machine the setup wizard has to configure wireless
+#     before it can do anything else. That ordering is not currently designed.
+#
+# For bring-up, a USB Ethernet adapter sidesteps both. The design question stands
+# regardless and belongs in the installer ADR.

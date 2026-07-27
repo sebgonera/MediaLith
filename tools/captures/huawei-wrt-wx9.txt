@@ -1,0 +1,74 @@
+﻿PlexOS hardware capture (Windows)
+generated: 2026-07-27T05:01:34Z
+elevated: True
+
+===== System =====
+manufacturer: HUAWEI
+model:        WRT-WX9
+ram:          7.8 GB
+bios:         HUAWEI 1.39
+
+===== CPU =====
+name:     Intel(R) Core(TM) i5-8265U CPU @ 1.60GHz
+cores:    4 physical / 8 logical
+arch:     64-bit
+
+===== Firmware / UEFI =====
+firmware type: UEFI
+secure boot:   True
+tpm present:   False, enabled: False
+
+===== Graphics =====
+--- Intel(R) UHD Graphics 620
+    pci id:  0x3ea0
+    driver:  27.20.100.8984
+    raw id:  PCI\VEN_8086&DEV_3EA0&SUBSYS_3E0919E5&REV_00\3&11583659&0&10
+
+===== Network controllers =====
+--- Intel(R) Wireless-AC 9560
+    pci id:  0x9df0
+    raw id:  PCI\VEN_8086&DEV_9DF0&SUBSYS_20348086&REV_30\3&11583659&0&A3
+--- Bluetooth Device (Personal Area Network)
+    pci id:  (not a PCI device)
+    raw id:  BTH\MS_BTHPAN\6&21E51CEF&0&2
+--- Realtek USB GbE Family Controller
+    pci id:  (not a PCI device)
+    raw id:  USB\VID_0BDA&PID_8153\001000001
+
+===== Storage controllers =====
+--- Kontroler miejsc do magazynowania firmy Microsoft
+    pci id:  (not a PCI device)
+--- Standardowy kontroler NVM Express
+    pci id:  0x2263
+
+===== Disks =====
+--- disk 0: KINGSTON SA2000M8500G
+    size:      465.8 GB
+    bus:       NVMe
+    partition: GPT
+    boot disk: True
+
+===== Audio / other Intel devices =====
+0x9def  Standardowy kontroler RAM PCI
+0x9da4  Intel(R) SPI (flash) Controller - 9DA4
+0x1911  Intel(R) Xeon(R) E3 - 1200/1500 v5/6th Gen Intel(R) Core(TM) Gaussian Mixture Model - 1911
+0x9de8  Kontroler hosta Intel(R) Serial IO I2C - 9DE8
+0x9df9  Intel(R) Thermal Subsystem - 9DF9
+0x9d84  I/O LPC Controller - 9D84 for mobile 8th Gen Intel(R) Core(TM) processor family
+0x3e34  Intel(R) Host Bridge/DRAM Registers - 3E34
+0x9dc8  Kontroler audio technologii Intel(R) Smart Sound
+0x9da3  Intel(R) SMBus - 9DA3
+0x0222  Technologia Intel(R) Smart Sound OED
+0x1903  Intel(R) Dynamic Platform and Thermal Framework Processor Participant
+0x280b  Audio dla wywietlaczy Intel(R)
+0x9db0  Intel(R) PCI Express Root Port #9 - 9DB0
+0x9da8  Intel(R) Serial IO UART Host Controller - 9DA8
+0x9de9  Kontroler hosta Intel(R) Serial IO I2C - 9DE9
+0x9dab  Intel(R) Serial IO SPI Host Controller - 9DAB
+
+===== end of capture =====
+
+Still needed from Linux (a live USB is enough):
+  - vainfo output          (VA-API capabilities)
+  - GuC/HuC status         (transcode quality on Intel)
+Run tools/capture-hardware.sh there for those.
