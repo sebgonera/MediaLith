@@ -1,0 +1,5 @@
+# Copied from Buildroot's own package/systemd/systemd.hash rather than computed here,
+# so this package and upstream Buildroot's systemd package agree on the tarball. When
+# bumping SYSTEMD_BOOT_VERSION, take the new hashes from the same place.
+sha256  6bd311c25f00d634ae3b4544d582e27df0d4166e6ba3d403b18b3129d7f44cae  systemd-258.7.tar.gz
+sha256  6d9bb3b7fc818a8facc4cc296060a0883fef8710d6498f86165335846e82ee9d  LICENSE.LGPL2.1

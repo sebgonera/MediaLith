@@ -1,0 +1,37 @@
+config BR2_PACKAGE_SYSTEMD_BOOT
+	bool "systemd-boot (standalone)"
+	depends on BR2_x86_64 || BR2_aarch64 || BR2_i386
+	depends on BR2_TOOLCHAIN_USES_GLIBC
+	select BR2_PACKAGE_GNU_EFI
+	help
+	  systemd-boot, built as a plain UEFI application from systemd's
+	  source, with none of systemd itself.
+
+	  Buildroot's own BR2_PACKAGE_SYSTEMD_BOOT lives inside
+	  "if BR2_PACKAGE_SYSTEMD", and that is only ever selected by the
+	  BR2_INIT_SYSTEMD choice — so taking it would pull systemd in as
+	  PID 1. PlexOS runs plexos-init as PID 1 and needs the bootloader
+	  alone, which is what this package builds.
+
+	  Only the EFI binary is produced. It is placed in $(BINARIES_DIR)
+	  for post-image.sh to lay out on the ESP; this package installs
+	  nothing into the target filesystem, since the bootloader never
+	  runs from there.
+
+	  PlexOS uses it for its boot-counting convention, which encodes a
+	  try counter in the UKI filename on the ESP and decrements it by
+	  renaming before handing off to the kernel. A FAT rename is the
+	  closest thing to an atomic operation available that early, and it
+	  avoids depending on EFI variable writes. See ADR-0005.
+
+	  https://www.freedesktop.org/wiki/Software/systemd/systemd-boot/
+
+if BR2_PACKAGE_SYSTEMD_BOOT
+
+config BR2_PACKAGE_SYSTEMD_BOOT_EFI_ARCH
+	string
+	default "aa64" if BR2_aarch64
+	default "ia32" if BR2_i386
+	default "x64"  if BR2_x86_64
+
+endif # BR2_PACKAGE_SYSTEMD_BOOT

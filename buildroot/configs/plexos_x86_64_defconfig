@@ -1,8 +1,16 @@
 # PlexOS — x86-64 UEFI appliance target.
 #
-# Every option below was verified against the pinned Buildroot checkout rather than
-# written from memory. Where something is not yet resolved it is marked TODO with the
-# reason, not silently guessed.
+# Every option here was resolved by actually running Buildroot's kconfig against this
+# file, not by reading option names out of the tree. That distinction earned its keep:
+# four options were being silently dropped because their dependencies were unmet, and
+# a dropped option in kconfig is not an error — it just quietly leaves you with
+# something else. The first run of this file produced a uClibc toolchain, on which
+# Plex Media Server cannot run at all.
+#
+# To re-check after editing (seconds, no compilation):
+#
+#   make -C <buildroot> BR2_EXTERNAL=$(pwd) O=<out> plexos_x86_64_defconfig
+#   grep -c '^BR2_PACKAGE_INTEL_MEDIADRIVER=y' <out>/.config
 #
 # Reference machine: Huawei WRT-WX9, Core i5-8265U (Whiskey Lake-U, Gen9.5),
 # Intel UHD Graphics 620 [8086:3ea0], Intel Wireless-AC 9560 [8086:9df0], NVMe.
@@ -15,6 +23,14 @@ BR2_x86_corei7=y
 # glibc is not a preference. Plex Media Server is a closed-source binary linked
 # against it, so musl and uClibc are not options (ADR-0002).
 BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
+# glibc requires kernel headers >= 3.2, and without an explicit headers version
+# kconfig silently drops the glibc choice and leaves uClibc selected — taking most of
+# this file down with it. Matching headers to the kernel we build is the right answer
+# for an appliance where we control both.
+BR2_KERNEL_HEADERS_AS_KERNEL=y
+# C++ is needed by intel-gmmlib, mesa3d, and liburcu (via xfsprogs). This is the
+# user-facing option; BR2_INSTALL_LIBSTDCPP is a hidden bool it selects and cannot be
+# set directly from a defconfig.
 BR2_TOOLCHAIN_BUILDROOT_CXX=y
 
 # /usr is the image; a merged /usr is what makes that possible at all (ADR-0001).
@@ -27,11 +43,15 @@ BR2_INIT_NONE=y
 # Kernel
 # ---------------------------------------------------------------------------
 BR2_LINUX_KERNEL=y
-BR2_LINUX_KERNEL_CUSTOM_VERSION=y
-# TODO: pin to a current LTS release before the first image. Buildroot's own default
-# is 7.1.5; an LTS series is the right choice for an appliance, and the exact patch
-# level must be a deliberate decision rather than whatever is newest.
-BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="7.1.5"
+# Take the version Buildroot pins rather than naming our own. Buildroot bumps it
+# deliberately, and we pin Buildroot — so this is still a deliberate pin, with the
+# advantage that BR2_KERNEL_HEADERS_AS_KERNEL can then infer the toolchain headers
+# version. A custom version leaves that inference impossible and the headers unset.
+#
+# TODO: revisit whether an LTS series is wanted before the first public image. That
+# decision now also drags the headers question with it, so it is not purely a kernel
+# choice any more.
+BR2_LINUX_KERNEL_LATEST_VERSION=y
 
 # A fragment rather than a full linux.config. Carrying thousands of lines of
 # architecture defaults obscures the handful of options PlexOS actually requires, and
@@ -92,20 +112,17 @@ BR2_PACKAGE_HOST_GPTFDISK=y
 BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_PLEXOS_PATH)/board/plexos/x86_64/post-image.sh"
 
 # ---------------------------------------------------------------------------
+# Bootloader
+# ---------------------------------------------------------------------------
+# Our own package, not Buildroot's. Buildroot's BR2_PACKAGE_SYSTEMD_BOOT sits inside
+# `if BR2_PACKAGE_SYSTEMD`, which is only ever selected by the BR2_INIT_SYSTEMD
+# choice — taking it would pull systemd in as PID 1, exactly what BR2_INIT_NONE above
+# rejects. package/systemd-boot builds the bootloader alone from the same source.
+BR2_PACKAGE_SYSTEMD_BOOT=y
+
+# ---------------------------------------------------------------------------
 # Unresolved
 # ---------------------------------------------------------------------------
-# BOOTLOADER. ADR-0005 chose systemd-boot, used standalone as an EFI application. That
-# is not directly available here: BR2_PACKAGE_SYSTEMD_BOOT sits inside
-# `if BR2_PACKAGE_SYSTEMD`, and BR2_PACKAGE_SYSTEMD is only ever selected by the
-# BR2_INIT_SYSTEMD choice. Enabling it would pull systemd in as PID 1, which is exactly
-# what BR2_INIT_NONE above rejects.
-#
-# The decision in ADR-0005 stands; the packaging does not follow from it for free. The
-# intended resolution is a package in this BR2_EXTERNAL tree that builds only the
-# bootloader from systemd's source — meson exposes it independently, and gnu-efi is
-# already packaged. Until that exists, no image produced from this defconfig is
-# bootable.
-#
 # UKI ASSEMBLY. systemd's `ukify` needs python-pefile, which Buildroot does not carry.
 # Not a problem: a UKI is the EFI stub with .osrel, .cmdline, .linux, and .initrd PE
 # sections added, which objcopy from the toolchain does. post-image.sh will do it that
