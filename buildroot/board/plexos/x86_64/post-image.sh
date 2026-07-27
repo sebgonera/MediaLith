@@ -336,7 +336,27 @@ build_uki() {
     # tty0 last. The screen is the console an appliance actually has.
     # fbcon=font:TER16x32 -- see linux.fragment. Overridable at the boot menu by
     # pressing 'e', which is why the smaller fonts are compiled in too.
-    printf 'plexos.slot=a plexos.roothash=%s earlycon=efifb console=ttyS0,115200 console=tty0 fbcon=font:TER16x32\n' \
+    # i915.enable_guc=2 -- HuC load, without GuC submission. Not a tuning knob: on this
+    # hardware it is the difference between HuC running and not, and nothing else turns
+    # it on.
+    #
+    # The parameter defaults to -1, "auto", which sounds like it would do the right
+    # thing. uc_expand_default_options() in drivers/gpu/drm/i915/gt/uc/intel_uc.c opens
+    # with:
+    #
+    #     /* Don't enable GuC/HuC on pre-Gen12 */
+    #     if (GRAPHICS_VER(i915) < 12) { i915->params.enable_guc = 0; return; }
+    #
+    # Whiskey Lake-U is Gen9.5. Auto therefore means off, the driver never requests the
+    # firmware, and having shipped the blobs makes no difference whatever. That was
+    # measured on the reference laptop: with the firmware in the initrd and this
+    # parameter absent, /api/gpu still reported guc=not_running, huc=not_running.
+    #
+    # 2 is ENABLE_GUC_LOAD_HUC (BIT(1) in i915_params.h). Deliberately not 3: BIT(0) is
+    # GuC submission, which is a scheduling change with its own history on Gen9 and
+    # buys a transcoding appliance nothing. HuC is what affects encode quality, and
+    # loading it pulls in GuC anyway, because GuC is what authenticates it.
+    printf 'plexos.slot=a plexos.roothash=%s i915.enable_guc=2 earlycon=efifb console=ttyS0,115200 console=tty0 fbcon=font:TER16x32\n' \
         "${ROOT_HASH}" > "${WORK}/cmdline"
 
     if [ -f "${TARGET_DIR}/usr/lib/os-release" ]; then

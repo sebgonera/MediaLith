@@ -43,6 +43,17 @@ pub struct Product {
     pub slot: Option<String>,
     /// The dm-verity root hash `/usr` was verified against.
     pub root_hash: Option<String>,
+    /// The whole kernel command line, verbatim.
+    ///
+    /// Reported because the root hash is not enough to tell two images apart. A change
+    /// confined to the UKI — a kernel parameter, a console setting — leaves `/usr`
+    /// byte-identical and therefore its hash unchanged, so a machine that was never
+    /// reflashed and one that was look the same from here. That cost real time before
+    /// this field existed: `i915.enable_guc=2` is invisible in every other field.
+    ///
+    /// It holds no secret. Everything on it is readable by anyone with a shell, and
+    /// two of its values were already published above.
+    pub cmdline: Option<String>,
 }
 
 /// An interface as the page shows it.
@@ -164,6 +175,7 @@ impl Status {
                 version: os_release_value(&os_release, "VERSION_ID"),
                 slot: cmdline_value(&cmdline, KEY_SLOT),
                 root_hash: cmdline_value(&cmdline, KEY_ROOTHASH),
+                cmdline: (!cmdline.trim().is_empty()).then(|| cmdline.trim().to_owned()),
             },
             healthy: health.is_healthy(),
             health,
@@ -190,6 +202,30 @@ impl Status {
 mod tests {
     use super::*;
     use plexos_gpu::env::Fixture;
+
+    #[test]
+    fn the_whole_command_line_is_reported_because_the_root_hash_cannot_tell_images_apart() {
+        // A change confined to the UKI leaves /usr byte-identical, so its verity hash is
+        // unchanged and two different images report the same one. That happened with
+        // i915.enable_guc=2, and without this field there was no way to tell from the
+        // network whether a machine had been reflashed.
+        let fixture = Fixture::new().file(
+            "/proc/cmdline",
+            "plexos.slot=a plexos.roothash=abc i915.enable_guc=2\n",
+        );
+        let product = Status::gather(&fixture).product;
+        assert_eq!(product.root_hash.as_deref(), Some("abc"));
+        assert_eq!(
+            product.cmdline.as_deref(),
+            Some("plexos.slot=a plexos.roothash=abc i915.enable_guc=2")
+        );
+    }
+
+    #[test]
+    fn an_unreadable_command_line_is_absent_rather_than_an_empty_string() {
+        let product = Status::gather(&Fixture::new()).product;
+        assert_eq!(product.cmdline, None);
+    }
 
     #[test]
     fn the_slot_and_root_hash_come_off_the_command_line() {
