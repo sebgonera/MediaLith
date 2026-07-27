@@ -59,6 +59,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "plexos-plex"
+version = "0.1.0"
+
+[[package]]
 name = "plexos-sys"
 version = "0.1.0"
 dependencies = [

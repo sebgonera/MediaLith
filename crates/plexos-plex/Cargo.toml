@@ -1,0 +1,13 @@
+[package]
+name = "plexos-plex"
+version = "0.1.0"
+description = "Provisioning Plex Media Server from Plex's own signed packages (ADR-0010)"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true
