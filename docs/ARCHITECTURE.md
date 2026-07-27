@@ -64,7 +64,14 @@ Target: power-on to Plex accepting connections in under 5 seconds, excluding fir
 Step 7 is the load-bearing one. "Healthy" must mean more than "PID 1 is alive" —
 otherwise a broken update that still boots will never roll back. The health gate
 requires `plexosd` responding, `/var` mounted read-write, and Plex's HTTP port
-accepting a request.
+accepting a request **on loopback**.
+
+That last word is deliberate. The gate must never depend on link state, an assigned
+address, or reachability from anywhere else. Ethernet may arrive over USB, which
+enumerates seconds later than PCI, and a gate that waited for the network would roll
+back a perfectly good update because a dongle was slow to appear — the
+too-strict-health-gate failure ADR-0005 warns about. A machine with an unplugged cable
+is a machine with a network problem, not a machine that needs its OS reverted.
 
 ## 3. No *separate* initramfs
 

@@ -115,17 +115,24 @@ CONFIG_WIRELESS_WDS=n
 CONFIG_MODULES=n
 
 # ---------------------------------------------------------------------------
-# Note: the reference machine has no wired Ethernet
+# Note: wired Ethernet may arrive over USB
 # ---------------------------------------------------------------------------
-# The capture from the Huawei WRT-WX9 shows only Intel Wireless-AC 9560 plus a Realtek
-# USB adapter. That is a real constraint on testing rather than a kernel matter:
+# The reference machine has no built-in Ethernet — only Intel Wireless-AC 9560 and a
+# permanently attached Realtek USB adapter. That is a perfectly ordinary appliance
+# configuration, and it is why USB_RTL8152 and the xHCI stack above are built in
+# rather than left to a module.
 #
-#   - Wireless is a poor transport for a media server, and 4K remuxing over it will
-#     not be a fair test of anything.
-#   - More importantly, wireless needs credentials before the network exists, which the
-#     first-boot flow in ADR-0010 assumes it already has. Provisioning Plex requires
-#     network access, so on this machine the setup wizard has to configure wireless
-#     before it can do anything else. That ordering is not currently designed.
+# It removes the concern about configuring wireless before a network exists: with a
+# wired adapter present at setup, the first-boot flow in ADR-0010 works exactly as
+# designed. PlexOS v1 therefore **requires a wired connection at setup**, over PCI or
+# USB, and does not support wireless configuration. For a media server that is a
+# reasonable requirement rather than a limitation — the wireless-before-network
+# ordering can be designed later if it is ever wanted.
 #
-# For bring-up, a USB Ethernet adapter sidesteps both. The design question stands
-# regardless and belongs in the installer ADR.
+# One consequence does follow, and it is not obvious. USB devices enumerate later than
+# PCI ones, sometimes by seconds. Against the five-second boot target that is enough
+# for a network interface to be absent when services start. The boot health gate in
+# ADR-0005 must therefore never depend on link state or reachability — it checks Plex
+# on loopback. A gate that waited for the network would roll back a perfectly good
+# update because a USB dongle was slow to appear, which is precisely the
+# too-strict-health-gate failure that ADR-0005 warns about.
