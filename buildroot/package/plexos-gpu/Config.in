@@ -1,0 +1,16 @@
+config BR2_PACKAGE_PLEXOS_GPU
+	bool "plexos-gpu"
+	depends on BR2_x86_64
+	select BR2_PACKAGE_LIBVA_UTILS
+	help
+	  Hardware transcoding diagnosis: enumerates DRM render nodes,
+	  identifies the GPU, checks that the right VA-API driver and the
+	  GuC/HuC firmware actually loaded, and says what to do when they
+	  did not.
+
+	  This is the tool the project exists for. The failure it addresses
+	  is Plex falling back to software transcoding with nothing in any
+	  log explaining why (ARCHITECTURE.md section 6).
+
+	  It shells out to vainfo, which is why libva-utils is selected here
+	  rather than merely assumed to be in the image.

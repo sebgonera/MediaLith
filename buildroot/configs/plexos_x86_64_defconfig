@@ -91,8 +91,13 @@ BR2_TARGET_ROOTFS_EROFS_LZ4HC=y
 # intel-mediadriver selects intel-gmmlib, libpciaccess, libva, and mesa3d itself.
 BR2_PACKAGE_INTEL_MEDIADRIVER=y
 # vainfo. Not a debugging luxury: plexos-gpu runs it as the boot-time self-test, so it
-# is a required component of the health gate.
+# is a required component of the health gate. Selected by BR2_PACKAGE_PLEXOS_GPU too,
+# so it cannot be dropped without noticing.
 BR2_PACKAGE_LIBVA_UTILS=y
+# The diagnostic this project exists for (ARCHITECTURE.md section 6). It was missing
+# from the first images that booted, which made the one question the appliance is
+# supposed to answer the one thing it could not.
+BR2_PACKAGE_PLEXOS_GPU=y
 
 # ---------------------------------------------------------------------------
 # Firmware

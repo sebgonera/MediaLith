@@ -296,7 +296,9 @@ build_uki() {
     # QEMU could never have shown it -- there ttyS0 is the port being captured.
     #
     # tty0 last. The screen is the console an appliance actually has.
-    printf 'plexos.slot=a plexos.roothash=%s earlycon=efifb console=ttyS0,115200 console=tty0\n' \
+    # fbcon=font:TER16x32 -- see linux.fragment. Overridable at the boot menu by
+    # pressing 'e', which is why the smaller fonts are compiled in too.
+    printf 'plexos.slot=a plexos.roothash=%s earlycon=efifb console=ttyS0,115200 console=tty0 fbcon=font:TER16x32\n' \
         "${ROOT_HASH}" > "${WORK}/cmdline"
 
     if [ -f "${TARGET_DIR}/usr/lib/os-release" ]; then
@@ -381,7 +383,12 @@ build_esp() {
     # handing off, and plexosd drops the suffix entirely once the health gate passes.
     "${mcopy}" -i "${esp}" "${WORK}/plexos.efi" "::/EFI/Linux/plexos-${PLEXOS_VERSION}+3.efi"
 
-    printf 'timeout 3\ndefault plexos-*\n' > "${WORK}/loader.conf"
+    # console-mode 0 is the 80x25 text mode, which firmware scales up to fill the
+    # panel -- the largest and most readable menu available. 'max' would pick the
+    # highest resolution the firmware offers, which is the opposite of what a 2160x1440
+    # laptop panel needs. editor yes allows the kernel command line to be edited at the
+    # menu, which is how fbcon=font: can be changed without a rebuild.
+    printf 'timeout 3\ndefault plexos-*\nconsole-mode 0\neditor yes\n' > "${WORK}/loader.conf"
     "${mcopy}" -i "${esp}" "${WORK}/loader.conf" ::/loader/loader.conf
 
     msg "  ESP populated"

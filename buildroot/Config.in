@@ -1,3 +1,4 @@
+source "$BR2_EXTERNAL_PLEXOS_PATH/package/plexos-gpu/Config.in"
 source "$BR2_EXTERNAL_PLEXOS_PATH/package/plexos-init/Config.in"
 source "$BR2_EXTERNAL_PLEXOS_PATH/package/plexos-systemd-boot/Config.in"
 source "$BR2_EXTERNAL_PLEXOS_PATH/package/plexosd/Config.in"

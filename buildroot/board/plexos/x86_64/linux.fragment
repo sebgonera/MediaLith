@@ -43,6 +43,22 @@ CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
 CONFIG_DRM_FBDEV_EMULATION=y
 CONFIG_EFI_EARLYCON=y
 
+# Console font. The reference machine's panel is 2160x1440, and the kernel's default
+# 8x16 font puts a 270x90 character grid on it -- legible in a photograph, not to a
+# person standing in front of the machine.
+#
+# Glyph size is the lever here, not resolution: the framebuffer mode is chosen by
+# firmware before Linux starts, and once i915 takes the console it drives the panel at
+# its native mode regardless. TER16x32 is four times the area of 8x16 and gives a
+# 135x45 grid on the same screen.
+#
+# The smaller fonts stay compiled in so fbcon=font:<name> can pick another at boot
+# without rebuilding; the default is set on the kernel command line in post-image.sh.
+CONFIG_FONT_TER16x32=y
+CONFIG_FONT_TER10x18=y
+CONFIG_FONT_8x16=y
+CONFIG_FONT_8x8=y
+
 # --- Verified /usr (ADR-0004) ----------------------------------------------
 # Built in: verity has to be established before any filesystem is mounted, so it
 # cannot itself live in a module on a filesystem.
