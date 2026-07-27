@@ -16,12 +16,33 @@
 //! - [`health`] decides whether the boot is good. Policy, and the part with teeth.
 //! - [`bootcounter`] understands the filename convention. String handling, no policy.
 //! - [`esp`] performs the rename. Filesystem work, no policy.
+//!
+//! # The management API, so far
+//!
+//! The rest of this crate is the beginning of the one the module documentation above
+//! has been promising: [`net`] brings the network up, [`http`] serves it, [`status`]
+//! assembles what there is to say, and [`console`] is the page a person reads.
+//!
+//! All of it runs **after** the gate has returned its verdict, and none of it can
+//! reach [`Health::is_healthy`](health::Health::is_healthy). That ordering is the
+//! whole design: `health`'s own documentation forbids any check from depending on the
+//! network, because Ethernet arrives over USB and a gate that waited for an address
+//! would roll back good updates. Putting the network in the same binary is safe only
+//! because it cannot run before the decision it must not influence.
+//!
+//! It shows and does not do. Every route is read-only and there is no authentication;
+//! [`http`] holds the test that keeps the first half of that sentence true, and the
+//! day it fails is the day the second half has to change.
 
 #![forbid(unsafe_code)]
 
 pub mod bootcounter;
+pub mod console;
 pub mod esp;
 pub mod health;
+pub mod http;
+pub mod net;
+pub mod status;
 
 pub use bootcounter::BootEntry;
 pub use health::{Check, Health, Status};

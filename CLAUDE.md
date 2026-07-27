@@ -42,7 +42,7 @@ Everything else is cheap to revise. Prefer revising it.
 | `crates/plexos-gpu` | Done as a diagnostic tool, 41 tests. Never run against a real GPU. |
 | `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec, partition-label lookup. Every syscall in it has run on real hardware. |
 | `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate and then starts a shell. |
-| `crates/plexosd` | Health gate and boot-counter clearing. No management API yet. |
+| `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, and a read-only page. 62 tests. The routes have been exercised over real HTTP on the build host; the page has never been opened in a browser on the appliance. |
 | `buildroot/` | Builds. defconfig, kernel fragment, and packages for `plexos-init`, `plexosd`, `plexos-gpu` and `plexos-systemd-boot`. |
 | `post-image.sh` | All six stages run, and produce an image that boots on hardware. |
 | Installer, Plex provisioning, updater | Not started. |
@@ -52,10 +52,18 @@ Everything else is cheap to revise. Prefer revising it.
 The health gate runs and `plexosd` clears the boot try counter, so a good slot becomes
 permanent — confirmed by the entry on the ESP being renamed.
 
+Since then `plexosd --serve` brings up wired Ethernet and serves a status console on
+port 80 — the GPU verdict, the health gate, the network and the slot. `plexos-init`
+spawns it after the gate and before the shell, which is the only ordering ADR-0005
+permits. Reading a diagnostic no longer means transcribing it off a 2160x1440 panel.
+
 Next, in order:
 
-1. **Run `plexos-gpu` on the reference laptop.** It has 41 tests and has never seen a
-   real GPU. This is the question the project exists to answer and it is still open.
+1. **Run `plexos-gpu` on the reference laptop.** It has 41 tests and has now seen
+   exactly one real GPU — an NVIDIA GTX 1060 on the build host, which it correctly
+   reported as unsupported. It has still never seen the UHD 620 it was written for.
+   This is the question the project exists to answer and it is still open. The status
+   console exists partly to make the answer readable when it arrives.
 2. **Plex provisioning** (ADR-0010) and app-image mounting (ADR-0007). Until Plex is
    installed the health gate's `plex-http` check reports `NotApplicable`, which is
    correct but means the gate is weaker than ADR-0005 intends.
@@ -104,6 +112,20 @@ unsigned, so Secure Boot must be off.
   than opening a `by-partlabel` path.
 - **The boot health gate must check Plex on loopback only.** USB Ethernet enumerates
   seconds after PCI; a gate that waited for the network would roll back good updates.
+- **`carrier` is unreadable until the interface is up.** sysfs returns `EINVAL`, not
+  `0`, on an administratively down interface. So "wait for a cable" cannot come first:
+  every candidate has to be brought up before its carrier means anything, and code
+  that treats the read failure as an error will abort enumeration on a machine whose
+  link is merely not up yet — the normal state early in boot.
+- **Bridges and `veth` pairs are `ARPHRD_ETHER` and report a carrier.** Interface type
+  alone cannot tell a network card from `docker0`, and virtual devices sort before the
+  real one by name. Only hardware has a `device` symlink in sysfs; that is the
+  discriminator. The appliance has no bridges today, which is exactly why this is worth
+  encoding before something adds one.
+- **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
+  higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
+  where the port is fine and something else holds it. Match the remedy to the error
+  kind, not to the operation that failed.
 
 ## Reference hardware
 

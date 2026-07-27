@@ -32,8 +32,11 @@
 use std::fmt;
 use std::path::Path;
 
+use serde::Serialize;
+
 /// The outcome of one check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Status {
     /// The condition holds.
     Pass,
@@ -44,7 +47,7 @@ pub enum Status {
 }
 
 /// One condition, with enough detail to act on when it fails.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Check {
     /// Short name, e.g. `var-writable`.
     pub name: &'static str,
@@ -66,7 +69,7 @@ impl fmt::Display for Check {
 }
 
 /// The whole gate.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Health {
     /// Every check, in the order run.
     pub checks: Vec<Check>,
@@ -92,6 +95,29 @@ impl Health {
             .iter()
             .filter(|c| c.status == Status::Fail)
             .collect()
+    }
+}
+
+/// Runs the whole gate against the running system.
+///
+/// Lives here rather than in `main` because the status console reports the same
+/// verdict the gate reached, and two lists of checks that drifted apart would be worse
+/// than no console at all — the page would show a healthy machine that had in fact
+/// rolled back.
+#[must_use]
+pub fn run_all() -> Health {
+    use plexos_types::paths;
+
+    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+
+    Health {
+        checks: vec![
+            check_var_writable(Path::new(paths::VAR)),
+            check_usr_verified(&mounts),
+            // Plex is not in the image yet. check_plex reports NotApplicable rather
+            // than passing, so an absent Plex cannot be mistaken for a working one.
+            check_plex(Path::new(paths::PLEX_APPS), &|| false),
+        ],
     }
 }
 

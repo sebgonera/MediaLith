@@ -8,22 +8,26 @@
 //! Exit status is the gate's verdict: success only when the boot is healthy. That
 //! makes it usable as a plain command as well as from `plexos-init`.
 
-use std::path::Path;
 use std::process::ExitCode;
 
-use plexos_types::paths;
+use plexosd::console;
 use plexosd::esp;
-use plexosd::health::{self, Health};
+use plexosd::health::Health;
 
 const USAGE: &str = "\
 plexosd — PlexOS management daemon
 
 USAGE:
     plexosd [--check] [--esp <device>]
+    plexosd --serve [--port <n>]
 
 OPTIONS:
     --check          Report the health gate without clearing the boot counter
     --esp <device>   ESP to clear the counter on (default: found by partition label)
+    --serve          Bring the network up and serve the status console, staying in
+                     the foreground. Does not run the gate: by the time this starts,
+                     the gate has already returned its verdict.
+    --port <n>       Port for --serve (default: 80)
     --help           Show this message
 
 Exit status is the verdict: 0 only when the boot is healthy.
@@ -33,20 +37,6 @@ Exit status is the verdict: 0 only when the boot is healthy.
 /// through `/dev/disk/by-partlabel/`, because that directory is made by `udev` and
 /// this system has none — the same absence `plexos-init` deals with at boot.
 const ESP_LABEL: &str = plexos_types::partition::LABEL_ESP;
-
-fn run_checks() -> Health {
-    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
-
-    Health {
-        checks: vec![
-            health::check_var_writable(Path::new(paths::VAR)),
-            health::check_usr_verified(&mounts),
-            // Plex is not in the image yet. check_plex reports NotApplicable rather
-            // than passing, so an absent Plex cannot be mistaken for a working one.
-            health::check_plex(Path::new(paths::PLEX_APPS), &|| false),
-        ],
-    }
-}
 
 fn clear_counter(device: &str) -> Result<String, String> {
     let mut outcome = String::new();
@@ -101,12 +91,28 @@ fn clear_counter(device: &str) -> Result<String, String> {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut check_only = false;
+    let mut serve = false;
+    let mut port = console::DEFAULT_PORT;
     let mut esp_device: Option<String> = None;
 
     let mut tokens = args.iter();
     while let Some(token) = tokens.next() {
         match token.as_str() {
             "--check" => check_only = true,
+            "--serve" => serve = true,
+            "--port" => {
+                let Some(value) = tokens.next() else {
+                    eprintln!("plexosd: --port needs a value");
+                    return ExitCode::from(64);
+                };
+                match value.parse() {
+                    Ok(parsed) => port = parsed,
+                    Err(error) => {
+                        eprintln!("plexosd: --port {value:?} is not a port number: {error}");
+                        return ExitCode::from(64);
+                    }
+                }
+            }
             "--help" | "-h" => {
                 print!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -126,7 +132,22 @@ fn main() -> ExitCode {
         }
     }
 
-    let health = run_checks();
+    // Deliberately before the gate runs, and mutually exclusive with it. --serve is
+    // the daemon that comes after the boot decision; running the gate here as well
+    // would write the health probe to /var a second time and print a verdict nobody
+    // asked this invocation for.
+    if serve {
+        let mut log = |line: &str| println!("plexosd: {line}");
+        return match console::run(port, &mut log) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("plexosd: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    let health: Health = plexosd::health::run_all();
     println!("plexosd: boot health");
     for check in &health.checks {
         println!("  {check}");

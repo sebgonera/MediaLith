@@ -113,6 +113,23 @@ fn supervise_system() -> ExitCode {
         )),
     }
 
+    // Only now, with the verdict already recorded, may anything touch the network.
+    // health.rs forbids the gate from depending on it: Ethernet arrives over USB,
+    // which enumerates seconds after PCI, and a gate that waited for an address would
+    // roll back a perfectly good update because a dongle was slow. Spawned rather
+    // than run, for the same reason — it waits up to 30 s for a link, and the shell
+    // must not wait behind it.
+    //
+    // Its failure is not this function's business. A machine with no cable still
+    // boots, and still has a console on the screen saying so.
+    match std::process::Command::new(PLEXOSD).arg("--serve").spawn() {
+        Ok(_) => log.line("status console starting; it will print its URL when the link is up"),
+        Err(error) => log.line(&format!(
+            "could not start the status console: {error}. The system is otherwise \
+             unaffected — the shell below is the whole diagnostic surface without it."
+        )),
+    }
+
     log.line("no supervisor yet: starting a shell (ARCHITECTURE.md section 2, step 6)");
 
     match plexos_sys::process::exec(DEBUG_SHELL, &[]) {

@@ -1,0 +1,374 @@
+<!doctype html>
+<!--
+  The PlexOS status console.
+
+  Embedded into the plexosd binary with include_str!, because /usr is read-only and
+  sealed by dm-verity: there is no directory to drop assets into at runtime, and a file
+  the daemon expected but the image did not carry would fail at request time rather
+  than at build time.
+
+  Everything is inline for the same reason there is no framework on the server side.
+  The appliance has no route to a CDN — it may have no route anywhere — so a stylesheet
+  or font fetched from the internet would render this page unstyled in exactly the
+  situation someone opens it: a machine whose network is not working.
+
+  No build step. This file is what ships.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PlexOS</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --ink: #16191d;
+    --muted: #5c6470;
+    --line: #dfe3e8;
+    --ready: #1a7f4b;
+    --degraded: #9a6400;
+    --unavailable: #b3261e;
+    --accent: #2f5fd0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171b;
+      --card: #1c2026;
+      --ink: #e8eaed;
+      --muted: #98a1ad;
+      --line: #2c323a;
+      --ready: #4ecb8b;
+      --degraded: #e0a83a;
+      --unavailable: #ef6a63;
+      --accent: #7fa5f5;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 0 1rem 3rem;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  .wrap { max-width: 60rem; margin: 0 auto; }
+
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: .75rem;
+    padding: 1.75rem 0 1.25rem;
+    border-bottom: 1px solid var(--line);
+  }
+  header h1 { margin: 0; font-size: 1.4rem; letter-spacing: -.01em; }
+  header .version { color: var(--muted); font-size: .9rem; }
+
+  .badge {
+    font-size: .75rem;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    padding: .2rem .5rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  .hero {
+    margin: 1.5rem 0;
+    padding: 1.25rem;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--muted);
+    border-radius: 10px;
+  }
+  .hero.ready       { border-left-color: var(--ready); }
+  .hero.degraded    { border-left-color: var(--degraded); }
+  .hero.unavailable { border-left-color: var(--unavailable); }
+
+  .hero h2 {
+    margin: 0 0 .25rem;
+    font-size: 1.5rem;
+    letter-spacing: -.01em;
+  }
+  .hero.ready h2       { color: var(--ready); }
+  .hero.degraded h2    { color: var(--degraded); }
+  .hero.unavailable h2 { color: var(--unavailable); }
+  .hero p.lead { margin: 0; color: var(--muted); }
+
+  .findings { list-style: none; margin: 1rem 0 0; padding: 0; display: grid; gap: .75rem; }
+  .findings li {
+    padding: .75rem .9rem;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--bg);
+  }
+  .findings .summary { display: block; font-weight: 600; }
+  .findings .remedy { display: block; margin-top: .3rem; color: var(--muted); font-size: .93rem; }
+  .sev {
+    font-size: .7rem;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    font-weight: 700;
+    margin-right: .45rem;
+  }
+  .sev.critical { color: var(--unavailable); }
+  .sev.warning  { color: var(--degraded); }
+  .sev.info     { color: var(--accent); }
+
+  .grid {
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 1rem 1.1rem;
+  }
+  .card h3 {
+    margin: 0 0 .75rem;
+    font-size: .78rem;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--muted);
+  }
+
+  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: .4rem .9rem; }
+  dt { color: var(--muted); font-size: .9rem; }
+  dd { margin: 0; overflow-wrap: anywhere; }
+
+  .checks { list-style: none; margin: 0; padding: 0; display: grid; gap: .6rem; }
+  .checks li { display: grid; grid-template-columns: 3.2rem 1fr; gap: .6rem; align-items: start; }
+  .mark { font-size: .7rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding-top: .18rem; }
+  .mark.pass { color: var(--ready); }
+  .mark.fail { color: var(--unavailable); }
+  .mark.not-applicable { color: var(--muted); }
+  .checks .name { font-weight: 600; }
+  .checks .detail { color: var(--muted); font-size: .92rem; }
+
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .88em; }
+
+  table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+  th, td { text-align: left; padding: .35rem .5rem .35rem 0; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; }
+  tr:last-child td { border-bottom: 0; }
+
+  .scroll { overflow-x: auto; }
+
+  footer { margin-top: 2rem; color: var(--muted); font-size: .85rem; }
+
+  .error {
+    margin: 1.5rem 0;
+    padding: 1rem 1.1rem;
+    border: 1px solid var(--unavailable);
+    border-radius: 10px;
+    color: var(--unavailable);
+    background: var(--card);
+  }
+  .empty { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 id="product">PlexOS</h1>
+    <span class="version" id="version"></span>
+    <span class="badge" id="slot" hidden></span>
+    <span class="badge" id="gate" hidden></span>
+  </header>
+
+  <main id="main" aria-live="polite">
+    <p class="empty">Loading…</p>
+  </main>
+
+  <footer>
+    <span id="uptime"></span>
+    <span id="refreshed"></span>
+  </footer>
+</div>
+
+<script>
+"use strict";
+
+// The page is served from the appliance itself, so the API is always same-origin.
+const ENDPOINT = "/api/status";
+const REFRESH_MS = 10000;
+
+const VERDICT = {
+  ready:       ["Hardware transcoding is ready",     "Plex will transcode on the GPU."],
+  degraded:    ["Hardware transcoding is degraded",  "It works, but something below will make it slower or worse."],
+  unavailable: ["Hardware transcoding unavailable",  "Plex will transcode on the CPU. Expect stutter on high-bitrate files."],
+};
+
+/** Escapes text for insertion into HTML. */
+function esc(value) {
+  if (value === null || value === undefined) return "";
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+/** "3 days, 4 h 12 min" — a duration a person reads, not a second count. */
+function humanUptime(seconds) {
+  if (seconds === null || seconds === undefined) return "";
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const parts = [];
+  if (d) parts.push(d + (d === 1 ? " day" : " days"));
+  if (h) parts.push(h + " h");
+  if (!d) parts.push(m + " min");
+  return "Up " + parts.join(" ");
+}
+
+function gpuSection(gpu) {
+  const [title, lead] = VERDICT[gpu.health] || ["Hardware transcoding: unknown", ""];
+
+  const findings = (gpu.findings || []).map(f => `
+    <li>
+      <span class="summary"><span class="sev ${esc(f.severity)}">${esc(f.severity)}</span>${esc(f.summary)}</span>
+      ${f.remedy ? `<span class="remedy">${esc(f.remedy)}</span>` : ""}
+    </li>`).join("");
+
+  return `
+    <section class="hero ${esc(gpu.health)}">
+      <h2>${esc(title)}</h2>
+      <p class="lead">${esc(lead)}</p>
+      ${findings ? `<ul class="findings">${findings}</ul>` : ""}
+    </section>`;
+}
+
+function devicesCard(gpu) {
+  const rows = (gpu.gpus || []).map(d => `
+    <tr>
+      <td class="mono">${esc(d.node)}</td>
+      <td>${esc(d.model || d.vendor)}</td>
+      <td class="mono">${esc(d.kernel_driver)}</td>
+    </tr>`).join("");
+
+  return `
+    <div class="card">
+      <h3>Graphics devices</h3>
+      ${rows
+        ? `<div class="scroll"><table>
+             <thead><tr><th>Node</th><th>Device</th><th>Driver</th></tr></thead>
+             <tbody>${rows}</tbody>
+           </table></div>`
+        : `<p class="empty">No graphics device found. Without one there is nothing to transcode with.</p>`}
+    </div>`;
+}
+
+function healthCard(status) {
+  const items = (status.health?.checks || []).map(c => `
+    <li>
+      <span class="mark ${esc(c.status)}">${c.status === "not-applicable" ? "n/a" : esc(c.status)}</span>
+      <span><span class="name">${esc(c.name)}</span><br><span class="detail">${esc(c.detail)}</span></span>
+    </li>`).join("");
+
+  return `
+    <div class="card">
+      <h3>Boot health gate</h3>
+      ${items ? `<ul class="checks">${items}</ul>` : `<p class="empty">No checks reported.</p>`}
+    </div>`;
+}
+
+function networkCard(net) {
+  const rows = (net.interfaces || [])
+    .filter(i => i.kind !== "loopback")
+    .map(i => `
+      <tr>
+        <td class="mono">${esc(i.name)}</td>
+        <td>${esc(i.kind)}</td>
+        <td>${i.carrier ? "link" : "no link"}</td>
+        <td class="mono">${esc((i.addresses || []).join(", ")) || "—"}</td>
+      </tr>`).join("");
+
+  return `
+    <div class="card">
+      <h3>Network</h3>
+      ${rows
+        ? `<div class="scroll"><table>
+             <thead><tr><th>Interface</th><th>Kind</th><th>Link</th><th>Address</th></tr></thead>
+             <tbody>${rows}</tbody>
+           </table></div>`
+        : `<p class="empty">No interface besides loopback. On this hardware Ethernet arrives over USB — check the adapter is plugged in.</p>`}
+    </div>`;
+}
+
+function systemCard(status) {
+  const p = status.product || {};
+  return `
+    <div class="card">
+      <h3>System</h3>
+      <dl>
+        <dt>Slot</dt><dd class="mono">${esc(p.slot) || "unknown"}</dd>
+        <dt>Version</dt><dd class="mono">${esc(p.version) || "unknown"}</dd>
+        <dt>Root hash</dt><dd class="mono">${esc(p.root_hash) || "unknown"}</dd>
+      </dl>
+    </div>`;
+}
+
+function render(status) {
+  const p = status.product || {};
+  document.getElementById("product").textContent = p.name || "PlexOS";
+  document.getElementById("version").textContent = p.version ? "v" + p.version : "";
+
+  const slot = document.getElementById("slot");
+  slot.hidden = !p.slot;
+  slot.textContent = p.slot ? "slot " + p.slot : "";
+
+  const gate = document.getElementById("gate");
+  gate.hidden = false;
+  gate.textContent = status.healthy ? "boot healthy" : "boot NOT healthy";
+  gate.style.color = status.healthy ? "var(--ready)" : "var(--unavailable)";
+  gate.style.borderColor = status.healthy ? "var(--ready)" : "var(--unavailable)";
+
+  document.getElementById("main").innerHTML =
+    gpuSection(status.gpu || {}) +
+    `<div class="grid">
+       ${healthCard(status)}
+       ${devicesCard(status.gpu || {})}
+       ${networkCard(status.network || {})}
+       ${systemCard(status)}
+     </div>`;
+
+  document.getElementById("uptime").textContent = humanUptime(status.uptime_seconds);
+  document.getElementById("refreshed").textContent =
+    " · refreshed " + new Date().toLocaleTimeString();
+}
+
+function renderError(error) {
+  document.getElementById("main").innerHTML = `
+    <div class="error">
+      <strong>Could not read the status from this machine.</strong><br>
+      ${esc(error)}<br>
+      The page is served by plexosd, so if this persists the daemon has stopped and the
+      console on the machine itself is the place to look.
+    </div>`;
+}
+
+async function tick() {
+  try {
+    const response = await fetch(ENDPOINT, { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    render(await response.json());
+  } catch (error) {
+    renderError(error.message || error);
+  }
+}
+
+tick();
+setInterval(tick, REFRESH_MS);
+</script>
+</body>
+</html>

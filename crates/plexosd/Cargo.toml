@@ -8,8 +8,14 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# The status console reports the GPU verdict, so it calls the diagnostic as a library
+# rather than shelling out to the binary and parsing it back. It also brings the
+# `Environment` trait, which is what makes the network module testable without a NIC.
+plexos-gpu = { path = "../plexos-gpu" }
 plexos-sys = { path = "../plexos-sys" }
 plexos-types = { path = "../plexos-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
