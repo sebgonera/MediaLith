@@ -42,20 +42,16 @@ Everything else is cheap to revise. Prefer revising it.
 | `crates/plexos-gpu` | Done as a diagnostic tool, 41 tests. Never run against a real GPU. |
 | `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec, partition-label lookup. Every syscall in it has run on real hardware. |
 | `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate, spawns the status console, and then starts a shell. 50 tests. |
-| `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, and a read-only page. 71 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
+| `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, and a read-only page. 82 tests, including the device token of ADR-0013. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
+| `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store. 64 tests. Runs end to end on the build host against real Plex downloads; never run on the appliance. |
 | `buildroot/` | Builds. defconfig, kernel fragment, and packages for `plexos-init`, `plexosd`, `plexos-gpu` and `plexos-systemd-boot`. |
 | `post-image.sh` | All six stages run, and produce an image that boots on hardware. |
-| Installer, Plex provisioning, updater | Not started. |
+| Installer, updater, first-boot wizard | Not started. |
 
 **The image boots on the reference laptop, from a USB stick, to a shell.** tmpfs root,
 `/usr` verified by dm-verity and mounted read-only, `/var` writable, `/etc` an overlay.
 The health gate runs and `plexosd` clears the boot try counter, so a good slot becomes
 permanent — confirmed by the entry on the ESP being renamed.
-
-Since then `plexosd --serve` brings up wired Ethernet and serves a status console on
-port 80 — the GPU verdict, the health gate, the network and the slot. `plexos-init`
-spawns it after the gate and before the shell, which is the only ordering ADR-0005
-permits. Reading a diagnostic no longer means transcribing it off a 2160x1440 panel.
 
 **This now works end to end on the reference laptop.** The appliance boots, verifies
 `/usr`, passes the health gate, marks the slot good, brings up the USB Ethernet adapter,
@@ -77,9 +73,12 @@ Next, in order:
    reported as unsupported. It has still never seen the UHD 620 it was written for.
    This is the question the project exists to answer and it is still open. The status
    console exists partly to make the answer readable when it arrives.
-2. **Plex provisioning** (ADR-0010) and app-image mounting (ADR-0007). Until Plex is
-   installed the health gate's `plex-http` check reports `NotApplicable`, which is
-   correct but means the gate is weaker than ADR-0005 intends.
+2. **Reach the provisioning code from the device.** `plexos-plex` does the whole job —
+   verify, unpack, build, publish, activate — and nothing on the appliance can call it.
+   What is missing is a downloader, an authenticated upload route (ADR-0013), a
+   removable-media path (ADR-0010), and mounting the image once it exists (ADR-0007).
+   Until Plex actually runs, the gate's `plex-http` check reports `NotApplicable`,
+   which is correct and means the gate is weaker than ADR-0005 intends.
 3. **`plexos-update`** — nothing implements the update flow, so rollback has never
    been exercised end to end.
 
