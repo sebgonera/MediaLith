@@ -204,8 +204,20 @@ report() {
         elapsed=0
     fi
 
-    local status errors
-    if is_running; then status="building"; else status="STOPPED"; fi
+    # "not running" is two very different states: finished, and died. The log
+    # accumulates across resumes, so the last thing in it decides -- a post-image
+    # completion after the last error means the build succeeded, however many
+    # failures were fixed along the way.
+    local status errors last_error last_done
+    last_error=$(grep -anE 'Error [0-9]+$' "${LOG}" 2>/dev/null | tail -1 | cut -d: -f1)
+    last_done=$(grep -an '>>> plexos: done' "${LOG}" 2>/dev/null | tail -1 | cut -d: -f1)
+    if is_running; then
+        status="building"
+    elif [ -n "${last_done}" ] && { [ -z "${last_error}" ] || [ "${last_done}" -gt "${last_error}" ]; }; then
+        status="COMPLETE"
+    else
+        status="STOPPED"
+    fi
     # grep -c prints its count AND exits non-zero when that count is zero, so a
     # `|| echo 0` here appends a second zero and makes the check below fire on a
     # clean build.
@@ -218,23 +230,32 @@ report() {
     else
         printf '  %-14s %s\n' "packages" "${n_done} of ~${n_total} complete"
     fi
-    printf '  %-14s %s\n' "now building" "$(current_package)"
+    if [ "${status}" = "COMPLETE" ]; then
+        # current_package reports whatever directory was touched last, which after a
+        # finished build is meaningless and reads as "still working on it".
+        printf '  %-14s %s\n' "last package" "$(current_package)"
+    else
+        printf '  %-14s %s\n' "now building" "$(current_package)"
+    fi
     printf '  %-14s %s\n' "elapsed" "$(human_time "${elapsed}")"
     printf '  %-14s %s\n' "status" "${status}"
     # The log accumulates across resumes, so a count here can be entirely historical.
     # A build that is currently running has, by definition, got past whatever those
     # errors were -- saying "errors 1" without that distinction reads as a live
     # failure and sends you off reading a log about something already fixed.
-    if [ "${status}" = "building" ] && [ "${errors}" != "0" ]; then
-        printf '  %-14s %s\n' "errors" "${errors} earlier in this log, none blocking now"
+    if [ "${status}" != "STOPPED" ] && [ "${errors}" != "0" ]; then
+        printf '  %-14s %s\n' "errors" "${errors} earlier in this log, all since resolved"
     else
         printf '  %-14s %s\n' "errors" "${errors}"
     fi
     printf '  %-14s %s\n' "disk used" "$(du -sh "${OUTPUT}" 2>/dev/null | cut -f1)"
 
-    if [ "${errors}" != "0" ]; then
+    if [ "${errors}" != "0" ] && [ "${status}" = "STOPPED" ]; then
         printf '\n  Last error:\n'
         grep -E 'Error [0-9]+$' "${LOG}" 2>/dev/null | tail -1 | sed 's/^/    /'
+    fi
+    if [ "${status}" = "COMPLETE" ]; then
+        printf '\n  Image: %s\n' "${OUTPUT}/images/plexos.img"
     fi
     if [ "${status}" = "STOPPED" ] && [ "${pct}" -lt 100 ]; then
         printf '\n  The build is not running. Resume it with:\n'
