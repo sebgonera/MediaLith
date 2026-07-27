@@ -93,10 +93,16 @@ pub fn respond(request: &Request, env: &impl Environment) -> Response {
 /// Fails only if the port cannot be bound — almost always because something else holds
 /// it, or because the daemon is not running as root and the port is below 1024.
 pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
-    match net::configure(&System, net::LINK_TIMEOUT, log) {
-        Ok(interface) => log(&format!("network configured on {}", interface.name)),
-        Err(error) => log(&format!("no network: {error}")),
-    }
+    let configured = match net::configure(&System, net::LINK_TIMEOUT, log) {
+        Ok(interface) => {
+            log(&format!("network configured on {}", interface.name));
+            Some(interface)
+        }
+        Err(error) => {
+            log(&format!("no network: {error}"));
+            None
+        }
+    };
 
     let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
     let listener = TcpListener::bind(address).map_err(|error| {
@@ -121,10 +127,26 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
         )
     })?;
 
-    for found in net::addresses(&System) {
-        log(&format!("console at http://{}/", found.ip()));
-    }
     log(&format!("console listening on {address}"));
+
+    // After binding, so the socket exists as early as possible, and after configure
+    // rather than inside it, because udhcpc is spawned and never waited on. Printing
+    // the URL without this waiting step prints it before any lease can exist, which is
+    // to say never — the console worked and said nothing a person could act on.
+    if let Some(interface) = configured {
+        match net::wait_for_address(&System, &interface.name, net::LEASE_TIMEOUT, log) {
+            Some(found) => log(&format!("console at http://{}/", found.ip())),
+            None => log(&format!(
+                "{} is up but DHCP produced no address in {}s. The console is serving on \
+                 port {port} and unreachable until the interface has one. Check for a \
+                 DHCP server on this segment, or set an address by hand with \
+                 `ip addr add <a.b.c.d/nn> dev {}`.",
+                interface.name,
+                net::LEASE_TIMEOUT.as_secs(),
+                interface.name
+            )),
+        }
+    }
 
     http::serve(&listener, |request| respond(request, &System), log)
 }

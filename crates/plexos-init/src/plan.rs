@@ -267,6 +267,27 @@ pub fn boot_plan(args: &BootArgs, state: StateAction) -> Vec<BootStep> {
         });
     }
 
+    // /tmp, which nothing else creates. The root is a tmpfs assembled here from
+    // nothing, so the /tmp in the Buildroot rootfs never reaches the running system,
+    // and its absence stays invisible until something calls mktemp. busybox then
+    // reports the directory it could not use rather than the one it wanted, giving
+    // `mktemp: : No such file or directory` — a message with an empty path in it that
+    // says nothing about /tmp. udhcpc's lease script hit exactly this and lost the
+    // machine its DNS configuration.
+    //
+    // A mount rather than a plain directory, so it can carry mode=1777. ADR-0007 runs
+    // Plex unprivileged, and a 0755 /tmp owned by root is useless to it.
+    let tmp_target = under_sysroot("/tmp");
+    steps.push(BootStep::CreateDir {
+        path: tmp_target.clone(),
+    });
+    steps.push(BootStep::Mount {
+        source: "tmpfs".to_owned(),
+        target: tmp_target,
+        fstype: "tmpfs",
+        options: "nosuid,nodev,mode=1777",
+    });
+
     // /var carries executable app images (ADR-0007), so nosuid,nodev is not optional.
     let var_target = under_sysroot(paths::VAR);
     steps.push(BootStep::CreateDir {
@@ -452,6 +473,47 @@ mod tests {
         for required in ["/bin", "/sbin", "/lib", "/lib64"] {
             assert!(links.contains(&required), "{required} link missing");
         }
+    }
+
+    #[test]
+    fn the_root_carries_a_writable_tmp() {
+        // The root is a tmpfs built here from nothing, so every directory on it is one
+        // this plan put there. /tmp was not among them, and nothing said so: the first
+        // symptom was `mktemp: : No such file or directory` out of udhcpc's lease
+        // script -- a message naming an empty path, from a program that had been asked
+        // for a temporary file in a directory that did not exist.
+        let steps = plan_for(Slot::A);
+        let tmp = under_sysroot("/tmp");
+
+        assert!(
+            steps.iter().any(|s| matches!(
+                s,
+                BootStep::Mount { target, fstype, .. } if *target == tmp && *fstype == "tmpfs"
+            )),
+            "the plan must put a tmpfs on {tmp}: {steps:?}"
+        );
+    }
+
+    #[test]
+    fn tmp_is_world_writable_and_sticky() {
+        // ADR-0007 runs Plex unprivileged. A /tmp at the default 0755 owned by root is
+        // present, passes the test above, and is still unusable to the one process this
+        // appliance exists to run.
+        let steps = plan_for(Slot::A);
+        let tmp = under_sysroot("/tmp");
+        let options = steps
+            .iter()
+            .find_map(|s| match s {
+                BootStep::Mount {
+                    target, options, ..
+                } if *target == tmp => Some(*options),
+                _ => None,
+            })
+            .expect("a /tmp mount");
+
+        assert!(options.contains("mode=1777"), "got {options:?}");
+        assert!(options.contains("nosuid"), "got {options:?}");
+        assert!(options.contains("nodev"), "got {options:?}");
     }
 
     #[test]

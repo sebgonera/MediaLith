@@ -327,6 +327,51 @@ pub fn addresses(env: &impl Environment) -> Vec<Address> {
         .collect()
 }
 
+/// How long to wait for DHCP to produce an address, once the link is up.
+///
+/// Shorter than [`LINK_TIMEOUT`] because a different thing is being waited for. That one
+/// waits out USB enumeration, measured in tens of seconds; a DHCP server on the same
+/// segment answers in one or two, and if it has not answered in fifteen it is not going
+/// to.
+pub const LEASE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Waits for an IPv4 address to appear on `interface`.
+///
+/// Separate from [`configure`] because `udhcpc` is spawned and never waited on — it
+/// stays resident to renew the lease, so the only way to learn that an address arrived
+/// is to look for it.
+///
+/// Without this the console printed its URL exactly once, at the instant udhcpc was
+/// started, which is always before any lease exists. The single line a person actually
+/// needs — the address to type into a browser — was therefore never shown, on a machine
+/// whose networking was working.
+pub fn wait_for_address(
+    env: &impl Environment,
+    interface: &str,
+    timeout: Duration,
+    log: &mut dyn FnMut(&str),
+) -> Option<Address> {
+    let deadline = Instant::now() + timeout;
+    let mut announced = false;
+
+    loop {
+        if let Some(found) = addresses(env)
+            .into_iter()
+            .find(|a| a.interface == interface)
+        {
+            return Some(found);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        if !announced {
+            announced = true;
+            log("waiting for a DHCP lease");
+        }
+        sleep(POLL);
+    }
+}
+
 /// Describes one interface for the timeout message, in the terms that pick the remedy.
 ///
 /// `operstate` alone is not enough: it reads `down` both for an interface nothing has
@@ -613,6 +658,52 @@ mod tests {
     /// the environment, and a fixture that put it in `/bin` would test nothing.
     fn with_ip(fixture: Fixture) -> Fixture {
         fixture.file("/sbin/ip", "")
+    }
+
+    /// A machine where `ip addr show` reports nothing until DHCP has had a moment.
+    ///
+    /// The same shape of problem as [`LateUsbAdapter`] and equally invisible to a
+    /// fixture: the answer has to change between calls, and an immutable one can only
+    /// describe a lease that was always there.
+    struct LateLease {
+        /// Queries remaining before the address appears.
+        arrives_in: Cell<u32>,
+    }
+
+    impl LateLease {
+        fn new(arrives_in: u32) -> Self {
+            Self {
+                arrives_in: Cell::new(arrives_in),
+            }
+        }
+    }
+
+    impl Environment for LateLease {
+        fn list_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+            if path == Path::new("/sbin") {
+                return Ok(vec![PathBuf::from("/sbin/ip")]);
+            }
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+
+        fn read(&self, _path: &Path) -> io::Result<String> {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+
+        fn read_link(&self, _path: &Path) -> io::Result<PathBuf> {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+
+        fn run(&self, _program: &str, _args: &[&str]) -> io::Result<String> {
+            let remaining = self.arrives_in.get();
+            if remaining > 0 {
+                self.arrives_in.set(remaining - 1);
+                // What udhcpc's interface looks like before the lease lands: up, and
+                // carrying nothing but a link-local v6 address, which `-4` hides.
+                return Ok(String::new());
+            }
+            Ok("2: eth0    inet 192.168.2.42/24 scope global eth0\n".to_owned())
+        }
     }
 
     /// A machine whose USB Ethernet adapter enumerates a few passes into the wait, and
@@ -968,6 +1059,29 @@ mod tests {
             lines.iter().any(|l| l.contains("image fault")),
             "and says whose problem it is: {lines:?}"
         );
+    }
+
+    #[test]
+    fn an_address_that_arrives_after_dhcp_starts_is_still_reported() {
+        // udhcpc is spawned, not waited on, so at the moment it starts there is never a
+        // lease. Looking once means looking too early, every time -- which is why the
+        // console printed no URL on a machine whose network was working.
+        let env = LateLease::new(2);
+        let found = wait_for_address(&env, "eth0", Duration::from_secs(10), &mut |_| {})
+            .expect("the lease arrives a moment later and must still be seen");
+        assert_eq!(found.ip(), "192.168.2.42");
+    }
+
+    #[test]
+    fn no_lease_within_the_timeout_is_reported_as_absence_rather_than_waited_on_forever() {
+        // A machine with no DHCP server must still finish booting and serve its console.
+        let env = LateLease::new(u32::MAX);
+        let mut lines = Vec::new();
+        let found = wait_for_address(&env, "eth0", Duration::from_millis(200), &mut |m| {
+            lines.push(m.to_owned());
+        });
+        assert!(found.is_none());
+        assert_eq!(lines.len(), 1, "the wait is announced exactly once");
     }
 
     #[test]

@@ -41,8 +41,8 @@ Everything else is cheap to revise. Prefer revising it.
 | `crates/plexos-types` | Done. Formats and the layout emitter, 41 tests. |
 | `crates/plexos-gpu` | Done as a diagnostic tool, 41 tests. Never run against a real GPU. |
 | `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec, partition-label lookup. Every syscall in it has run on real hardware. |
-| `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate and then starts a shell. |
-| `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, and a read-only page. 69 tests. The routes have been exercised over real HTTP on the build host. Network bring-up has now run on the reference laptop, where it failed twice — once for bring-up ordering, once for `PATH` — and was fixed both times; the page has still never been opened in a browser on the appliance. |
+| `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate, spawns the status console, and then starts a shell. 50 tests. |
+| `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, and a read-only page. 71 tests. The routes have been exercised over real HTTP on the build host. Network bring-up has now run on the reference laptop, where it failed twice — once for bring-up ordering, once for `PATH` — and was fixed both times; the page has still never been opened in a browser on the appliance. |
 | `buildroot/` | Builds. defconfig, kernel fragment, and packages for `plexos-init`, `plexosd`, `plexos-gpu` and `plexos-systemd-boot`. |
 | `post-image.sh` | All six stages run, and produce an image that boots on hardware. |
 | Installer, Plex provisioning, updater | Not started. |
@@ -57,11 +57,12 @@ port 80 — the GPU verdict, the health gate, the network and the slot. `plexos-
 spawns it after the gate and before the shell, which is the only ordering ADR-0005
 permits. Reading a diagnostic no longer means transcribing it off a 2160x1440 panel.
 
-The first boot of that console found the bug in the trap list below: the links were
-brought up once before the wait, so the USB adapter — which appears *during* the wait —
-was never brought up at all, and thirty seconds later the daemon blamed a cable that
-was fine. The console itself has still not been opened in a browser; that is the next
-thing a boot settles.
+Three boots of that console found three faults, all in the trap list below: links
+brought up once before the wait rather than during it, so the USB adapter that appears
+*during* the wait was never raised; `ip` and `udhcpc` invoked by name from a process
+with no `PATH`; and no `/tmp` on the assembled root, which broke udhcpc's lease script.
+The link now comes up and `udhcpc` runs. Still unsettled: whether a lease is obtained,
+and what the page looks like in a browser.
 
 Next, in order:
 
@@ -136,6 +137,12 @@ unsigned, so Secure Boot must be off.
   for both, and they take opposite remedies. Only `IFF_UP` in sysfs `flags` separates
   them. A diagnostic that reports `operstate` alone will send someone to check a cable
   that was never the problem.
+- **The running root contains only what `plan.rs` puts there.** It is a tmpfs assembled
+  from nothing, so directories present in the Buildroot rootfs — `/tmp` among them —
+  never reach the booted system. `/tmp` was missing for the whole life of the project
+  and nothing noticed until udhcpc's lease script called `mktemp`, which failed with
+  `mktemp: : No such file or directory`: a message whose empty path names neither
+  `/tmp` nor the script's intent. Anything the plan does not create does not exist.
 - **There is no `PATH`, so run programs by absolute path.** PID 1 gets the environment
   the kernel provides, which is empty, and everything it spawns inherits that. glibc's
   `execvp` then falls back to `confstr(_CS_PATH)` — `/bin:/usr/bin`, confirmed with
