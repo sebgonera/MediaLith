@@ -8,7 +8,7 @@
 //! The first image built failed here, several steps into a boot that was otherwise
 //! working: "opening verity hash device /dev/disk/by-partlabel/usr_a_hash: No such
 //! file or directory". The labels were correct; the symlink farm simply did not
-//! exist. It is the same absence that made [`plexos_sys::dm`] create
+//! exist. It is the same absence that made [`crate::dm`] create
 //! `/dev/mapper/<name>` itself.
 //!
 //! The kernel already knows the answer. Its GPT parser copies each partition name

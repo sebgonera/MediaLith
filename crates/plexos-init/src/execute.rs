@@ -236,8 +236,8 @@ fn perform(step: &BootStep, log: &mut dyn Log) -> io::Result<()> {
             // The plan names devices by GPT label, which is how ADR-0003 carries
             // slot identity. udev is what normally turns those into paths, and the
             // initrd has none, so resolve them here.
-            let data_device = crate::device::resolve(data_device, &mut |m| log.line(m))?;
-            let hash_device = crate::device::resolve(hash_device, &mut |m| log.line(m))?;
+            let data_device = plexos_sys::device::resolve(data_device, &mut |m| log.line(m))?;
+            let hash_device = plexos_sys::device::resolve(hash_device, &mut |m| log.line(m))?;
             let superblock = read_superblock(&hash_device)?;
             log.line(&format!(
                 "verity: {} blocks of {} bytes, {}",
@@ -261,7 +261,7 @@ fn perform(step: &BootStep, log: &mut dyn Log) -> io::Result<()> {
             fstype,
             options,
         } => {
-            let source = crate::device::resolve(source, &mut |m| log.line(m))?;
+            let source = plexos_sys::device::resolve(source, &mut |m| log.line(m))?;
             mount::mount(&source, target, fstype, options)
         }
 

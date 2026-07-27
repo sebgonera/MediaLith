@@ -29,9 +29,10 @@ OPTIONS:
 Exit status is the verdict: 0 only when the boot is healthy.
 ";
 
-/// Where the ESP is, when nothing says otherwise. Resolved the same way every other
-/// partition is: by label, because that is where slot identity lives (ADR-0003).
-const ESP_BY_LABEL: &str = "/dev/disk/by-partlabel/esp";
+/// The ESP's GPT label, from the frozen layout. Resolved through sysfs rather than
+/// through `/dev/disk/by-partlabel/`, because that directory is made by `udev` and
+/// this system has none — the same absence `plexos-init` deals with at boot.
+const ESP_LABEL: &str = plexos_types::partition::LABEL_ESP;
 
 fn run_checks() -> Health {
     let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
@@ -100,7 +101,7 @@ fn clear_counter(device: &str) -> Result<String, String> {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut check_only = false;
-    let mut esp_device = ESP_BY_LABEL.to_owned();
+    let mut esp_device: Option<String> = None;
 
     let mut tokens = args.iter();
     while let Some(token) = tokens.next() {
@@ -115,7 +116,7 @@ fn main() -> ExitCode {
                     eprintln!("plexosd: --esp needs a value");
                     return ExitCode::from(64);
                 };
-                value.clone_into(&mut esp_device);
+                esp_device = Some(value.clone());
             }
             other => {
                 eprintln!("plexosd: unrecognised argument {other:?}\n");
@@ -147,7 +148,23 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    match clear_counter(&esp_device) {
+    // Resolved late: --check never needs it, and an unhealthy boot must not fail for
+    // want of an ESP it was never going to write to.
+    let device = match esp_device {
+        Some(explicit) => explicit,
+        None => match plexos_sys::device::by_partlabel(ESP_LABEL) {
+            Ok(found) => found,
+            Err(error) => {
+                eprintln!(
+                    "plexosd: healthy, but the ESP could not be found: {error}\n  \
+                     the boot counter cannot be cleared, so this slot will roll back"
+                );
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+
+    match clear_counter(&device) {
         Ok(outcome) => {
             println!("plexosd: healthy; {outcome}");
             ExitCode::SUCCESS

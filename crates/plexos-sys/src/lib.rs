@@ -35,12 +35,20 @@
 //! - One unsafe operation per block, so the justification and the operation cannot
 //!   drift apart.
 //! - Anything that can be written in safe Rust is written in safe Rust and tested as
-//!   such — see [`verity`], which is pure byte parsing and is here only because it is
-//!   the natural companion to [`dm`].
+//!   such — see [`verity`], which is pure byte parsing, and [`device`], which reads
+//!   sysfs. Neither needs `unsafe`; both are here because they are how this system
+//!   talks to the kernel, and because more than one binary needs them.
+//!
+//! That last point is why [`device`] lives here rather than in `plexos-init`, where
+//! it started. `plexosd` has to find the ESP by label to clear the boot counter, and
+//! it hits exactly the same absence of `udev` for exactly the same reason. Two copies
+//! of that logic would be two things to get wrong.
 
+pub mod device;
 pub mod dm;
 pub mod mount;
 pub mod process;
 pub mod verity;
 
+pub use device::{Partition, by_partlabel, wait_for_partlabel};
 pub use verity::{VerityError, VeritySuperblock};
