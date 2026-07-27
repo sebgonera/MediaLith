@@ -50,8 +50,29 @@ OPTIONS:
 With no options, executes the plan. Refuses unless it is PID 1.
 ";
 
+/// Reports a fatal error.
+///
+/// As PID 1 this holds the message on screen before returning, because returning
+/// panics the kernel and the panic dump scrolls the explanation away in milliseconds.
+/// That is not a theoretical concern: the first hardware boot with a working console
+/// showed "Freeing unused kernel image" followed straight by a panic, because the
+/// only failure path that held was the one at the very end.
+///
+/// Run as an ordinary command it returns immediately, so the development loop stays
+/// quick. The distinction is made by asking whether this is PID 1 rather than by
+/// remembering to call a different function at each of eight call sites.
 fn fail(message: &str) -> ExitCode {
+    eprintln!("\nplexos-init: BOOT FAILED");
     eprintln!("plexos-init: {message}");
+
+    if execute::is_pid_one() {
+        eprintln!(
+            "\nplexos-init: holding for {}s so this can be read, then PID 1 exits and \
+             the kernel panics.",
+            FAILURE_HOLD.as_secs()
+        );
+        std::thread::sleep(FAILURE_HOLD);
+    }
     ExitCode::FAILURE
 }
 
@@ -65,19 +86,6 @@ fn fail(message: &str) -> ExitCode {
 /// The cost is paid only on a failed boot, and it delays a rollback by this much per
 /// attempt — not the rollback itself, which the bootloader's counter drives.
 const FAILURE_HOLD: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Prints a fatal error, then holds it on screen.
-fn fail_visibly(message: &str) -> ExitCode {
-    eprintln!("\nplexos-init: BOOT FAILED");
-    eprintln!("plexos-init: {message}");
-    eprintln!(
-        "\nplexos-init: holding for {}s so this can be read, then PID 1 exits and the \
-         kernel panics.",
-        FAILURE_HOLD.as_secs()
-    );
-    std::thread::sleep(FAILURE_HOLD);
-    ExitCode::FAILURE
-}
 
 /// The service manager role. Not yet a supervisor: it reports that the boot
 /// succeeded and hands over to a shell, which is what docs/DEVELOPMENT.md promises a
@@ -118,6 +126,13 @@ fn supervise_system() -> ExitCode {
 
 fn main() -> ExitCode {
     let cli: Vec<String> = std::env::args().skip(1).collect();
+
+    // Printed before anything can fail. Without it, an early exit is indistinguishable
+    // from the kernel never having executed the binary at all -- both look like
+    // "Freeing unused kernel image" followed by a panic.
+    if execute::is_pid_one() {
+        eprintln!("plexos-init: starting as PID 1");
+    }
 
     let mut dry_run = false;
     let mut force = false;
@@ -233,6 +248,6 @@ fn main() -> ExitCode {
     // which replaces this process image, so the Ok arm is uninhabited.
     match execute::execute(&steps, &mut log) {
         Ok(never) => match never {},
-        Err(error) => fail_visibly(&error.to_string()),
+        Err(error) => fail(&error.to_string()),
     }
 }
