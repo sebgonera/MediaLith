@@ -42,7 +42,11 @@
 //! carrier until something has actually brought it up — the kernel's own semantics,
 //! rather than this module's assumptions about them.
 //!
-//! Still not covered: the `udhcpc` launch, and whether a lease is actually obtained.
+//! The whole path — enumeration, bring-up, `udhcpc`, lease, address — has now run on
+//! the reference laptop and produced an address the console was reached on from another
+//! machine. What remains untested rather than unverified is the `udhcpc` launch itself:
+//! it is one process spawn, and a test that mocked it would compare this module to its
+//! own assumptions, which is exactly how the three faults above survived a full suite.
 
 use std::collections::BTreeSet;
 use std::io;

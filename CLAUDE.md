@@ -42,7 +42,7 @@ Everything else is cheap to revise. Prefer revising it.
 | `crates/plexos-gpu` | Done as a diagnostic tool, 41 tests. Never run against a real GPU. |
 | `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec, partition-label lookup. Every syscall in it has run on real hardware. |
 | `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate, spawns the status console, and then starts a shell. 50 tests. |
-| `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, and a read-only page. 71 tests. The routes have been exercised over real HTTP on the build host. Network bring-up has now run on the reference laptop, where it failed twice — once for bring-up ordering, once for `PATH` — and was fixed both times; the page has still never been opened in a browser on the appliance. |
+| `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, and a read-only page. 71 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
 | `buildroot/` | Builds. defconfig, kernel fragment, and packages for `plexos-init`, `plexosd`, `plexos-gpu` and `plexos-systemd-boot`. |
 | `post-image.sh` | All six stages run, and produce an image that boots on hardware. |
 | Installer, Plex provisioning, updater | Not started. |
@@ -57,12 +57,18 @@ port 80 — the GPU verdict, the health gate, the network and the slot. `plexos-
 spawns it after the gate and before the shell, which is the only ordering ADR-0005
 permits. Reading a diagnostic no longer means transcribing it off a 2160x1440 panel.
 
-Three boots of that console found three faults, all in the trap list below: links
-brought up once before the wait rather than during it, so the USB adapter that appears
-*during* the wait was never raised; `ip` and `udhcpc` invoked by name from a process
-with no `PATH`; and no `/tmp` on the assembled root, which broke udhcpc's lease script.
-The link now comes up and `udhcpc` runs. Still unsettled: whether a lease is obtained,
-and what the page looks like in a browser.
+**This now works end to end on the reference laptop.** The appliance boots, verifies
+`/usr`, passes the health gate, marks the slot good, brings up the USB Ethernet adapter,
+takes a DHCP lease and serves its status console to a browser on another machine on the
+LAN. Reading a diagnostic no longer means transcribing it off a 2160x1440 panel.
+
+Getting there took three boots and three faults, all now in the trap list below and each
+hidden behind the one before it: links brought up once before the wait rather than
+during it, so the USB adapter that appears *during* the wait was never raised; `ip` and
+`udhcpc` invoked by name from a process with no `PATH`; and no `/tmp` at all on the
+assembled root, which broke udhcpc's lease script. The lesson worth keeping is that
+every one of them passed a full test suite, because every test described a machine
+where the thing being waited for had already happened.
 
 Next, in order:
 
