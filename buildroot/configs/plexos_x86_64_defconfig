@@ -38,6 +38,10 @@ BR2_ROOTFS_MERGED_USR=y
 
 # plexos-init is PID 1. No BusyBox init, no systemd.
 BR2_INIT_NONE=y
+# ...and here is the thing that provides it. BR2_INIT_NONE only means Buildroot
+# installs no init of its own; without this the image has no PID 1 at all and
+# post-image.sh has nothing to put in the initrd.
+BR2_PACKAGE_PLEXOS_INIT=y
 
 # ---------------------------------------------------------------------------
 # Kernel
@@ -108,6 +112,13 @@ BR2_PACKAGE_EROFS_UTILS=y
 BR2_PACKAGE_HOST_DOSFSTOOLS=y
 BR2_PACKAGE_HOST_MTOOLS=y
 BR2_PACKAGE_HOST_GPTFDISK=y
+# host veritysetup. The verity tree over the /usr image has to be computed on the
+# build host, and its root hash embedded in the UKI command line before the UKI is
+# signed (ADR-0004). The target-side BR2_PACKAGE_CRYPTSETUP above is a different
+# thing entirely: that one is for the device, this one is for the image build.
+BR2_PACKAGE_HOST_CRYPTSETUP=y
+# host mkfs.erofs comes in via BR2_TARGET_ROOTFS_EROFS, which depends on
+# host-erofs-utils (fs/erofs/erofs.mk). Not repeated here.
 
 BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_PLEXOS_PATH)/board/plexos/x86_64/post-image.sh"
 
@@ -121,9 +132,13 @@ BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_PLEXOS_PATH)/board/plexos/x86_64/po
 BR2_PACKAGE_SYSTEMD_BOOT=y
 
 # ---------------------------------------------------------------------------
-# Unresolved
+# Resolved
 # ---------------------------------------------------------------------------
 # UKI ASSEMBLY. systemd's `ukify` needs python-pefile, which Buildroot does not carry.
 # Not a problem: a UKI is the EFI stub with .osrel, .cmdline, .linux, and .initrd PE
-# sections added, which objcopy from the toolchain does. post-image.sh will do it that
-# way and avoid the dependency entirely.
+# sections added, which objcopy does. post-image.sh does it that way and avoids the
+# dependency entirely; the host objcopy was confirmed to support pei-x86-64.
+#
+# The stub itself comes from package/systemd-boot, which builds linuxx64.efi.stub
+# alongside the bootloader. Upstream Buildroot's systemd package never installs it,
+# so without that addition there would be nothing to build a UKI around.

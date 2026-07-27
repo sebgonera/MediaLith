@@ -35,7 +35,20 @@ SYSTEMD_BOOT_INSTALL_IMAGES = YES
 
 SYSTEMD_BOOT_EFI_ARCH = $(call qstrip,$(BR2_PACKAGE_SYSTEMD_BOOT_EFI_ARCH))
 SYSTEMD_BOOT_EFI_NAME = systemd-boot$(SYSTEMD_BOOT_EFI_ARCH).efi
-SYSTEMD_BOOT_NINJA_TARGET = src/boot/$(SYSTEMD_BOOT_EFI_NAME)
+
+# The UKI stub, and not an optional extra. A Unified Kernel Image *is* this stub
+# with .osrel/.cmdline/.linux/.initrd sections appended (ADR-0004), so without it
+# post-image.sh has nothing to build an image around. Upstream Buildroot's systemd
+# package never installs it, which is a second reason this package exists.
+#
+# Verified against systemd v258.7 src/boot/meson.build rather than recalled: the
+# executables are named "linux$(arch)" with name_suffix "elf.stub", and elf2efi.py
+# converts each to "<name>.efi.stub". Hence linuxx64.efi.stub on x86-64.
+SYSTEMD_BOOT_STUB_NAME = linux$(SYSTEMD_BOOT_EFI_ARCH).efi.stub
+
+SYSTEMD_BOOT_NINJA_TARGETS = \
+	src/boot/$(SYSTEMD_BOOT_EFI_NAME) \
+	src/boot/$(SYSTEMD_BOOT_STUB_NAME)
 
 # Everything off except the bootloader. systemd's meson still configures the whole
 # tree, so each subsystem has to be turned off by name; only the bootloader target
@@ -81,7 +94,7 @@ SYSTEMD_BOOT_CONF_OPTS = \
 # target argument there is not reliably parsed.
 define SYSTEMD_BOOT_BUILD_CMDS
 	$(TARGET_MAKE_ENV) $(SYSTEMD_BOOT_NINJA_ENV) \
-		$(NINJA) $(NINJA_OPTS) -C $(@D)/buildroot-build $(SYSTEMD_BOOT_NINJA_TARGET)
+		$(NINJA) $(NINJA_OPTS) -C $(@D)/buildroot-build $(SYSTEMD_BOOT_NINJA_TARGETS)
 endef
 
 # Flat in BINARIES_DIR rather than pre-arranged into an efi-part/ tree. Where the
@@ -90,8 +103,11 @@ endef
 # compiles a binary should be deciding.
 define SYSTEMD_BOOT_INSTALL_IMAGES_CMDS
 	$(INSTALL) -D -m 0644 \
-		$(@D)/buildroot-build/$(SYSTEMD_BOOT_NINJA_TARGET) \
+		$(@D)/buildroot-build/src/boot/$(SYSTEMD_BOOT_EFI_NAME) \
 		$(BINARIES_DIR)/$(SYSTEMD_BOOT_EFI_NAME)
+	$(INSTALL) -D -m 0644 \
+		$(@D)/buildroot-build/src/boot/$(SYSTEMD_BOOT_STUB_NAME) \
+		$(BINARIES_DIR)/$(SYSTEMD_BOOT_STUB_NAME)
 endef
 
 $(eval $(meson-package))
