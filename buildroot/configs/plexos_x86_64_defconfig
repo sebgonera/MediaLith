@@ -64,6 +64,13 @@ BR2_LINUX_KERNEL_LATEST_VERSION=y
 BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_PLEXOS_PATH)/board/plexos/x86_64/linux.fragment"
 BR2_LINUX_KERNEL_BZIMAGE=y
+# objtool needs libelf, and the x86-64 default config enables CONFIG_UNWINDER_ORC,
+# which needs objtool. Without this the kernel build dies on "gelf.h: No such file or
+# directory" four hours in — and nothing before that point gives any warning, because
+# the requirement comes from the architecture defaults rather than from anything in
+# linux.fragment. This builds host-elfutils rather than requiring libelf-dev on the
+# build host, keeping the dependency inside Buildroot where the rest of them live.
+BR2_LINUX_KERNEL_NEEDS_HOST_LIBELF=y
 
 # ---------------------------------------------------------------------------
 # Filesystem images
