@@ -3,6 +3,12 @@ config BR2_PACKAGE_PLEXOS_SYSTEMD_BOOT
 	depends on BR2_x86_64 || BR2_aarch64 || BR2_i386
 	depends on BR2_TOOLCHAIN_USES_GLIBC
 	select BR2_PACKAGE_GNU_EFI
+	# Buildroot refuses to build a package that lists a target dependency it has
+	# not selected: "libcap is in the dependency chain ... without selecting it
+	# or depending on it from Config.in". Both are needed only to get systemd's
+	# meson past an unconditional header check; see plexos-systemd-boot.mk.
+	select BR2_PACKAGE_LIBCAP
+	select BR2_PACKAGE_LIBXCRYPT
 	help
 	  systemd-boot, built as a plain UEFI application from systemd's
 	  source, with none of systemd itself.

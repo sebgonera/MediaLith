@@ -221,7 +221,15 @@ report() {
     printf '  %-14s %s\n' "now building" "$(current_package)"
     printf '  %-14s %s\n' "elapsed" "$(human_time "${elapsed}")"
     printf '  %-14s %s\n' "status" "${status}"
-    printf '  %-14s %s\n' "errors" "${errors}"
+    # The log accumulates across resumes, so a count here can be entirely historical.
+    # A build that is currently running has, by definition, got past whatever those
+    # errors were -- saying "errors 1" without that distinction reads as a live
+    # failure and sends you off reading a log about something already fixed.
+    if [ "${status}" = "building" ] && [ "${errors}" != "0" ]; then
+        printf '  %-14s %s\n' "errors" "${errors} earlier in this log, none blocking now"
+    else
+        printf '  %-14s %s\n' "errors" "${errors}"
+    fi
     printf '  %-14s %s\n' "disk used" "$(du -sh "${OUTPUT}" 2>/dev/null | cut -f1)"
 
     if [ "${errors}" != "0" ]; then

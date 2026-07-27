@@ -368,21 +368,29 @@ build_disk() {
     msg "building disk image"
 
     local layout_bin="${HOST_DIR}/bin/plexos-layout"
+
+    # rustup is commonly installed without modifying PATH, and Buildroot runs this
+    # script with its own PATH regardless, so looking only at PATH finds nothing on
+    # a machine that builds the workspace perfectly well. package/plexos-init does
+    # the same lookup for the same reason.
+    local cargo
+    cargo="$(command -v cargo 2>/dev/null || true)"
+    [ -n "${cargo}" ] || [ ! -x "${HOME}/.cargo/bin/cargo" ] || cargo="${HOME}/.cargo/bin/cargo"
     local -a sgdisk_args=()
     if [ -x "${layout_bin}" ]; then
         mapfile -t sgdisk_args < <("${layout_bin}" --format sgdisk)
-    elif command -v cargo >/dev/null 2>&1 && [ -f "${REPO_ROOT}/Cargo.toml" ]; then
+    elif [ -n "${cargo}" ] && [ -f "${REPO_ROOT}/Cargo.toml" ]; then
         # Bring-up path: no host package for the emitter yet, but the workspace is
         # right there. Explicit rather than silent, because it makes the image build
         # depend on a toolchain Buildroot does not manage.
         msg "  (building plexos-layout from the workspace; no host package yet)"
         mapfile -t sgdisk_args < <(
-            cargo run --quiet --manifest-path "${REPO_ROOT}/Cargo.toml" \
+            "${cargo}" run --quiet --manifest-path "${REPO_ROOT}/Cargo.toml" \
                   -p plexos-types --bin plexos-layout -- --format sgdisk
         )
     else
         die "cannot determine the partition layout" \
-            "build plexos-layout into \$HOST_DIR/bin, or make cargo available so it can be built from ${REPO_ROOT}"
+            "no plexos-layout in \$HOST_DIR/bin and no cargo on PATH or in \$HOME/.cargo/bin; install the Rust toolchain (docs/DEVELOPMENT.md)"
     fi
 
     [ "${#sgdisk_args[@]}" -gt 0 ] || die \

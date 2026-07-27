@@ -46,7 +46,35 @@ PLEXOS_SYSTEMD_BOOT_DL_SUBDIR = systemd
 PLEXOS_SYSTEMD_BOOT_LICENSE = LGPL-2.1+
 PLEXOS_SYSTEMD_BOOT_LICENSE_FILES = LICENSE.LGPL2.1
 
-PLEXOS_SYSTEMD_BOOT_DEPENDENCIES = host-pkgconf gnu-efi host-python-pyelftools
+# Taken from Buildroot's own systemd package rather than derived from what the
+# bootloader appears to need, and the difference matters: meson configures the whole
+# of systemd even when only two targets will be built, so its configure-time
+# requirements apply in full.
+#
+#   host-gperf            meson.build:620  find_program('gperf'), not optional
+#   host-python-jinja2    meson.build:1687 find_installation(..., required : true,
+#                                          modules : ['jinja2'])
+#   host-python-pyelftools           elf2efi.py, which converts each ELF to a PE
+#
+# The first two were missing until the first real build, which failed at configure
+# with "Program 'gperf' not found or not executable" -- exactly the clear,
+# early, name-the-missing-thing failure the note above predicted.
+# libcap and libxcrypt are target libraries, and they are here only to satisfy
+# configure. meson.build:684 hard-errors if crypt.h or sys/capability.h is absent,
+# with no option guarding it, even though neither is reachable from the two EFI
+# binaries this package builds. So they end up in the image to make the bootloader
+# compile, which is in tension with the rule that nothing enters the image unless
+# Plex needs it. Both are small, and the honest fix is to stop configuring the whole
+# systemd tree rather than to argue about the dependency -- see the note at the end
+# of this file.
+PLEXOS_SYSTEMD_BOOT_DEPENDENCIES = \
+	host-pkgconf \
+	gnu-efi \
+	host-gperf \
+	host-python-jinja2 \
+	host-python-pyelftools \
+	libcap \
+	libxcrypt
 
 # The bootloader is a freestanding UEFI binary. Nothing belongs in the target
 # filesystem or in staging: it is placed on the ESP by post-image.sh, and never
@@ -133,3 +161,18 @@ define PLEXOS_SYSTEMD_BOOT_INSTALL_IMAGES_CMDS
 endef
 
 $(eval $(meson-package))
+
+# ---------------------------------------------------------------------------
+# Known cost, not yet paid down
+# ---------------------------------------------------------------------------
+# This package configures the whole of systemd in order to build two freestanding
+# EFI binaries. That is why its dependency list keeps growing with things the
+# bootloader cannot possibly use: gperf, jinja2, libcap, libxcrypt. Each was added
+# because meson refused to configure without it, and the last two are target
+# libraries that consequently ship in the image.
+#
+# The image-size rule in buildroot/README.md says nothing enters the base image
+# unless Plex needs it to run, and these do not. Two candidates for fixing it:
+# build this as a host package, since the EFI binaries are freestanding and link
+# nothing from the target sysroot; or carry a patch that lets systemd's meson
+# configure the bootloader alone. Neither is worth doing before an image has booted.
