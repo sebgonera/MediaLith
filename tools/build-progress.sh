@@ -60,10 +60,30 @@ weight_for() {
     esac
 }
 
-# Packages Buildroot builds but does not list in `show-targets`: the internal
-# toolchain steps. Without them the total is short by the most expensive part of
-# the build, and the bar would pass 100%.
+# `show-targets` lists only what the configuration asks for. Buildroot builds a good
+# deal more: the internal toolchain steps, and the host tools packages drag in
+# implicitly -- host-cmake, host-meson, host-python3 and its whole dependency chain.
+# There were 37 such packages in one measured build against 8 named here, which is
+# why this list is a floor and not the answer.
+#
+# The real total is the union of this list, `show-targets`, and every package that
+# has appeared in build/. Taking the union guarantees the finished set is a subset of
+# the total, so the count can never read "84 of ~73" and the bar can never exceed
+# 100% -- which is what happened when the total was a fixed guess.
+#
+# It understates early on, when packages that will be built have not appeared yet, so
+# the bar drifts down slightly as they show up. That is the honest direction to be
+# wrong in: it never claims to be further along than it is.
 TOOLCHAIN_EXTRAS="host-binutils host-gcc-initial host-gcc-final host-gmp host-mpc host-mpfr host-bison host-gawk"
+
+# Every package Buildroot has actually started, finished or not.
+started_packages() {
+    local d
+    for d in "${BUILD}"/*/; do
+        [ -d "${d}" ] || continue
+        basename "${d}" | sed -E 's/-[0-9].*$//'
+    done
+}
 
 # `show-targets` needs a configured tree and takes a moment, so cache it. It only
 # changes when the defconfig does.
@@ -137,8 +157,13 @@ bar() {
 report() {
     local all_targets done_list total_weight done_weight pct n_done n_total
     all_targets="$(targets_list)"
-    # Union of the listed targets and the toolchain steps they omit.
-    all_targets="$(printf '%s\n%s\n' "${all_targets}" "$(printf '%s\n' ${TOOLCHAIN_EXTRAS})" | grep -v '^$' | sort -u)"
+    # Union of: what the config asks for, the toolchain steps it omits, and
+    # everything already on disk. The last term is what makes the total impossible
+    # to undershoot.
+    all_targets="$(printf '%s\n%s\n%s\n' \
+        "${all_targets}" \
+        "$(printf '%s\n' ${TOOLCHAIN_EXTRAS})" \
+        "$(started_packages)" | grep -v '^$' | sort -u)"
     done_list="$(done_packages | sort -u)"
 
     local unknown=0
