@@ -36,6 +36,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod appmount;
 pub mod auth;
 pub mod bootcounter;
 pub mod console;

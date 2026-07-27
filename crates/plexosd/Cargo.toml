@@ -12,6 +12,9 @@ publish = false
 # rather than shelling out to the binary and parsing it back. It also brings the
 # `Environment` trait, which is what makes the network module testable without a NIC.
 plexos-gpu = { path = "../plexos-gpu" }
+# Mounting the Plex app image at boot (ADR-0007). plexosd is what plexos-init runs,
+# so this is where the verified-mount path becomes reachable from a booting machine.
+plexos-plex = { path = "../plexos-plex" }
 plexos-sys = { path = "../plexos-sys" }
 plexos-types = { path = "../plexos-types" }
 serde = { workspace = true }

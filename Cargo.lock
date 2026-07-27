@@ -141,6 +141,7 @@ name = "plexosd"
 version = "0.1.0"
 dependencies = [
  "plexos-gpu",
+ "plexos-plex",
  "plexos-sys",
  "plexos-types",
  "serde",

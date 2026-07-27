@@ -275,7 +275,10 @@ fn activate(link: &Path, target: &str) -> Result<(), Failure> {
 /// [`Failure`] if `losetup` cannot run, fails, or prints something that is not a device
 /// path. The last case is worth distinguishing: a `losetup` that succeeds and prints
 /// nothing would otherwise become a mount of the empty string.
-pub fn attach_loop(tools: &Tools, image: &Path) -> Result<std::path::PathBuf, Failure> {
+pub fn attach_loop(
+    tools: &crate::tools::MountTools,
+    image: &Path,
+) -> Result<std::path::PathBuf, Failure> {
     let output = Command::new(&tools.losetup)
         .arg("-f")
         .arg("--show")
@@ -315,7 +318,7 @@ pub fn attach_loop(tools: &Tools, image: &Path) -> Result<std::path::PathBuf, Fa
 /// unwinding here would mean a second failure path to get wrong during the first.
 pub fn mount_plan(
     steps: &[crate::mount::Step],
-    tools: &Tools,
+    tools: &crate::tools::MountTools,
     log: &mut dyn FnMut(&str),
 ) -> Result<std::path::PathBuf, Failure> {
     let mut device = None;

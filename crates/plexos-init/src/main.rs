@@ -120,6 +120,28 @@ fn supervise_system() -> ExitCode {
         )),
     }
 
+    // ARCHITECTURE.md §2 step 6: services before the gate. Mounting Plex has to happen
+    // first because step 7's verdict includes `plex-http`, and a gate that runs before
+    // the thing it checks can only ever report NotApplicable — which is what it has
+    // been doing.
+    //
+    // Failure here is reported and the boot continues. An appliance with no Plex, or
+    // with an app image that failed its integrity check, is a machine someone needs to
+    // reach the console of; refusing to boot would take away the console too. The gate
+    // below is what decides whether the slot was good, and an unmountable Plex will
+    // show up there rather than being papered over here.
+    match std::process::Command::new(PLEXOSD)
+        .arg("--mount-plex")
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(_) => log.line("the Plex app image was not mounted; see the message above"),
+        Err(error) => log.line(&format!(
+            "could not run {PLEXOSD} --mount-plex: {error}. Plex will not start, and \
+             the health gate will report it."
+        )),
+    }
+
     // ARCHITECTURE.md §2 step 7. Run before the shell, and its result is reported
     // rather than acted on: a failed gate must leave the try counter standing so the
     // slot rolls back, which is precisely what plexosd does by not clearing it.

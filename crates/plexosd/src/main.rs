@@ -20,6 +20,7 @@ plexosd — PlexOS management daemon
 USAGE:
     plexosd [--check] [--esp <device>]
     plexosd --serve [--port <n>]
+    plexosd --mount-plex
 
 OPTIONS:
     --check          Report the health gate without clearing the boot counter
@@ -28,6 +29,11 @@ OPTIONS:
                      the foreground. Does not run the gate: by the time this starts,
                      the gate has already returned its verdict.
     --port <n>       Port for --serve (default: 80)
+    --mount-plex     Verify the provisioned Plex app image against its integrity
+                     record and mount it (ADR-0007). Runs before the health gate,
+                     because ARCHITECTURE.md step 6 starts services and step 7 is
+                     where the gate reports on them. Exits 0 when there is nothing
+                     to mount: an unprovisioned machine is not a broken one.
     --help           Show this message
 
 Exit status is the verdict: 0 only when the boot is healthy.
@@ -88,9 +94,33 @@ fn clear_counter(device: &str) -> Result<String, String> {
     }
 }
 
+/// Verifies and mounts the provisioned Plex app image.
+///
+/// Before the gate, and exiting rather than falling through to it: mounting is one job
+/// and reporting health is another. ARCHITECTURE.md puts them in that order for a
+/// reason — the gate's `plex-http` check is meaningless until Plex is mounted and
+/// running.
+fn mount_plex_image() -> ExitCode {
+    let outcome = plexosd::appmount::mount_current(
+        std::path::Path::new(plexos_types::paths::PLEX_APPS),
+        std::path::Path::new(plexos_types::paths::PLEX_MOUNT),
+        &mut |line| println!("plexosd: {line}"),
+    );
+    println!("plexosd: {outcome}");
+
+    // An unprovisioned machine exits 0. That is the normal state of a fresh install,
+    // and a non-zero exit would have plexos-init report a fault on a system with
+    // nothing wrong with it.
+    match outcome {
+        plexosd::appmount::Outcome::Refused(_) => ExitCode::FAILURE,
+        _ => ExitCode::SUCCESS,
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut check_only = false;
+    let mut mount_plex = false;
     let mut serve = false;
     let mut port = console::DEFAULT_PORT;
     let mut esp_device: Option<String> = None;
@@ -99,6 +129,7 @@ fn main() -> ExitCode {
     while let Some(token) = tokens.next() {
         match token.as_str() {
             "--check" => check_only = true,
+            "--mount-plex" => mount_plex = true,
             "--serve" => serve = true,
             "--port" => {
                 let Some(value) = tokens.next() else {
@@ -130,6 +161,10 @@ fn main() -> ExitCode {
                 return ExitCode::from(64);
             }
         }
+    }
+
+    if mount_plex {
+        return mount_plex_image();
     }
 
     // Deliberately before the gate runs, and mutually exclusive with it. --serve is

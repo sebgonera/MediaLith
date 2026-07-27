@@ -90,6 +90,46 @@ impl Tools {
     }
 }
 
+/// The smaller set needed to *mount* an already-built image.
+///
+/// Separate from [`Tools`] on purpose. Mounting needs `losetup` and `sha256sum`;
+/// building additionally needs `tar` and `mkfs.erofs`. Demanding all four to mount
+/// would mean a machine that cannot build an image also cannot start the Plex it
+/// already has — a boot failure caused by a tool nothing was about to use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountTools {
+    /// Attaches the image to a loop device.
+    pub losetup: PathBuf,
+    /// Checks it against its integrity record.
+    pub sha256sum: PathBuf,
+}
+
+impl MountTools {
+    /// Resolves both, reporting the first that is absent.
+    ///
+    /// # Errors
+    /// [`Missing`] when one is not installed.
+    pub fn find(exists: &dyn Fn(&Path) -> bool) -> Result<Self, Missing> {
+        let one = |program: &str| {
+            resolve(program, exists).ok_or_else(|| Missing {
+                program: program.to_owned(),
+            })
+        };
+        Ok(Self {
+            losetup: one("losetup")?,
+            sha256sum: one("sha256sum")?,
+        })
+    }
+
+    /// Resolves against the running system.
+    ///
+    /// # Errors
+    /// [`Missing`] when one is not installed.
+    pub fn on_this_system() -> Result<Self, Missing> {
+        Self::find(&|p: &Path| p.exists())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +192,21 @@ mod tests {
         assert_eq!(tools.mkfs_erofs, PathBuf::from("/sbin/mkfs.erofs"));
         assert_eq!(tools.sha256sum, PathBuf::from("/sbin/sha256sum"));
         assert_eq!(tools.losetup, PathBuf::from("/sbin/losetup"));
+    }
+
+    #[test]
+    fn mounting_does_not_require_the_tools_that_only_build() {
+        // A machine missing mkfs.erofs cannot provision, and must still be able to
+        // start the Plex it already has. Requiring the full set to mount turns a
+        // missing build tool into a boot failure for a tool nothing was going to use.
+        let no_build_tools = |p: &Path| {
+            matches!(
+                p.file_name().and_then(|n| n.to_str()),
+                Some("losetup" | "sha256sum")
+            )
+        };
+        assert!(Tools::find(&no_build_tools).is_err());
+        let mounting = MountTools::find(&no_build_tools).unwrap();
+        assert_eq!(mounting.losetup, PathBuf::from("/sbin/losetup"));
     }
 }
