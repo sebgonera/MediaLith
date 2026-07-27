@@ -51,9 +51,21 @@ make -C ../buildroot-upstream \
 make -C ../buildroot-upstream O=$(pwd)/output
 ```
 
-First build: two to four hours on four cores. **Every build after that is incremental
-and takes minutes** — which is the whole reason to build locally during bring-up
-rather than in CI.
+First build: two to four hours on four cores, and closer to six on two. **Every build
+after that is incremental and takes minutes** — which is the whole reason to build
+locally during bring-up rather than in CI.
+
+Buildroot prints a wall of compiler invocations and nothing that answers "how much is
+left", so:
+
+```
+tools/build-progress.sh /path/to/output          # one-shot
+tools/build-progress.sh /path/to/output --watch  # refreshes until the build stops
+```
+
+It weights packages by rough build cost, because counting them evenly gives a bar that
+reaches 80% and then sits still for two hours: `host-gcc-final` alone outweighs thirty
+of the small ones. The percentage is honest about direction, not about minutes.
 
 ### Checking the defconfig without building
 
