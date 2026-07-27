@@ -5,10 +5,12 @@ accept. An ADR is never edited after acceptance — it is superseded by a new on
 
 These cover the decisions that are expensive or impossible to reverse once an image
 has shipped to a device: on-disk layout, the trust chain, the update protocol, and the
-schemas that outlive any single release. ADR-0011 and ADR-0012 are the exceptions —
-both are entirely revisable. ADR-0011 is recorded because it deliberately suspends a
-workspace-wide rule; ADR-0012 because it puts an unauthenticated network service on
-the appliance, and the reasoning that makes that acceptable has an expiry date.
+schemas that outlive any single release. ADR-0011, ADR-0012 and ADR-0013 are the
+exceptions — all three are entirely revisable. ADR-0011 is recorded because it
+deliberately suspends a workspace-wide rule; ADR-0012 because it puts an unauthenticated
+network service on the appliance, and the reasoning that makes that acceptable has an
+expiry date; ADR-0013 because that expiry arrived, and how a device is claimed is the
+kind of decision that is embarrassing to get wrong quietly.
 
 | ADR | Decision | Status |
 | --- | --- | --- |
@@ -24,6 +26,7 @@ the appliance, and the reasoning that makes that acceptable has an expiry date.
 | [0010](0010-plex-provisioning.md) | Plex binary provisioning and redistribution | Accepted |
 | [0011](0011-syscall-boundary.md) | One crate for unsafe, and no libraries on the boot path | Accepted |
 | [0012](0012-management-console.md) | A read-only status console, served by `plexosd` | Accepted |
+| [0013](0013-console-authentication.md) | A device token for routes that change the machine | Accepted |
 
 ## Template
 

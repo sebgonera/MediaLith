@@ -11,6 +11,10 @@ repository = "https://github.com/sebgonera/OS"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+# SHA-256 for the console's device token (ADR-0013). A dependency rather than a
+# hand-written hash: this is the one place in the workspace where a subtle mistake is
+# both silent and security-relevant. RustCrypto, pure Rust, no unsafe.
+sha2 = { version = "0.10", default-features = false }
 
 [workspace.lints.rust]
 missing_docs = "warn"
