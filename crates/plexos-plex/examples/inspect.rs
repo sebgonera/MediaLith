@@ -51,12 +51,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Strip the clearsign armour. This is emphatically NOT verification: it is how the
     // parser gets something to read while gpgv is not yet wired in, and the printed
     // warning is there so no one reads this output as a trust decision.
-    let body: String = text
+    let mut body = String::new();
+    for line in text
         .lines()
         .skip_while(|l| !l.starts_with("Version:"))
         .take_while(|l| !l.starts_with("-----BEGIN PGP SIGNATURE"))
-        .map(|l| format!("{l}\n"))
-        .collect();
+    {
+        body.push_str(line);
+        body.push('\n');
+    }
 
     let manifest = plexos_plex::manifest::parse(&body)?;
     println!("\nmanifest (UNVERIFIED — signature not checked)");
