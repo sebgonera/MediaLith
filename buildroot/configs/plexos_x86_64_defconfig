@@ -119,7 +119,28 @@ BR2_PACKAGE_LINUX_FIRMWARE_RTL_815X=y
 # /usr before mounting it (ADR-0004).
 BR2_PACKAGE_CRYPTSETUP=y
 BR2_PACKAGE_XFSPROGS=y
+# erofs-utils on the *target*, not just the host: ADR-0010 provisions Plex on the
+# device at first boot, which means the device builds the app image itself. It is also
+# the only choice available — CONFIG_SQUASHFS is not set in the kernel fragment and
+# CONFIG_EROFS_FS is, so erofs is what an app image can be, not what we prefer.
 BR2_PACKAGE_EROFS_UTILS=y
+
+# ---------------------------------------------------------------------------
+# Plex provisioning (ADR-0010)
+# ---------------------------------------------------------------------------
+# Every Plex .deb carries a `_gpgplex` member: a clearsigned debsigs manifest listing
+# each ar member's size and hashes, signed by Plex Inc.'s key
+# CD665CBA0E2F88B7373F7CB997203C7B3ADCA79D — the same key that signs their APT
+# repository. Verified against both channels on 2026-07-27.
+#
+# ADR-0010 requires that signature to be checked before anything is unpacked, and
+# nothing in the image could check it: there was no gpg, no gpgv and no openssl.
+#
+# gnupg2 rather than gnupg: v1 is deprecated upstream. Selecting it brings the whole
+# suite — there is no gpgv-only build, the GPGV symbol only controls whether gpgv
+# survives installation — but /usr is 61 MiB of a 1024 MiB budget, so the room exists.
+BR2_PACKAGE_GNUPG2=y
+BR2_PACKAGE_GNUPG2_GPGV=y
 
 # ---------------------------------------------------------------------------
 # Host tooling for image assembly
