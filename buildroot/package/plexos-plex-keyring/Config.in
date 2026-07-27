@@ -1,0 +1,17 @@
+config BR2_PACKAGE_PLEXOS_PLEX_KEYRING
+	bool "plexos-plex-keyring"
+	select BR2_PACKAGE_GNUPG2
+	select BR2_PACKAGE_GNUPG2_GPGV
+	help
+	  Plex Inc.'s OpenPGP public key, pinned into /usr.
+
+	  ADR-0010 has the appliance download Plex Media Server from Plex's
+	  own servers at first boot and verify the signature on what
+	  arrives. A key fetched at the same time as the artefact it
+	  vouches for proves nothing, so this one ships in the image:
+	  /usr is read-only and verified by dm-verity, which makes
+	  replacing the key as hard as replacing the OS.
+
+	  Selects gpgv, because a pinned key with nothing able to read it
+	  would be an image that looks provisioned for verification and
+	  silently is not.

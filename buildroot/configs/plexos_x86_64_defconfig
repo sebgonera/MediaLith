@@ -142,6 +142,10 @@ BR2_PACKAGE_EROFS_UTILS=y
 BR2_PACKAGE_GNUPG2=y
 BR2_PACKAGE_GNUPG2_GPGV=y
 
+# Plex's public key, pinned into the verified /usr rather than fetched beside the
+# artefact it is supposed to vouch for. See package/plexos-plex-keyring.
+BR2_PACKAGE_PLEXOS_PLEX_KEYRING=y
+
 # ---------------------------------------------------------------------------
 # Host tooling for image assembly
 # ---------------------------------------------------------------------------
