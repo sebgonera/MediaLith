@@ -42,7 +42,7 @@ Everything else is cheap to revise. Prefer revising it.
 | `crates/plexos-gpu` | Done as a diagnostic tool, 41 tests. Never run against a real GPU. |
 | `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec, partition-label lookup. Every syscall in it has run on real hardware. |
 | `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate and then starts a shell. |
-| `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, and a read-only page. 62 tests. The routes have been exercised over real HTTP on the build host; the page has never been opened in a browser on the appliance. |
+| `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, and a read-only page. 67 tests. The routes have been exercised over real HTTP on the build host. Network bring-up has now run on the reference laptop, where it failed and was fixed; the page has still never been opened in a browser on the appliance. |
 | `buildroot/` | Builds. defconfig, kernel fragment, and packages for `plexos-init`, `plexosd`, `plexos-gpu` and `plexos-systemd-boot`. |
 | `post-image.sh` | All six stages run, and produce an image that boots on hardware. |
 | Installer, Plex provisioning, updater | Not started. |
@@ -56,6 +56,12 @@ Since then `plexosd --serve` brings up wired Ethernet and serves a status consol
 port 80 — the GPU verdict, the health gate, the network and the slot. `plexos-init`
 spawns it after the gate and before the shell, which is the only ordering ADR-0005
 permits. Reading a diagnostic no longer means transcribing it off a 2160x1440 panel.
+
+The first boot of that console found the bug in the trap list below: the links were
+brought up once before the wait, so the USB adapter — which appears *during* the wait —
+was never brought up at all, and thirty seconds later the daemon blamed a cable that
+was fine. The console itself has still not been opened in a browser; that is the next
+thing a boot settles.
 
 Next, in order:
 
@@ -117,6 +123,19 @@ unsigned, so Secure Boot must be off.
   every candidate has to be brought up before its carrier means anything, and code
   that treats the read failure as an error will abort enumeration on a machine whose
   link is merely not up yet — the normal state early in boot.
+- **Bringing the links up once, before the wait, is the same as never.** The corollary
+  of the above, and it cost a boot. The interface being waited for is the one that
+  arrives late over USB, so at the moment of a single pre-loop pass it does not exist
+  to be brought up. It then sits down for the entire timeout with an unreadable
+  carrier, and the wait expires against an adapter that was plugged in throughout, on a
+  live cable. The bring-up belongs **inside** the poll loop. `plexosd::net` has a
+  regression test for it, which needs an `Environment` that enumerates the device late
+  and refuses a carrier until something brings it up — the immutable `Fixture` cannot
+  express either half, and a suite built only on fixtures passed while this was broken.
+- **`operstate` cannot tell "nothing brought it up" from "no cable".** It reads `down`
+  for both, and they take opposite remedies. Only `IFF_UP` in sysfs `flags` separates
+  them. A diagnostic that reports `operstate` alone will send someone to check a cable
+  that was never the problem.
 - **Bridges and `veth` pairs are `ARPHRD_ETHER` and report a carrier.** Interface type
   alone cannot tell a network card from `docker0`, and virtual devices sort before the
   real one by name. Only hardware has a `device` symlink in sysfs; that is the

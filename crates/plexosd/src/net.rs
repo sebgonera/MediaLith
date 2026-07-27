@@ -17,18 +17,34 @@
 //! `carrier` in sysfs is not readable until the interface is administratively up — the
 //! kernel returns `EINVAL` on a down interface, not `0`. So "wait for a cable" cannot
 //! come first: every candidate has to be brought up *before* its carrier means
-//! anything. [`configure`] does them in that order for that reason, and
-//! [`Interface::carrier`] is `false` for both "no cable" and "not up yet", which is why
-//! the wait polls rather than deciding once.
+//! anything, and [`Interface::carrier`] is `false` for both "no cable" and "not up
+//! yet".
+//!
+//! The consequence is easy to get wrong, and the first version of this module got it
+//! wrong on the reference laptop. Bringing the links up **once, before the wait**, is
+//! not enough: the interface being waited for is the one that arrives late, so at the
+//! moment of that single pass it does not exist to be brought up. It then sits
+//! administratively down for the whole timeout, its `carrier` unreadable and therefore
+//! `false`, and the wait expires against an adapter that was plugged in the entire
+//! time. [`wait_for_link`] therefore brings candidates up **on every pass**, not once
+//! before the loop.
 //!
 //! # What is verified and what is not
 //!
 //! Discovery, classification, selection and address parsing are pure functions over
-//! [`Environment`], and are tested against recorded sysfs. **Launching `ip` and
-//! `udhcpc` is not covered by tests** — it is two process launches, and a test that
-//! mocked them would only compare this module to itself. It has not yet run on the
-//! reference laptop; delete this notice once it has.
+//! [`Environment`], and are tested against recorded sysfs.
+//!
+//! This module **has** now run on the reference laptop, and the run is what found the
+//! bug above. The immutable [`Fixture`](plexos_gpu::env::Fixture) could not have: it
+//! describes a machine whose interfaces are all present from the start, which is the
+//! one case that never happens when Ethernet arrives over USB. The regression test
+//! uses a small `Environment` that enumerates the adapter late and refuses to report a
+//! carrier until something has actually brought it up — the kernel's own semantics,
+//! rather than this module's assumptions about them.
+//!
+//! Still not covered: the `udhcpc` launch, and whether a lease is actually obtained.
 
+use std::collections::BTreeSet;
 use std::io;
 use std::path::PathBuf;
 use std::thread::sleep;
@@ -46,6 +62,15 @@ const ARPHRD_ETHER: u32 = 1;
 
 /// `ARPHRD_LOOPBACK`, from the same header.
 const ARPHRD_LOOPBACK: u32 = 772;
+
+/// `IFF_UP`, from `include/uapi/linux/if.h`, where it is `1<<0` in `net_device_flags`.
+///
+/// Read from sysfs `flags` rather than inferred from `operstate`, because the two
+/// answer different questions. `operstate` is `down` both for an interface nobody has
+/// brought up and for one that is up with no cable in it; only `IFF_UP` distinguishes
+/// them, and that distinction is the difference between "run `ip link set up`" and
+/// "check the cable".
+const IFF_UP: u32 = 1 << 0;
 
 /// How long to wait for a wired interface to appear and acquire a carrier.
 ///
@@ -80,6 +105,11 @@ pub struct Interface {
     /// Whether a cable is detected. `false` also means "not up yet" — see the module
     /// documentation.
     pub carrier: bool,
+    /// Whether the interface is administratively up (`IFF_UP` in sysfs `flags`).
+    ///
+    /// This is the precondition for [`Interface::carrier`] meaning anything at all, so
+    /// it is also what tells "nothing has brought this up" apart from "no cable".
+    pub up: bool,
     /// The kernel's `operstate`, e.g. `up`, `down`, `unknown`.
     pub operstate: String,
     /// MAC address, if the kernel reports one.
@@ -145,6 +175,14 @@ fn read_interface(env: &impl Environment, name: &str) -> io::Result<Interface> {
         carrier: env
             .read(&base.join("carrier"))
             .is_ok_and(|c| c.trim() == "1"),
+        // sysfs writes this as hex with an `0x` prefix, e.g. `0x1003`. An unreadable
+        // or unparsable value counts as not up, which costs one redundant `ip link
+        // set up` and never a missed one.
+        up: env
+            .read(&base.join("flags"))
+            .ok()
+            .and_then(|f| u32::from_str_radix(f.trim().trim_start_matches("0x"), 16).ok())
+            .is_some_and(|flags| flags & IFF_UP != 0),
         operstate: env
             .read(&base.join("operstate"))
             .map_or_else(|_| "unknown".to_owned(), |s| s.trim().to_owned()),
@@ -254,12 +292,31 @@ pub fn addresses(env: &impl Environment) -> Vec<Address> {
         .collect()
 }
 
-/// Waits for a wired interface to appear and report a carrier.
+/// Describes one interface for the timeout message, in the terms that pick the remedy.
 ///
-/// Polls, because both halves of the condition arrive late and independently: the
-/// device appears when USB enumerates, and the carrier appears when the link
-/// negotiates. Announces the wait exactly once, and only when there is actually a
-/// wait, so a machine with the cable already up logs nothing.
+/// `operstate` alone is not enough: it reads `down` both for an interface nothing has
+/// brought up and for one that is up with no cable, and those need opposite responses.
+fn describe(interface: &Interface) -> String {
+    let state = match (interface.up, interface.carrier) {
+        (false, _) => "not up",
+        (true, false) => "up, no carrier",
+        (true, true) => "up, carrier",
+    };
+    format!("{} ({state})", interface.name)
+}
+
+/// Waits for a wired interface to appear and report a carrier, bringing candidates up
+/// as they appear.
+///
+/// Polls, because all three of the conditions arrive late and independently: the device
+/// appears when USB enumerates, it becomes readable once something brings it up, and
+/// the carrier appears when the link negotiates. Announces the wait exactly once, and
+/// only when there is actually a wait, so a machine with the cable already up logs
+/// nothing.
+///
+/// The bring-up happens **inside** the loop. See the module documentation: doing it
+/// once beforehand cannot work, because the interface being waited for is precisely
+/// the one that is not there yet when that single pass runs.
 ///
 /// # Errors
 /// Times out. That is not a boot failure — see [`configure`].
@@ -270,6 +327,7 @@ pub fn wait_for_link(
 ) -> io::Result<Interface> {
     let deadline = Instant::now() + timeout;
     let mut announced = false;
+    let mut warned = BTreeSet::new();
 
     loop {
         let all = interfaces(env).unwrap_or_default();
@@ -277,11 +335,16 @@ pub fn wait_for_link(
             return Ok(found.clone());
         }
 
+        // Before the deadline check, so that an interface appearing on the very last
+        // pass is still brought up rather than reported as "not up" and abandoned.
+        link_up(env, &all, &mut warned, log);
+
         if Instant::now() >= deadline {
+            let wired = candidates(&all);
             let seen = all
                 .iter()
                 .filter(|i| i.kind != Kind::Loopback)
-                .map(|i| format!("{} ({})", i.name, i.operstate))
+                .map(describe)
                 .collect::<Vec<_>>()
                 .join(", ");
             let seen = if seen.is_empty() {
@@ -289,12 +352,26 @@ pub fn wait_for_link(
             } else {
                 seen
             };
+            // Match the remedy to the state actually reached. Telling someone to check
+            // a cable that is plugged in is how the first version of this wasted an
+            // evening: the adapter was connected throughout and the fault was here.
+            let remedy = if wired.is_empty() {
+                "No wired adapter was found at all. Check that the USB Ethernet adapter \
+                 is plugged in; `dmesg | grep r8152` shows whether the kernel bound a \
+                 driver to it."
+            } else if wired.iter().any(|i| i.up) {
+                "The adapter is up but reports no carrier, which means the link did not \
+                 negotiate. Check the cable and the port at the other end."
+            } else {
+                "A wired adapter was found but nothing could bring it up, so its carrier \
+                 was never readable. Run `ip link set <name> up` by hand and see what it \
+                 reports."
+            };
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
                     "waited {}s for a wired interface with a carrier; interfaces seen: \
-                     {seen}. Check that the USB Ethernet adapter is plugged in and the \
-                     cable is connected. Wireless is not configurable in this release.",
+                     {seen}. {remedy} Wireless is not configurable in this release.",
                     timeout.as_secs()
                 ),
             ));
@@ -308,24 +385,53 @@ pub fn wait_for_link(
     }
 }
 
-/// Brings every wired interface up, so that `carrier` becomes readable.
+/// Brings up every wired interface that is not up already, so `carrier` becomes
+/// readable.
 ///
 /// Runs against all of them rather than a chosen one, because choosing requires the
-/// carrier, and the carrier requires being up. See the module documentation.
-fn link_up(env: &impl Environment, log: &mut dyn FnMut(&str)) {
-    let all = interfaces(env).unwrap_or_default();
-    for interface in candidates(&all) {
-        if let Err(error) = env.run("ip", &["link", "set", &interface.name, "up"]) {
-            log(&format!(
-                "could not bring {} up: {error}. If `ip` is missing from the image the \
-                 network cannot be configured at all.",
+/// carrier, and the carrier requires being up. Takes the interfaces it was given
+/// rather than enumerating again, so that the caller's view and this one cannot
+/// disagree about what exists.
+///
+/// Skipping the ones already up matters because this is called on every pass of
+/// [`wait_for_link`]: without the filter it would re-issue `ip` twice a second at the
+/// only interface that is working.
+fn link_up(
+    env: &impl Environment,
+    all: &[Interface],
+    warned: &mut BTreeSet<String>,
+    log: &mut dyn FnMut(&str),
+) {
+    for interface in candidates(all).into_iter().filter(|i| !i.up) {
+        let complaint = match env.run("ip", &["link", "set", &interface.name, "up"]) {
+            // `Environment::run` reports a non-zero exit as `Ok`, so the exit status is
+            // not available here and the output is the only evidence there is. `ip link
+            // set ... up` is silent when it works, so anything at all is the command
+            // objecting -- and swallowing it is what left the real failure invisible
+            // and the timeout blaming a cable that was plugged in.
+            Ok(output) if !output.trim().is_empty() => {
+                format!(
+                    "bringing {} up: ip said {:?}",
+                    interface.name,
+                    output.trim()
+                )
+            }
+            Ok(_) => continue,
+            Err(error) => format!(
+                "could not run ip to bring {} up: {error}. If `ip` is missing from the \
+                 image the network cannot be configured at all.",
                 interface.name
-            ));
+            ),
+        };
+        // Once per interface. This runs on every pass of the wait, and a fault repeated
+        // twice a second for thirty seconds buries the boot messages around it.
+        if warned.insert(interface.name.clone()) {
+            log(&complaint);
         }
     }
 }
 
-/// Brings the network up: links up, wait for a carrier, then DHCP.
+/// Brings the network up: wait for a carrier, bringing links up meanwhile, then DHCP.
 ///
 /// Returns the interface that was configured. **A failure here is reported and
 /// otherwise ignored by callers** — a media appliance with no cable is a machine with
@@ -343,7 +449,8 @@ pub fn configure(
     timeout: Duration,
     log: &mut dyn FnMut(&str),
 ) -> io::Result<Interface> {
-    link_up(env, log);
+    // No bring-up pass here. wait_for_link does it on every iteration, which is the
+    // only placement that works when the interface arrives during the wait.
     let interface = wait_for_link(env, timeout, log)?;
 
     // -b: keep trying in the background rather than giving up if the server is slow.
@@ -374,6 +481,9 @@ pub fn configure(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::path::Path;
+
     use super::*;
     use plexos_gpu::env::Fixture;
 
@@ -407,12 +517,133 @@ mod tests {
         iface(fixture, name, "1", carrier, &format!("INTERFACE={name}\n"))
     }
 
+    /// Marks an interface administratively up, the way sysfs reports it: hex, prefixed.
+    /// `0x1003` is `IFF_UP | IFF_BROADCAST | IFF_MULTICAST`.
+    fn admin_up(fixture: Fixture, name: &str) -> Fixture {
+        fixture.file(format!("{SYS_CLASS_NET}/{name}/flags"), "0x1003\n")
+    }
+
+    /// A machine whose USB Ethernet adapter enumerates a few passes into the wait, and
+    /// whose `carrier` — like the kernel's — cannot be read at all until something has
+    /// brought the interface up.
+    ///
+    /// Both halves are what the reference laptop does, and neither can be expressed by
+    /// [`Fixture`], which is immutable: it describes a machine where every interface is
+    /// present and readable from the first pass. That is the one situation that never
+    /// occurs here, and a suite built only on it passes against code that brings
+    /// nothing up.
+    struct LateUsbAdapter {
+        /// Enumerations remaining before `eth0` exists.
+        appears_in: Cell<u32>,
+        /// Whether `ip link set eth0 up` has run.
+        up: Cell<bool>,
+        /// Every command line this was asked to run, for the tests to assert on.
+        ran: RefCell<Vec<String>>,
+    }
+
+    impl LateUsbAdapter {
+        fn new(appears_in: u32) -> Self {
+            Self {
+                appears_in: Cell::new(appears_in),
+                up: Cell::new(false),
+                ran: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Environment for LateUsbAdapter {
+        fn list_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+            assert_eq!(path, Path::new(SYS_CLASS_NET));
+            let base = PathBuf::from(SYS_CLASS_NET);
+            let remaining = self.appears_in.get();
+            if remaining > 0 {
+                self.appears_in.set(remaining - 1);
+                return Ok(vec![base.join("lo")]);
+            }
+            Ok(vec![base.join("eth0"), base.join("lo")])
+        }
+
+        fn read(&self, path: &Path) -> io::Result<String> {
+            let file = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            let interface = path
+                .parent()
+                .and_then(std::path::Path::file_name)
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            let up = self.up.get();
+            match (interface, file) {
+                ("lo", "type") => Ok("772\n".to_owned()),
+                ("lo", _) => Ok(String::new()),
+                ("eth0", "type") => Ok("1\n".to_owned()),
+                ("eth0", "uevent") => Ok("INTERFACE=eth0\n".to_owned()),
+                ("eth0", "address") => Ok("00:e0:4c:68:09:89\n".to_owned()),
+                ("eth0", "operstate") => Ok(if up { "up\n" } else { "down\n" }.to_owned()),
+                ("eth0", "flags") => Ok(if up { "0x1003\n" } else { "0x1002\n" }.to_owned()),
+                // The kernel's actual behaviour, and the entire reason bring-up has to
+                // come first: EINVAL while the interface is down, not "0".
+                ("eth0", "carrier") => {
+                    if up {
+                        Ok("1\n".to_owned())
+                    } else {
+                        Err(io::Error::from(io::ErrorKind::InvalidInput))
+                    }
+                }
+                _ => Err(io::Error::from(io::ErrorKind::NotFound)),
+            }
+        }
+
+        fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
+            // Only real hardware has this, which is what makes eth0 a candidate.
+            if path == Path::new(SYS_CLASS_NET).join("eth0").join("device") {
+                return Ok(PathBuf::from(
+                    "../../../devices/pci0000:00/0000:00:14.0/usb1/1-1.3",
+                ));
+            }
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<String> {
+            self.ran
+                .borrow_mut()
+                .push(format!("{program} {}", args.join(" ")));
+            if program == "ip" && args.starts_with(&["link", "set"]) {
+                self.up.set(true);
+            }
+            Ok(String::new())
+        }
+    }
+
     #[test]
     fn the_arp_constants_are_the_kernel_header_values() {
         // Pinned against include/uapi/linux/if_arp.h. These are not ours to choose:
         // if this fails, the kernel changed and the code is what has to follow.
         assert_eq!(ARPHRD_ETHER, 1, "ARPHRD_ETHER is 1 in if_arp.h");
         assert_eq!(ARPHRD_LOOPBACK, 772, "ARPHRD_LOOPBACK is 772 in if_arp.h");
+    }
+
+    #[test]
+    fn the_iff_up_flag_is_the_kernel_header_value() {
+        // include/uapi/linux/if.h, enum net_device_flags: IFF_UP = 1<<0. Same rule as
+        // above -- if this fails, the constant here is what changes.
+        assert_eq!(IFF_UP, 0x1, "IFF_UP is 1<<0 in if.h");
+    }
+
+    #[test]
+    fn being_up_is_read_from_flags_rather_than_inferred_from_operstate() {
+        // These are different questions. An interface nothing has brought up and one
+        // that is up with no cable both read operstate "down"; only IFF_UP separates
+        // them, and they take opposite remedies.
+        let down = wired(Fixture::new(), "eth0", "0");
+        assert!(
+            !interfaces(&down).unwrap()[0].up,
+            "no flags file at all counts as not up"
+        );
+
+        let up = admin_up(down, "eth0");
+        assert!(interfaces(&up).unwrap()[0].up, "0x1003 has IFF_UP set");
     }
 
     #[test]
@@ -548,10 +779,11 @@ mod tests {
     }
 
     #[test]
-    fn waiting_names_the_adapter_and_the_cable_when_it_times_out() {
-        // Every diagnostic names a remedy. A timeout that said only "no network" would
-        // reproduce the problem this project exists to fix.
-        let fixture = wired(Fixture::new(), "eth0", "0");
+    fn a_timeout_with_the_adapter_up_blames_the_cable() {
+        // Every diagnostic names a remedy, and this is the state where "check the
+        // cable" is the right one: the interface is up, so the carrier is readable, and
+        // it says there is no link.
+        let fixture = admin_up(wired(Fixture::new(), "eth0", "0"), "eth0").command("ip", "");
         let mut lines = Vec::new();
         let error = wait_for_link(&fixture, Duration::from_millis(200), &mut |m| {
             lines.push(m.to_owned());
@@ -560,9 +792,80 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         let message = error.to_string();
-        assert!(message.contains("eth0"), "names what it saw: {message}");
-        assert!(message.contains("plugged in"), "names a remedy: {message}");
+        assert!(
+            message.contains("eth0 (up, no carrier)"),
+            "names what it saw, in the terms that pick the remedy: {message}"
+        );
+        assert!(message.contains("cable"), "names a remedy: {message}");
         assert_eq!(lines.len(), 1, "the wait is announced exactly once");
+    }
+
+    #[test]
+    fn a_timeout_with_the_adapter_down_blames_the_bring_up_and_not_the_cable() {
+        // The state the reference laptop was actually in, and the one the first version
+        // misdiagnosed. The adapter was plugged in and the cable was live; nothing had
+        // brought the interface up, so its carrier was unreadable. Telling someone to
+        // check a cable here sends them to inspect the one thing that was fine.
+        let fixture = wired(Fixture::new(), "eth0", "0");
+        let error = wait_for_link(&fixture, Duration::from_millis(200), &mut |_| {}).unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("eth0 (not up)"),
+            "distinguishes down from cableless: {message}"
+        );
+        assert!(
+            message.contains("ip link set"),
+            "names the remedy that matches: {message}"
+        );
+        assert!(
+            !message.contains("Check the cable"),
+            "and not the one that does not: {message}"
+        );
+    }
+
+    #[test]
+    fn an_adapter_that_appears_during_the_wait_is_still_brought_up() {
+        // The regression this module exists to not repeat. Bringing links up once
+        // before the wait cannot work: the interface being waited for is precisely the
+        // one that does not exist yet when that single pass runs. It then sits
+        // administratively down for the whole timeout with an unreadable carrier, and
+        // the wait expires against an adapter that was plugged in the entire time.
+        //
+        // Against the old code -- link_up before the loop, a read-only wait -- this
+        // times out. No fixture-based test could have caught it, because a fixture has
+        // every interface present and readable from the first pass.
+        let env = LateUsbAdapter::new(2);
+        let mut lines = Vec::new();
+        let found = wait_for_link(&env, Duration::from_secs(10), &mut |m| {
+            lines.push(m.to_owned());
+        })
+        .expect("the adapter appears during the wait and must still be configured");
+
+        assert_eq!(found.name, "eth0");
+        assert!(found.carrier, "and is chosen only once it has a carrier");
+        assert!(
+            env.ran.borrow().iter().any(|c| c == "ip link set eth0 up"),
+            "which takes bringing it up after it appeared: {:?}",
+            env.ran.borrow()
+        );
+    }
+
+    #[test]
+    fn an_interface_already_up_is_not_told_to_come_up_again() {
+        // link_up runs on every pass now, so the filter is what stops it launching `ip`
+        // twice a second at an interface that is working.
+        let env = LateUsbAdapter::new(0);
+        env.up.set(true);
+
+        let found = wait_for_link(&env, Duration::from_secs(5), &mut |_| {}).unwrap();
+
+        assert_eq!(found.name, "eth0");
+        assert!(
+            env.ran.borrow().is_empty(),
+            "nothing to do, so nothing run: {:?}",
+            env.ran.borrow()
+        );
     }
 
     #[test]
