@@ -88,8 +88,11 @@ The license for PlexOS's own code has not been chosen yet.
 
 ## Building
 
-Nothing to build yet beyond the Rust workspace:
+The Rust workspace builds anywhere:
 
 ```
 cargo test --workspace
 ```
+
+Image builds need a Linux host with real network access — see
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). No bootable image exists yet.
