@@ -122,7 +122,18 @@ fn supervise_system() -> ExitCode {
     //
     // Its failure is not this function's business. A machine with no cable still
     // boots, and still has a console on the screen saying so.
-    match std::process::Command::new(PLEXOSD).arg("--serve").spawn() {
+    // PATH is set explicitly because this process has none. PID 1 gets the environment
+    // the kernel provides, which is empty, and glibc's execvp then falls back to
+    // `/bin:/usr/bin` — while busybox installs `ip` and `udhcpc` into `/sbin` and
+    // `/usr/sbin`. plexosd resolves those two by absolute path and no longer depends on
+    // this, but anything spawned here in future would inherit the same empty
+    // environment and fail the same way, with an ENOENT that names the program and
+    // explains nothing.
+    match std::process::Command::new(PLEXOSD)
+        .arg("--serve")
+        .env("PATH", "/sbin:/usr/sbin:/bin:/usr/bin")
+        .spawn()
+    {
         Ok(_) => log.line("status console starting; it will print its URL when the link is up"),
         Err(error) => log.line(&format!(
             "could not start the status console: {error}. The system is otherwise \

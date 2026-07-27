@@ -82,6 +82,35 @@ pub const LINK_TIMEOUT: Duration = Duration::from_secs(30);
 /// Interval between rescans while waiting for a link.
 const POLL: Duration = Duration::from_millis(500);
 
+/// Where the programs this module runs actually live, in search order.
+///
+/// Naming a program and letting the system find it does not work here, and the way it
+/// fails is quiet. `plexosd` is exec'd by `plexos-init`, which is PID 1 and inherits
+/// the empty environment the kernel gives it, so there is no `PATH`. glibc's `execvp`
+/// then falls back to `confstr(_CS_PATH)`, which is `/bin:/usr/bin` — verified with
+/// `getconf PATH` — and busybox installs `ip` and `udhcpc` into `/sbin` and
+/// `/usr/sbin` only. So the lookup that works when a person types it at the shell,
+/// which sets its own `PATH`, fails from the daemon with a bare `ENOENT` naming the
+/// program and nothing about why.
+///
+/// Resolving against this list instead means the result does not depend on who started
+/// the process.
+const PROGRAM_DIRS: [&str; 4] = ["/sbin", "/usr/sbin", "/bin", "/usr/bin"];
+
+/// Finds `program` as an absolute path, ignoring `PATH` entirely.
+///
+/// See [`PROGRAM_DIRS`] for why. Returns `None` when it is in none of them, which is an
+/// image problem rather than a runtime one — busybox is supposed to provide both.
+fn resolve(env: &impl Environment, program: &str) -> Option<String> {
+    PROGRAM_DIRS.iter().find_map(|dir| {
+        let candidate = PathBuf::from(dir).join(program);
+        env.list_dir(std::path::Path::new(dir))
+            .ok()?
+            .contains(&candidate)
+            .then(|| candidate.to_string_lossy().into_owned())
+    })
+}
+
 /// What kind of interface the kernel says this is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -283,7 +312,13 @@ pub fn parse_addresses(output: &str) -> Vec<Address> {
 /// into a browser", and `127.0.0.1` is never that answer from another machine.
 #[must_use]
 pub fn addresses(env: &impl Environment) -> Vec<Address> {
-    let Ok(output) = env.run("ip", &["-o", "-4", "addr", "show"]) else {
+    // Absolute, for the reason in PROGRAM_DIRS. Getting this wrong here is quieter than
+    // anywhere else in the module: the console still serves, it just never prints the
+    // address a person is supposed to type.
+    let Some(ip) = resolve(env, "ip") else {
+        return Vec::new();
+    };
+    let Ok(output) = env.run(&ip, &["-o", "-4", "addr", "show"]) else {
         return Vec::new();
     };
     parse_addresses(&output)
@@ -329,6 +364,10 @@ pub fn wait_for_link(
     let mut announced = false;
     let mut warned = BTreeSet::new();
 
+    // Once, not per pass: the answer cannot change during a boot, and listing four
+    // directories twice a second for thirty seconds is pure waste.
+    let ip = resolve(env, "ip");
+
     loop {
         let all = interfaces(env).unwrap_or_default();
         if let Some(found) = preferred(&all) {
@@ -337,7 +376,24 @@ pub fn wait_for_link(
 
         // Before the deadline check, so that an interface appearing on the very last
         // pass is still brought up rather than reported as "not up" and abandoned.
-        link_up(env, &all, &mut warned, log);
+        match ip.as_deref() {
+            Some(ip) => link_up(env, &all, ip, &mut warned, log),
+            // Worth saying only once something needs raising. A machine still waiting
+            // for its adapter to enumerate has nothing to run `ip` against yet, and
+            // announcing a missing tool before there is any work for it is noise.
+            None if candidates(&all).iter().any(|i| !i.up) => {
+                if warned.insert("ip".to_owned()) {
+                    log(&format!(
+                        "`ip` is in none of {}. Nothing can bring an interface up, so no \
+                         carrier will ever be readable and this wait can only time out. \
+                         That is an image fault: busybox provides the applet and \
+                         Buildroot should have linked it.",
+                        PROGRAM_DIRS.join(", ")
+                    ));
+                }
+            }
+            None => {}
+        }
 
         if Instant::now() >= deadline {
             let wired = candidates(&all);
@@ -355,7 +411,10 @@ pub fn wait_for_link(
             // Match the remedy to the state actually reached. Telling someone to check
             // a cable that is plugged in is how the first version of this wasted an
             // evening: the adapter was connected throughout and the fault was here.
-            let remedy = if wired.is_empty() {
+            let remedy = if ip.is_none() {
+                "`ip` could not be found, so nothing was ever brought up. Fix the image; \
+                 no amount of cable will help."
+            } else if wired.is_empty() {
                 "No wired adapter was found at all. Check that the USB Ethernet adapter \
                  is plugged in; `dmesg | grep r8152` shows whether the kernel bound a \
                  driver to it."
@@ -399,11 +458,12 @@ pub fn wait_for_link(
 fn link_up(
     env: &impl Environment,
     all: &[Interface],
+    ip: &str,
     warned: &mut BTreeSet<String>,
     log: &mut dyn FnMut(&str),
 ) {
     for interface in candidates(all).into_iter().filter(|i| !i.up) {
-        let complaint = match env.run("ip", &["link", "set", &interface.name, "up"]) {
+        let complaint = match env.run(ip, &["link", "set", &interface.name, "up"]) {
             // `Environment::run` reports a non-zero exit as `Ok`, so the exit status is
             // not available here and the output is the only evidence there is. `ip link
             // set ... up` is silent when it works, so anything at all is the command
@@ -418,9 +478,11 @@ fn link_up(
             }
             Ok(_) => continue,
             Err(error) => format!(
-                "could not run ip to bring {} up: {error}. If `ip` is missing from the \
-                 image the network cannot be configured at all.",
-                interface.name
+                "could not run {ip} to bring {} up: {error}. That path came from a search \
+                 of {}, so if this says it does not exist the image is missing busybox's \
+                 `ip` applet.",
+                interface.name,
+                PROGRAM_DIRS.join(", ")
             ),
         };
         // Once per interface. This runs on every pass of the wait, and a fault repeated
@@ -453,19 +515,41 @@ pub fn configure(
     // only placement that works when the interface arrives during the wait.
     let interface = wait_for_link(env, timeout, log)?;
 
+    // Absolute, for the reason in PROGRAM_DIRS: this is spawned from a process with no
+    // PATH, and udhcpc lives in /sbin, which the glibc fallback does not include.
+    let udhcpc = resolve(env, "udhcpc").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "`udhcpc` is in none of {}. {} has a carrier, so the link itself is \
+                 fine; give it an address by hand with `ip addr add <a.b.c.d/nn> dev {}` \
+                 until the image carries a DHCP client.",
+                PROGRAM_DIRS.join(", "),
+                interface.name,
+                interface.name
+            ),
+        )
+    })?;
+
     // -b: keep trying in the background rather than giving up if the server is slow.
     // -R: release the lease on exit, so a reboot does not burn a second address.
     // The script is Buildroot's, at /usr/share/udhcpc/default.script; without it
     // udhcpc would obtain a lease and configure nothing, which looks exactly like a
     // DHCP server that never answered.
-    std::process::Command::new("udhcpc")
+    //
+    // PATH is set for the child because that script calls `route` by bare name for the
+    // default gateway. busybox sh happens to install a usable default when PATH is
+    // unset, so this is belt and braces rather than a fix -- but the whole reason this
+    // module now resolves absolute paths is that the same assumption was wrong once.
+    std::process::Command::new(&udhcpc)
         .args(["-i", &interface.name, "-b", "-R"])
+        .env("PATH", PROGRAM_DIRS.join(":"))
         .spawn()
         .map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!(
-                    "could not start udhcpc on {}: {error}. The link is up, so a static \
+                    "could not start {udhcpc} on {}: {error}. The link is up, so a static \
                      address can still be set by hand with `ip addr add`.",
                     interface.name
                 ),
@@ -523,6 +607,14 @@ mod tests {
         fixture.file(format!("{SYS_CLASS_NET}/{name}/flags"), "0x1003\n")
     }
 
+    /// Puts busybox's `ip` where it actually lives, so [`resolve`] can find it.
+    ///
+    /// `/sbin`, not `/bin`: that is the whole point of resolving rather than trusting
+    /// the environment, and a fixture that put it in `/bin` would test nothing.
+    fn with_ip(fixture: Fixture) -> Fixture {
+        fixture.file("/sbin/ip", "")
+    }
+
     /// A machine whose USB Ethernet adapter enumerates a few passes into the wait, and
     /// whose `carrier` — like the kernel's — cannot be read at all until something has
     /// brought the interface up.
@@ -553,7 +645,13 @@ mod tests {
 
     impl Environment for LateUsbAdapter {
         fn list_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
-            assert_eq!(path, Path::new(SYS_CLASS_NET));
+            // busybox puts `ip` here and nowhere on the glibc fallback path.
+            if path == Path::new("/sbin") {
+                return Ok(vec![PathBuf::from("/sbin/ip")]);
+            }
+            if path != Path::new(SYS_CLASS_NET) {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
             let base = PathBuf::from(SYS_CLASS_NET);
             let remaining = self.appears_in.get();
             if remaining > 0 {
@@ -609,7 +707,9 @@ mod tests {
             self.ran
                 .borrow_mut()
                 .push(format!("{program} {}", args.join(" ")));
-            if program == "ip" && args.starts_with(&["link", "set"]) {
+            // Only the absolute path works, exactly as on the appliance: a bare "ip"
+            // reaches execvp with no PATH and dies with ENOENT.
+            if program == "/sbin/ip" && args.starts_with(&["link", "set"]) {
                 self.up.set(true);
             }
             Ok(String::new())
@@ -758,8 +858,8 @@ mod tests {
 
     #[test]
     fn loopback_is_dropped_from_reported_addresses() {
-        let fixture = Fixture::new().command(
-            "ip",
+        let fixture = with_ip(Fixture::new()).command(
+            "/sbin/ip",
             "1: lo    inet 127.0.0.1/8 scope host lo\n\
              2: eth0    inet 192.168.2.42/24 scope global eth0\n",
         );
@@ -774,7 +874,8 @@ mod tests {
 
     #[test]
     fn an_interface_with_no_address_yields_nothing_rather_than_a_broken_entry() {
-        let fixture = Fixture::new().command("ip", "2: eth0    inet6 fe80::1/64 scope link\n");
+        let fixture =
+            with_ip(Fixture::new()).command("/sbin/ip", "2: eth0    inet6 fe80::1/64 scope link\n");
         assert!(addresses(&fixture).is_empty());
     }
 
@@ -783,7 +884,8 @@ mod tests {
         // Every diagnostic names a remedy, and this is the state where "check the
         // cable" is the right one: the interface is up, so the carrier is readable, and
         // it says there is no link.
-        let fixture = admin_up(wired(Fixture::new(), "eth0", "0"), "eth0").command("ip", "");
+        let fixture =
+            with_ip(admin_up(wired(Fixture::new(), "eth0", "0"), "eth0")).command("/sbin/ip", "");
         let mut lines = Vec::new();
         let error = wait_for_link(&fixture, Duration::from_millis(200), &mut |m| {
             lines.push(m.to_owned());
@@ -806,7 +908,9 @@ mod tests {
         // misdiagnosed. The adapter was plugged in and the cable was live; nothing had
         // brought the interface up, so its carrier was unreadable. Telling someone to
         // check a cable here sends them to inspect the one thing that was fine.
-        let fixture = wired(Fixture::new(), "eth0", "0");
+        // `ip` is present but every invocation fails, which is the state that leaves an
+        // adapter found and never raised.
+        let fixture = with_ip(wired(Fixture::new(), "eth0", "0"));
         let error = wait_for_link(&fixture, Duration::from_millis(200), &mut |_| {}).unwrap_err();
 
         let message = error.to_string();
@@ -821,6 +925,48 @@ mod tests {
         assert!(
             !message.contains("Check the cable"),
             "and not the one that does not: {message}"
+        );
+    }
+
+    #[test]
+    fn programs_are_found_in_sbin_where_busybox_puts_them() {
+        // The bug this pins: plexosd is exec'd by PID 1 and has no PATH, so glibc's
+        // execvp falls back to /bin:/usr/bin -- verified with `getconf PATH` -- while
+        // busybox installs `ip` and `udhcpc` only into /sbin and /usr/sbin. Naming the
+        // program alone works when a person types it at the shell and fails from the
+        // daemon, which is why the first fix to this module boot-tested as ENOENT.
+        let fixture = with_ip(Fixture::new());
+        assert_eq!(resolve(&fixture, "ip").as_deref(), Some("/sbin/ip"));
+        assert_eq!(
+            resolve(&fixture, "udhcpc"),
+            None,
+            "and reports honestly when a program really is absent"
+        );
+    }
+
+    #[test]
+    fn a_missing_ip_is_named_as_the_cause_rather_than_blamed_on_hardware() {
+        // No `ip` anywhere. The adapter and the cable are irrelevant here, and saying
+        // otherwise sends someone to the wrong end of the machine.
+        let fixture = wired(Fixture::new(), "eth0", "0");
+        let mut lines = Vec::new();
+        let error = wait_for_link(&fixture, Duration::from_millis(200), &mut |m| {
+            lines.push(m.to_owned());
+        })
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("`ip` could not be found"),
+            "names the real cause: {message}"
+        );
+        assert!(
+            !message.contains("Check the cable") && !message.contains("plugged in"),
+            "and does not send anyone to the hardware: {message}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("image fault")),
+            "and says whose problem it is: {lines:?}"
         );
     }
 
@@ -845,8 +991,11 @@ mod tests {
         assert_eq!(found.name, "eth0");
         assert!(found.carrier, "and is chosen only once it has a carrier");
         assert!(
-            env.ran.borrow().iter().any(|c| c == "ip link set eth0 up"),
-            "which takes bringing it up after it appeared: {:?}",
+            env.ran
+                .borrow()
+                .iter()
+                .any(|c| c == "/sbin/ip link set eth0 up"),
+            "which takes bringing it up after it appeared, by absolute path: {:?}",
             env.ran.borrow()
         );
     }

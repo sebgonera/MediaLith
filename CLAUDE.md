@@ -42,7 +42,7 @@ Everything else is cheap to revise. Prefer revising it.
 | `crates/plexos-gpu` | Done as a diagnostic tool, 41 tests. Never run against a real GPU. |
 | `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec, partition-label lookup. Every syscall in it has run on real hardware. |
 | `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate and then starts a shell. |
-| `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, and a read-only page. 67 tests. The routes have been exercised over real HTTP on the build host. Network bring-up has now run on the reference laptop, where it failed and was fixed; the page has still never been opened in a browser on the appliance. |
+| `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, and a read-only page. 69 tests. The routes have been exercised over real HTTP on the build host. Network bring-up has now run on the reference laptop, where it failed twice — once for bring-up ordering, once for `PATH` — and was fixed both times; the page has still never been opened in a browser on the appliance. |
 | `buildroot/` | Builds. defconfig, kernel fragment, and packages for `plexos-init`, `plexosd`, `plexos-gpu` and `plexos-systemd-boot`. |
 | `post-image.sh` | All six stages run, and produce an image that boots on hardware. |
 | Installer, Plex provisioning, updater | Not started. |
@@ -136,6 +136,15 @@ unsigned, so Secure Boot must be off.
   for both, and they take opposite remedies. Only `IFF_UP` in sysfs `flags` separates
   them. A diagnostic that reports `operstate` alone will send someone to check a cable
   that was never the problem.
+- **There is no `PATH`, so run programs by absolute path.** PID 1 gets the environment
+  the kernel provides, which is empty, and everything it spawns inherits that. glibc's
+  `execvp` then falls back to `confstr(_CS_PATH)` — `/bin:/usr/bin`, confirmed with
+  `getconf PATH` — while busybox installs `ip` and `udhcpc` into `/sbin` and
+  `/usr/sbin` only. So `Command::new("ip")` fails from a daemon with a bare `ENOENT`
+  while the same name typed at the shell works, because the shell sets its own `PATH`.
+  `plexosd::net::resolve` searches the four directories explicitly. Beware verifying
+  this on the build host: Ubuntu has `/bin/ip`, so an `env -i` test there succeeds and
+  suggests, wrongly, that the fallback is enough.
 - **Bridges and `veth` pairs are `ARPHRD_ETHER` and report a carrier.** Interface type
   alone cannot tell a network card from `docker0`, and virtual devices sort before the
   real one by name. Only hardware has a `device` symlink in sysfs; that is the

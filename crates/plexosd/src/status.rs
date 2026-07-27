@@ -232,8 +232,11 @@ mod tests {
             .file("/sys/class/net/eth0/operstate", "up\n")
             .file("/sys/class/net/lo/type", "772\n")
             .file("/sys/class/net/lo/uevent", "")
+            // /sbin, and keyed by the absolute path: net::addresses resolves the
+            // program rather than naming it, because this runs with no PATH.
+            .file("/sbin/ip", "")
             .command(
-                "ip",
+                "/sbin/ip",
                 "1: lo    inet 127.0.0.1/8 scope host lo\n\
                  2: eth0    inet 192.168.2.42/24 scope global eth0\n",
             );
