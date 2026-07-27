@@ -161,6 +161,29 @@ pub fn move_mount(from: &str, to: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Unmounts a filesystem.
+///
+/// # Errors
+///
+/// Any failure of `umount(2)`, with the path included. `EBUSY` here means something
+/// still holds a file open on it, which on the ESP means the counter was cleared but
+/// the filesystem is still mounted read-write — worth reporting rather than ignoring.
+pub fn unmount(target: &str) -> io::Result<()> {
+    let c_target = c_string(target)?;
+
+    // SAFETY: c_target is a valid NUL-terminated string that outlives the call.
+    // umount does not retain the pointer.
+    let result = unsafe { libc::umount(c_target.as_ptr()) };
+
+    if result < 0 {
+        return Err(io::Error::new(
+            io::Error::last_os_error().kind(),
+            format!("unmounting {target}: {}", io::Error::last_os_error()),
+        ));
+    }
+    Ok(())
+}
+
 /// Replaces the root filesystem with `new_root` and executes `init`.
 ///
 /// Does not return on success: the process image is replaced.
@@ -343,6 +366,15 @@ mod tests {
         assert!(data.contains("lowerdir="));
         assert!(data.contains("upperdir="));
         assert!(data.contains("workdir="));
+    }
+
+    #[test]
+    fn unmounting_something_that_is_not_mounted_names_the_path() {
+        let error = unmount("/nonexistent-mount-point").unwrap_err();
+        assert!(
+            error.to_string().contains("/nonexistent-mount-point"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -56,6 +56,11 @@ CONFIG_SATA_AHCI=y
 CONFIG_ATA=y
 CONFIG_BLK_DEV_SD=y
 CONFIG_USB_STORAGE=y
+# UAS is how USB 3 mass storage actually talks. Devices fall back to the older
+# bulk-only transport without it, so this is a performance and compatibility
+# measure rather than a requirement -- but booting an appliance image from a USB
+# stick is a first-class case here, not a curiosity.
+CONFIG_USB_UAS=y
 
 # --- Graphics and transcoding ----------------------------------------------
 # i915 covers Gen9.5 (Whiskey Lake UHD 620, the reference machine). xe is the newer

@@ -1,0 +1,14 @@
+config BR2_PACKAGE_PLEXOSD
+	bool "plexosd"
+	depends on BR2_x86_64
+	help
+	  PlexOS management daemon.
+
+	  Its first job, and the reason it exists before any management API
+	  does, is the boot health gate: plexosd declares a boot good, and
+	  nothing else may. Until it does, the try counter in the UKI's
+	  filename stands, and three failed boots hand the machine back to
+	  the previous slot (ADR-0005).
+
+	  Built by the workspace's own Rust toolchain rather than by
+	  Buildroot, for the reasons set out in package/plexos-init.

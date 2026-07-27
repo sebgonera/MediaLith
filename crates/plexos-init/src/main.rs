@@ -27,6 +27,9 @@ use plexos_types::version::STATE_LAYOUT_VERSION;
 /// Started by [`supervise_system`] until there is a real supervisor.
 const DEBUG_SHELL: &str = "/bin/sh";
 
+/// The health gate. Nothing else may declare a boot good (ADR-0005).
+const PLEXOSD: &str = "/usr/bin/plexosd";
+
 const USAGE: &str = "\
 plexos-init — PlexOS PID 1
 
@@ -58,6 +61,26 @@ fn fail(message: &str) -> ExitCode {
 fn supervise_system() -> ExitCode {
     let mut log = execute::StderrLog;
     log.line("root assembled, /usr verified, running as the service manager");
+
+    // ARCHITECTURE.md §2 step 7. Run before the shell, and its result is reported
+    // rather than acted on: a failed gate must leave the try counter standing so the
+    // slot rolls back, which is precisely what plexosd does by not clearing it.
+    //
+    // Deliberately not fatal here. Dropping to a shell on an unhealthy boot is what
+    // makes the failure diagnosable; killing PID 1 instead would panic the kernel and
+    // throw away the console output explaining why.
+    match std::process::Command::new(PLEXOSD).status() {
+        Ok(status) if status.success() => log.line("health gate passed; boot marked good"),
+        Ok(_) => log.line(
+            "health gate FAILED — the boot counter stands, and this slot will roll \
+             back after three attempts (ADR-0005)",
+        ),
+        Err(error) => log.line(&format!(
+            "could not run {PLEXOSD}: {error}. The boot cannot be marked good, so this \
+             slot will roll back."
+        )),
+    }
+
     log.line("no supervisor yet: starting a shell (ARCHITECTURE.md section 2, step 6)");
 
     match plexos_sys::process::exec(DEBUG_SHELL, &[]) {

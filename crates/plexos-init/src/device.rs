@@ -22,6 +22,8 @@
 use std::fmt;
 use std::fs;
 use std::io;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 /// Where the kernel publishes one directory per block device.
 const SYS_BLOCK: &str = "/sys/class/block";
@@ -125,6 +127,65 @@ pub fn by_partlabel(label: &str) -> io::Result<String> {
     ))
 }
 
+/// How long to wait for a labelled partition to appear before giving up.
+///
+/// Not a guess at how slow a disk is, but at how slow *enumeration* is. PCI devices
+/// are there before `plexos-init` runs; USB ones are not, and can take several
+/// seconds — the same lateness that ARCHITECTURE.md §2 says must never be allowed to
+/// influence the boot health gate. Booting an appliance from a USB stick is a
+/// first-class case here, so the boot has to be willing to wait for one.
+///
+/// Long enough for a slow hub and a spinning USB disk; short enough that a genuinely
+/// absent disk fails the slot rather than hanging forever, which would defeat the
+/// rollback in ADR-0005 by never failing at all.
+pub const DEVICE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Interval between rescans while waiting.
+const POLL: Duration = Duration::from_millis(100);
+
+/// Waits for a labelled partition to appear, then resolves it.
+///
+/// Returns immediately when the partition is already present, which is the case on
+/// any internal disk.
+///
+/// # Errors
+///
+/// If the label has not appeared within `timeout`. The message distinguishes "never
+/// appeared" from "appeared but wrong", because on removable media the first is
+/// usually a device that was not plugged in and the second is the wrong stick.
+pub fn wait_for_partlabel(
+    label: &str,
+    timeout: Duration,
+    log: &mut dyn FnMut(&str),
+) -> io::Result<String> {
+    let deadline = Instant::now() + timeout;
+    let mut announced = false;
+
+    loop {
+        match by_partlabel(label) {
+            Ok(device) => return Ok(device),
+            Err(error) if Instant::now() >= deadline => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("waited {}s: {error}", timeout.as_secs()),
+                ));
+            }
+            Err(_) => {}
+        }
+
+        // Said once, not every 100ms, and only when there is actually a wait --
+        // otherwise every boot from an internal disk would print it.
+        if !announced {
+            announced = true;
+            log(&format!(
+                "waiting for partition {label} to appear (USB storage enumerates \
+                 seconds after PCI)"
+            ));
+        }
+        sleep(POLL);
+    }
+}
+
 /// Rewrites a `by-partlabel` path into a real device node, leaving others alone.
 ///
 /// The boot plan names devices the way a person would write them, and that form is
@@ -134,9 +195,9 @@ pub fn by_partlabel(label: &str) -> io::Result<String> {
 /// # Errors
 ///
 /// If the path names a label that no partition carries.
-pub fn resolve(path: &str) -> io::Result<String> {
+pub fn resolve(path: &str, log: &mut dyn FnMut(&str)) -> io::Result<String> {
     match path.strip_prefix("/dev/disk/by-partlabel/") {
-        Some(label) => by_partlabel(label),
+        Some(label) => wait_for_partlabel(label, DEVICE_TIMEOUT, log),
         None => Ok(path.to_owned()),
     }
 }
@@ -197,11 +258,43 @@ mod tests {
 
     #[test]
     fn resolve_passes_through_paths_that_are_not_labels() {
+        let mut log = |_: &str| {};
         assert_eq!(
-            resolve("/dev/mapper/plexos-usr").unwrap(),
+            resolve("/dev/mapper/plexos-usr", &mut log).unwrap(),
             "/dev/mapper/plexos-usr"
         );
-        assert_eq!(resolve("tmpfs").unwrap(), "tmpfs");
+        assert_eq!(resolve("tmpfs", &mut log).unwrap(), "tmpfs");
+    }
+
+    #[test]
+    fn a_pass_through_path_does_not_wait() {
+        // Only by-partlabel paths may block. If this ever started waiting, every
+        // tmpfs mount in the plan would add the full timeout to the boot.
+        let start = std::time::Instant::now();
+        let mut log = |_: &str| {};
+        let _ = resolve("tmpfs", &mut log);
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn waiting_for_a_label_that_never_appears_times_out_rather_than_hanging() {
+        // A hang here would be worse than a failure: the slot would never be marked
+        // bad, and the rollback in ADR-0005 depends on failing boots actually failing.
+        let mut messages = Vec::new();
+        let start = std::time::Instant::now();
+        let error = wait_for_partlabel("no-such-label", Duration::from_millis(300), &mut |m| {
+            messages.push(m.to_owned());
+        })
+        .unwrap_err();
+
+        assert!(start.elapsed() < Duration::from_secs(5), "took too long");
+        assert!(error.to_string().contains("waited"), "{error}");
+        assert_eq!(
+            messages.len(),
+            1,
+            "the wait should be announced exactly once"
+        );
+        assert!(messages[0].contains("USB"), "{:?}", messages[0]);
     }
 
     #[test]

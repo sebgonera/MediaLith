@@ -42,6 +42,9 @@ BR2_INIT_NONE=y
 # installs no init of its own; without this the image has no PID 1 at all and
 # post-image.sh has nothing to put in the initrd.
 BR2_PACKAGE_PLEXOS_INIT=y
+# plexosd runs the boot health gate. Without it nothing ever clears the try counter,
+# so every update would eventually roll back however well it worked (ADR-0005).
+BR2_PACKAGE_PLEXOSD=y
 
 # ---------------------------------------------------------------------------
 # Kernel

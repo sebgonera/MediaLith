@@ -1,0 +1,15 @@
+[package]
+name = "plexosd"
+version = "0.1.0"
+description = "Management daemon: the boot health gate, and the rollback counter"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+plexos-sys = { path = "../plexos-sys" }
+plexos-types = { path = "../plexos-types" }
+
+[lints]
+workspace = true
