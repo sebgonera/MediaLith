@@ -2,6 +2,10 @@
 # One-time host setup for building PlexOS images on this machine.
 # Everything here needs root, which is why it is a script you run rather than
 # something the assistant can do for itself.
+#
+# docs/DEVELOPMENT.md is the source of truth for host setup and explains why each
+# of these is needed. This script is a convenience for a fresh machine; if the two
+# ever disagree, the document is right.
 set -euo pipefail
 
 echo "==> Installing Buildroot host prerequisites"

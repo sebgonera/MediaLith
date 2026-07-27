@@ -65,6 +65,16 @@ QEMU is the first real test, not a formality.
   cannot run on.
 - **Rollback reverts `/usr`, never `/var`.** Any migration must leave state the
   previous release can still read. `crates/plexos-init/src/state.rs` encodes this.
+- **Tests that only compare a thing to itself will pass while it is wrong.** Every
+  test in `plexos-types::partition` passed against two GUIDs that were not the ones
+  the specification defines: they were well-formed, unique, correctly paired, and
+  accepted by `sfdisk`. Nothing compared them to anything outside the crate. Where a
+  constant comes from somewhere else — a spec, a kernel header — pin it against a
+  value extracted from that source, and say in the test that the code is what changes
+  when it fails.
+- **`/tmp` is small, and GCC uses it.** A Buildroot build dies partway through
+  `host-gcc-initial` with `Disk quota exceeded` if `/tmp` is a modest tmpfs. The
+  message names the compiler, not `/tmp`. Set `TMPDIR` alongside the output directory.
 - **The boot health gate must check Plex on loopback only.** USB Ethernet enumerates
   seconds after PCI; a gate that waited for the network would roll back good updates.
 

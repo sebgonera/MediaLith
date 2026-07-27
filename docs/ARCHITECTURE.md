@@ -104,6 +104,13 @@ The kernel still needs storage, erofs, and dm-verity built in rather than modula
 initrd is deliberately minimal — one static binary — so there is no module loading, no
 `udev`, and nothing to go stale.
 
+That minimalism has a consequence worth stating, because it looks like an oddity
+otherwise: `plexos-init` issues the device-mapper ioctls itself rather than calling
+`veritysetup`, and creates `/dev/mapper/plexos-usr` itself rather than waiting for
+`udev`. Neither tool is available at that point — `veritysetup` lives in `cryptsetup`,
+inside the very `/usr` image being verified, and `udev` is exactly what "no module
+loading, nothing to go stale" excludes. See [ADR-0011](adr/0011-syscall-boundary.md).
+
 ## 4. Update flow
 
 ```
@@ -181,17 +188,20 @@ See [ADR-0008](adr/0008-configuration-model.md).
 | --- | --- | --- |
 | `plexos-types` | exists | Formats: partition contract, manifest, config schema, versions |
 | `plexos-gpu` | exists | GPU detection, driver selection, transcode diagnosis |
-| `plexos-init` | partial | PID 1: boot plan and state decisions done; execution and supervisor pending |
+| `plexos-sys` | exists | The only crate allowed `unsafe`: dm-verity ioctls, mount syscalls (ADR-0011) |
+| `plexos-init` | partial | PID 1: plans and executes the boot; supervisor pending |
 | `plexos-update` | planned | Manifest verification, download, slot write, rollback arming |
 | `plexos-storage` | planned | Disk discovery, pools, SMART, snapshots |
 | `plexos-shares` | planned | ksmbd and NFS export configuration |
 | `plexosd` | planned | Management API, setup wizard, config reconciliation |
-| `xtask` | planned | Image assembly, signing, QEMU test harness |
+| `xtask` | planned | Image assembly, signing, QEMU test harness. Image assembly currently lives in `board/plexos/x86_64/post-image.sh` |
 
 Crates are created when there is something real to put in them.
 
 `plexos-types` came first because it is the only one whose mistakes cannot be corrected
-in a later release. `plexos-gpu` came second for the opposite reason: it is entirely
+in a later release — a judgement since vindicated, as two of its four partition type
+GUIDs turned out to be wrong, and every test in the module passed anyway because they
+all checked the layout against itself rather than against the published specification. `plexos-gpu` came second for the opposite reason: it is entirely
 revisable, and it tests the premise everything else rests on. It runs standalone on any
 Linux system, so the question "does QuickSync actually work on this box, and can we
 tell when it does not" is answerable before an image exists to answer it on.

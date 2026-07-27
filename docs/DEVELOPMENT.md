@@ -32,24 +32,56 @@ So image builds happen either on a Linux host you control, or in CI.
 
 ### On a Linux host
 
-Requirements: a real Linux system (WSL2 counts), around 30 GB of free disk, and the
-usual build prerequisites. On Debian or Ubuntu:
+Requirements: a real Linux system (WSL2 counts), around 30 GB of free disk **on the
+filesystem holding the output directory**, and the usual build prerequisites. On
+Debian or Ubuntu:
 
 ```
 sudo apt install build-essential git wget cpio rsync bc unzip file \
                  libncurses-dev flex bison python3
 ```
 
-Buildroot builds its own toolchain and most host tools, so the list is short.
+Buildroot builds its own toolchain and most host tools, so the list is short. Add
+`qemu-system-x86 ovmf` to try the resulting image without hardware.
+
+**Recent Ubuntu ships uutils coreutils**, whose `install(1)` is affected by
+[uutils#12166](https://github.com/uutils/coreutils/issues/12166), and Buildroot
+refuses to build against it. Its own dependency check catches this and names the fix:
 
 ```
-git clone --depth 1 https://github.com/buildroot/buildroot.git ../buildroot-upstream
+sudo update-alternatives --install /usr/bin/install install /usr/bin/gnuinstall 100
+```
+
+Then the build itself. The upstream version is **pinned deliberately** — it carries
+package versions and security patches, so tracking master is not an option:
+
+```
+git clone https://github.com/buildroot/buildroot.git ../buildroot-upstream
+git -C ../buildroot-upstream checkout 2026.02.3
 make -C ../buildroot-upstream \
      BR2_EXTERNAL=$(pwd)/buildroot \
      O=$(pwd)/output \
      plexos_x86_64_defconfig
 make -C ../buildroot-upstream O=$(pwd)/output
 ```
+
+`2026.02.3` is a `YYYY.02` release, which is the series upstream maintains long-term.
+`--depth 1` is deliberately absent: a shallow clone of master gives whatever master
+happens to be today, which is the opposite of a pin.
+
+**Put `TMPDIR` on the same roomy filesystem as the output.** GCC writes temporary
+assembly there, and on a machine where `/tmp` is a small tmpfs the build dies partway
+through `host-gcc-initial` with `Disk quota exceeded` — a message that points at the
+compiler rather than at `/tmp`:
+
+```
+export TMPDIR=$(pwd)/output/tmp && mkdir -p "$TMPDIR"
+```
+
+The output directory can live anywhere, which is the answer when the system disk is
+too small. An external disk formatted ext4 works well; a network filesystem does not.
+NFS was measured at 16 file creations per second against roughly 17,000 locally, and
+Buildroot creates hundreds of thousands of files.
 
 First build: two to four hours on four cores, and closer to six on two. **Every build
 after that is incremental and takes minutes** — which is the whole reason to build
@@ -111,18 +143,55 @@ Nothing about the workflow changes: same repository, same branch, same conventio
 
 ## Trying an image
 
-Once `post-image.sh` exists and a build succeeds, the output is a raw disk image
-containing the full six-partition layout with slot A populated. Write it to a USB
-stick and boot from it — no installer is involved, and nothing on the machine's
-internal disk is touched.
+A successful build ends by running `post-image.sh`, which produces
+`output/images/plexos.img`: a raw disk image with the full six-partition layout and
+slot A populated.
+
+### Under QEMU first
+
+PlexOS boots UEFI only, so QEMU needs OVMF firmware. Give it a writable copy of the
+variable store, or the boot order cannot be recorded:
+
+```
+cp /usr/share/OVMF/OVMF_VARS_4M.fd /tmp/plexos-vars.fd
+qemu-system-x86_64 \
+    -machine q35,accel=kvm -cpu host -m 2048 \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/plexos-vars.fd \
+    -drive if=virtio,format=raw,file=output/images/plexos.img \
+    -nographic
+```
+
+Use `OVMF_CODE_4M.fd`, not the `.secboot.` variant: development images are unsigned
+and Secure Boot firmware will refuse them. `-nographic` puts the console on the
+terminal, which is where `plexos-init` reports each boot step — and on a boot that
+hangs, the last line printed is the step that hung.
+
+`accel=kvm` needs membership of the `kvm` group, and fails with `Could not access KVM
+kernel module: Permission denied` without it:
+
+```
+sudo usermod -aG kvm "$USER"   # then log out and back in
+```
+
+Without KVM, substitute `accel=tcg`. It works and is slow — full software emulation
+of a boot that takes seconds with KVM. Fine for proving the boot path, painful for
+anything iterative.
+
+QEMU proves the kernel, dm-verity, the partition layout, and the mount sequence. It
+proves **nothing** about QuickSync: virtio-gpu has no VA-API, so hardware transcoding
+can only be tested on real hardware.
+
+### On the reference machine
 
 ```
 sudo dd if=output/images/plexos.img of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
-**Turn Secure Boot off in firmware first.** Development images are self-signed, and
-enrolling a key is a decision that has not been made yet.
+No installer is involved, and nothing on the machine's internal disk is touched.
 
-Expect a shell, not a media server. First boot proves the kernel, dm-verity, the
-partition layout, and the mount sequence. Plex needs `plexosd`, app image mounting,
-and provisioning, all of which come later.
+**Turn Secure Boot off in firmware first.** Development images are self-signed, and
+enrolling a key is a decision that has not been made yet (ADR-0004).
+
+Expect a shell, not a media server. Plex needs `plexosd`, app image mounting, and
+provisioning, all of which come later.

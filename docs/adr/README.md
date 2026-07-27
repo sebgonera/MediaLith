@@ -3,9 +3,10 @@
 Each ADR records one decision, the alternatives considered, and the consequences we
 accept. An ADR is never edited after acceptance — it is superseded by a new one.
 
-These ten cover the decisions that are expensive or impossible to reverse once an
-image has shipped to a device: on-disk layout, the trust chain, the update protocol,
-and the schemas that outlive any single release.
+These cover the decisions that are expensive or impossible to reverse once an image
+has shipped to a device: on-disk layout, the trust chain, the update protocol, and the
+schemas that outlive any single release. ADR-0011 is the exception — it is entirely
+revisable, and is recorded because it deliberately suspends a workspace-wide rule.
 
 | ADR | Decision | Status |
 | --- | --- | --- |
@@ -19,6 +20,7 @@ and the schemas that outlive any single release.
 | [0008](0008-configuration-model.md) | Declarative, versioned configuration | Accepted |
 | [0009](0009-persistent-state.md) | Persistent state layout and migrations | Accepted |
 | [0010](0010-plex-provisioning.md) | Plex binary provisioning and redistribution | Accepted |
+| [0011](0011-syscall-boundary.md) | One crate for unsafe, and no libraries on the boot path | Accepted |
 
 ## Template
 

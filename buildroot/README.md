@@ -24,34 +24,49 @@ make -C ../buildroot-upstream \
 
 ## Status
 
-A defconfig and kernel fragment exist and every option in them was checked against a
-Buildroot checkout rather than written from memory. **Nothing here has been built.** A
-Buildroot build needs hours and a large amount of disk, neither of which the
-development environment has, so treat both files as a reviewed first draft that has
-never been compiled.
+Everything named below exists. **No build has yet completed**, so treat the whole tree
+as reviewed but unproven — with the exceptions noted, which have been run.
 
-One known blocker, documented in the defconfig: there is no bootloader yet. See below.
+| | |
+| --- | --- |
+| `configs/plexos_x86_64_defconfig` | Every option verified to survive kconfig, twice. |
+| `board/plexos/x86_64/linux.fragment` | Never compiled. |
+| `package/systemd-boot/` | Builds the bootloader **and** `linuxx64.efi.stub`. Never built. |
+| `package/plexos-init/` | Never built by Buildroot; the command it runs has been run by hand. |
+| `board/plexos/x86_64/post-image.sh` | Stages 1, 2 and 6 exercised against real tools. Stages 3, 4, 5 await the build. |
+
+The upstream Buildroot version is pinned to **2026.02.3**. The `YYYY.02` series is the
+one upstream maintains long-term, which is what makes the CVE story in ADR-0002
+survivable. It carries systemd 258.7, matching `package/systemd-boot`, and rustc
+1.88.0 — see `package/plexos-init/plexos-init.mk` for why that last number matters.
 
 ## What comes next, in order
 
-1. **`package/systemd-boot-standalone/`** — the blocker. ADR-0005 chose `systemd-boot`
-   used as a plain EFI application, but Buildroot's `BR2_PACKAGE_SYSTEMD_BOOT` sits
-   inside `if BR2_PACKAGE_SYSTEMD`, and that is only ever selected by the
-   `BR2_INIT_SYSTEMD` choice — so taking it would drag systemd in as PID 1. The
-   decision in ADR-0005 is still right; its packaging simply does not follow for free.
-   A package here can build just the bootloader from systemd's source, and `gnu-efi`
-   is already available.
-2. **`package/plexos-init/`** — the first Rust package. Buildroot's `pkg-cargo`
-   infrastructure handles vendoring and cross-compilation.
-3. **`board/plexos/x86_64/post-image.sh`** — assemble the image: build the erofs,
-   compute the verity tree, embed the root hash in the UKI command line, sign the UKI,
-   lay out the GPT per `plexos-types::partition::LAYOUT_X86_64`. The ordering is forced
-   by ADR-0004 and the script must enforce it. A UKI is the EFI stub with `.osrel`,
-   `.cmdline`, `.linux`, and `.initrd` sections added, so `objcopy` is enough —
-   systemd's `ukify` would need `python-pefile`, which Buildroot does not carry.
-4. **First boot**, on the reference machine rather than under QEMU. QEMU proves the
-   boot path, verity, and the partition layout; it proves nothing at all about
-   QuickSync, since virtio-gpu has no VA-API.
+1. **Finish the first build.** Nothing below can be trusted until one completes.
+   `tools/build-progress.sh` answers "how far along is it".
+2. **Assemble an image** — `post-image.sh` runs automatically at the end of the build.
+   The three stages it has never executed are the initrd, the UKI, and the ESP.
+3. **Boot it under QEMU** with OVMF, which is the first time any of `plexos-sys` or
+   `plexos-init::execute` will have issued a syscall. Expect a shell, not a media
+   server.
+4. **First boot on the reference machine.** QEMU proves the boot path, verity, and the
+   partition layout; it proves nothing at all about QuickSync, since virtio-gpu has no
+   VA-API.
+
+## Two traps already paid for
+
+**`BR2_PACKAGE_SYSTEMD_BOOT` is a duplicate symbol.** Upstream defines it in
+`package/systemd/Config.in` inside `if BR2_PACKAGE_SYSTEMD`, and that file is sourced
+unconditionally. kconfig merges duplicate definitions rather than erroring. It happens
+to work — the prompt here keeps the symbol reachable, and upstream's
+`select BR2_PACKAGE_SYSTEMD_EFI` is scoped to the `if` and never fires — but it is
+fragile, and upstream's `systemd.mk` also assigns `SYSTEMD_BOOT_EFI_ARCH`. Renaming
+ours to `BR2_PACKAGE_PLEXOS_SYSTEMD_BOOT` is cheap hygiene that has not been done yet.
+
+**Upstream never installs the UKI stub.** A Unified Kernel Image *is*
+`linuxx64.efi.stub` with sections appended, and Buildroot's systemd package installs
+only the bootloader. Without the addition in `package/systemd-boot/`, there is nothing
+to build an image around — the bootloader alone is not enough.
 
 ## Reference hardware
 
