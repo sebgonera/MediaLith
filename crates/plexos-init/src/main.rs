@@ -55,6 +55,30 @@ fn fail(message: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// How long a fatal boot error is left on screen before PID 1 exits.
+///
+/// Exiting panics the kernel immediately, and the panic output buries the line that
+/// explains what actually went wrong. On a machine with a serial console that does
+/// not matter, because the whole log is captured; on a laptop the only record is
+/// whatever someone can read or photograph before it scrolls.
+///
+/// The cost is paid only on a failed boot, and it delays a rollback by this much per
+/// attempt — not the rollback itself, which the bootloader's counter drives.
+const FAILURE_HOLD: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Prints a fatal error, then holds it on screen.
+fn fail_visibly(message: &str) -> ExitCode {
+    eprintln!("\nplexos-init: BOOT FAILED");
+    eprintln!("plexos-init: {message}");
+    eprintln!(
+        "\nplexos-init: holding for {}s so this can be read, then PID 1 exits and the \
+         kernel panics.",
+        FAILURE_HOLD.as_secs()
+    );
+    std::thread::sleep(FAILURE_HOLD);
+    ExitCode::FAILURE
+}
+
 /// The service manager role. Not yet a supervisor: it reports that the boot
 /// succeeded and hands over to a shell, which is what docs/DEVELOPMENT.md promises a
 /// first image does. `plexosd`, the health gate, and Plex itself come later.
@@ -209,6 +233,6 @@ fn main() -> ExitCode {
     // which replaces this process image, so the Ok arm is uninhabited.
     match execute::execute(&steps, &mut log) {
         Ok(never) => match never {},
-        Err(error) => fail(&error.to_string()),
+        Err(error) => fail_visibly(&error.to_string()),
     }
 }

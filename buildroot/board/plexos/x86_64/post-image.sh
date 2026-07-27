@@ -280,7 +280,11 @@ build_uki() {
     # The root hash rides on the command line, inside the signed artifact. This single
     # line is what makes the UKI signature transitively cover every byte of /usr
     # (ADR-0004), and it is why this stage cannot run before the verity stage.
-    printf 'plexos.slot=a plexos.roothash=%s console=tty0 console=ttyS0,115200\n' \
+    # earlycon=efifb is what makes an early panic visible on a machine with no serial
+    # port. It uses the framebuffer the firmware already set up, so it works before
+    # any driver loads -- which is exactly the window where a boot failure is
+    # otherwise silent and the only symptom is a blinking Caps Lock.
+    printf 'plexos.slot=a plexos.roothash=%s earlycon=efifb console=tty0 console=ttyS0,115200\n' \
         "${ROOT_HASH}" > "${WORK}/cmdline"
 
     if [ -f "${TARGET_DIR}/usr/lib/os-release" ]; then

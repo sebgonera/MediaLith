@@ -20,6 +20,29 @@ CONFIG_BLK_DEV_INITRD=y
 CONFIG_RD_GZIP=y
 CONFIG_RD_ZSTD=y
 
+# --- Console ---------------------------------------------------------------
+# Without these the screen stays black and a panic is invisible: CONFIG_VT alone
+# binds tty0 to DUMMY_CONSOLE, which renders nothing. That is survivable under QEMU,
+# where the console is a serial port, and not survivable on the reference machine,
+# which has no serial port at all -- the first hardware boot showed a black screen
+# and a blinking Caps Lock, the kernel's panic signal, with the explanation printed
+# to a console nobody could read.
+#
+# EFI_EARLYCON covers the window before a real console exists, and is reached with
+# earlycon=efifb on the command line (post-image.sh puts it there). SYSFB_SIMPLEFB
+# hands over from it using the framebuffer the firmware already set up, and
+# DRM_FBDEV_EMULATION lets i915 take the console over once it initialises.
+CONFIG_FB=y
+CONFIG_FB_CORE=y
+CONFIG_SYSFB=y
+CONFIG_SYSFB_SIMPLEFB=y
+CONFIG_FB_SIMPLE=y
+CONFIG_FB_EFI=y
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
+CONFIG_DRM_FBDEV_EMULATION=y
+CONFIG_EFI_EARLYCON=y
+
 # --- Verified /usr (ADR-0004) ----------------------------------------------
 # Built in: verity has to be established before any filesystem is mounted, so it
 # cannot itself live in a module on a filesystem.
