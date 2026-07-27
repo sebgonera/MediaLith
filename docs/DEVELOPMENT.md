@@ -174,9 +174,16 @@ kernel module: Permission denied` without it:
 sudo usermod -aG kvm "$USER"   # then log out and back in
 ```
 
-Without KVM, substitute `accel=tcg`. It works and is slow — full software emulation
-of a boot that takes seconds with KVM. Fine for proving the boot path, painful for
-anything iterative.
+Without KVM, substitute `accel=tcg` **and name a CPU**: `-cpu Nehalem` or better.
+This is not optional. The defconfig sets `BR2_x86_corei7`, so everything Buildroot
+compiles targets that instruction set, while QEMU's default `qemu64` model does not
+implement it. The kernel and `plexos-init` boot fine — the former is built for generic
+x86-64 and the latter by the workspace's own cargo — and then the first Buildroot-built
+binary to run dies with `SIGILL`, which the console reports as
+`Attempted to kill init! exitcode=0x00000004`.
+
+`accel=tcg` is otherwise just slow: full software emulation of a boot that takes
+seconds under KVM. Fine for proving the boot path, painful for anything iterative.
 
 QEMU proves the kernel, dm-verity, the partition layout, and the mount sequence. It
 proves **nothing** about QuickSync: virtio-gpu has no VA-API, so hardware transcoding
@@ -195,3 +202,19 @@ enrolling a key is a decision that has not been made yet (ADR-0004).
 
 Expect a shell, not a media server. Plex needs `plexosd`, app image mounting, and
 provisioning, all of which come later.
+
+A first image reaching that shell looks like this, and the last four lines are the
+ones worth checking:
+
+```
+plexos-init: 24/24 switch_root /sysroot /usr/bin/plexos-init
+plexos-init: root assembled, /usr verified, running as the service manager
+plexos-init: no supervisor yet: starting a shell
+~ #
+```
+
+From that shell, `/proc/mounts` should show a tmpfs `/`, `/usr` as erofs on
+`/dev/mapper/plexos-usr` mounted `ro`, `/var` as XFS mounted `rw`, and `/etc` as an
+overlay. `touch /usr/anything` must fail with "Read-only file system": that is
+dm-verity and the read-only mount doing their job, and it is the cheapest check that
+the trust chain is actually assembled rather than merely configured.

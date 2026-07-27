@@ -2,18 +2,16 @@
 #
 # Assemble a bootable PlexOS disk image.
 #
-# NOT YET RUN END TO END, and no image produced by this script has ever been booted.
-# What has actually been executed, against real tools on a mock target tree:
+# All six stages run, and the image they produce boots: systemd-boot loads the UKI,
+# dm-verity opens, /usr mounts read-only from it, /var and the /etc overlay come up,
+# and switch_root hands over to the service manager. Verified under QEMU from inside
+# the running system, not inferred from the build succeeding.
 #
-#   stage 1  /usr erofs        yes — including a byte-identical rebuild
-#   stage 2  verity tree       yes — root hash parsed, verified, and shown to fail
-#                                    on a tampered image
-#   stage 3  initrd            no  — package/plexos-init/ does not exist yet
-#   stage 4  UKI               no  — needs linuxx64.efi.stub from the build
-#   stage 5  ESP               no  — needs host-mtools from the build
-#   stage 6  GPT and placement yes — all six partitions, types, and offsets checked
+# post-image-test.sh exercises the stages individually against real tools in seconds,
+# which is the faster loop when changing anything here.
 #
-# Update this table when a stage is genuinely exercised, and not before.
+# Not yet exercised by any of this: signing. Images are unsigned, so Secure Boot must
+# be off. See ADR-0004, which leaves key handling deliberately undecided.
 #
 # The ordering below is forced by ADR-0004 and this script is where it is enforced:
 #

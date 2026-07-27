@@ -24,16 +24,15 @@ make -C ../buildroot-upstream \
 
 ## Status
 
-Everything named below exists. **No build has yet completed**, so treat the whole tree
-as reviewed but unproven — with the exceptions noted, which have been run.
+The build completes and the image it produces boots to a shell under QEMU.
 
 | | |
 | --- | --- |
 | `configs/plexos_x86_64_defconfig` | Every option verified to survive kconfig, twice. |
-| `board/plexos/x86_64/linux.fragment` | Never compiled. |
-| `package/plexos-systemd-boot/` | Builds the bootloader **and** `linuxx64.efi.stub`. Never built. |
-| `package/plexos-init/` | Never built by Buildroot; the command it runs has been run by hand. |
-| `board/plexos/x86_64/post-image.sh` | Stages 1, 2 and 6 exercised against real tools. Stages 3, 4, 5 await the build. |
+| `board/plexos/x86_64/linux.fragment` | Compiles, boots, and provides verity, erofs, XFS and overlayfs. |
+| `package/plexos-systemd-boot/` | Builds the bootloader **and** `linuxx64.efi.stub`. Both are used. |
+| `package/plexos-init/` | Builds under Buildroot, and the binary is what runs as PID 1. |
+| `board/plexos/x86_64/post-image.sh` | All six stages run; the image boots. |
 
 The upstream Buildroot version is pinned to **2026.02.3**. The `YYYY.02` series is the
 one upstream maintains long-term, which is what makes the CVE story in ADR-0002
@@ -42,16 +41,16 @@ survivable. It carries systemd 258.7, matching `package/plexos-systemd-boot`, an
 
 ## What comes next, in order
 
-1. **Finish the first build.** Nothing below can be trusted until one completes.
-   `tools/build-progress.sh` answers "how far along is it".
-2. **Assemble an image** — `post-image.sh` runs automatically at the end of the build.
-   The three stages it has never executed are the initrd, the UKI, and the ESP.
-3. **Boot it under QEMU** with OVMF, which is the first time any of `plexos-sys` or
-   `plexos-init::execute` will have issued a syscall. Expect a shell, not a media
-   server.
-4. **First boot on the reference machine.** QEMU proves the boot path, verity, and the
+1. **`plexosd` and the health gate** (ADR-0005). Nothing currently clears the boot try
+   counter, so as soon as updates exist every one of them would eventually roll back.
+2. **Plex provisioning** (ADR-0010) and app-image mounting (ADR-0007).
+3. **First boot on the reference machine.** QEMU proves the boot path, verity, and the
    partition layout; it proves nothing at all about QuickSync, since virtio-gpu has no
    VA-API.
+
+Note when testing under QEMU: pass `-cpu Nehalem` or better. The defconfig targets
+corei7 and QEMU's default `qemu64` does not implement it, so the first Buildroot-built
+binary to run dies with SIGILL.
 
 ## Two traps already paid for
 

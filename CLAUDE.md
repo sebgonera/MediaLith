@@ -40,19 +40,22 @@ Everything else is cheap to revise. Prefer revising it.
 | --- | --- |
 | `crates/plexos-types` | Done. Formats and the layout emitter, 41 tests. |
 | `crates/plexos-gpu` | Done as a diagnostic tool, 41 tests. Never run against a real GPU. |
-| `crates/plexos-sys` | The audited unsafe surface: verity superblock, dm ioctls, mount. 39 tests. **The ioctls and mounts have never been executed** — they need root. |
-| `crates/plexos-init` | Plans and executes. 43 tests. Never run as PID 1. |
-| `buildroot/` | defconfig, kernel fragment, systemd-boot, plexos-init package. **Build in progress; never completed.** |
-| `post-image.sh` | Written. Stages 1, 2 and 6 verified against real tools; 3, 4, 5 await the build. |
+| `crates/plexos-sys` | The audited unsafe surface: verity superblock, dm ioctls, mount, exec. Every syscall in it has now run on a real boot. |
+| `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role currently starts a shell and nothing else. |
+| `buildroot/` | Builds. defconfig, kernel fragment, plexos-systemd-boot, plexos-init. |
+| `post-image.sh` | All six stages run, and produce an image that boots. |
 | Installer, `plexosd`, Plex provisioning | Not started. |
 
-Next: finish the first Buildroot build, assemble an image, and boot it under QEMU —
-which is the first time any of the syscall code will have run at all. Then `plexosd`
-and the health gate.
+**The image boots under QEMU to a shell**, with a tmpfs root, `/usr` verified by
+dm-verity and mounted read-only, `/var` writable, and `/etc` as an overlay — all
+confirmed from inside the running system, not inferred.
 
-Nothing in `plexos-sys` or `plexos-init::execute` has executed a single syscall yet.
-Unprivileged user namespaces are blocked by AppArmor on the development machine, so
-QEMU is the first real test, not a formality.
+Next, in order: `plexosd` and the health gate (ADR-0005), without which nothing ever
+clears the boot try counter and every update would eventually roll back; then Plex
+provisioning; then a boot on the reference machine, which is the only way to learn
+anything about QuickSync.
+
+Still unproven: rollback, updates, and anything to do with hardware transcoding.
 
 ## Known traps
 
