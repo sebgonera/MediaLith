@@ -40,22 +40,30 @@ Everything else is cheap to revise. Prefer revising it.
 | --- | --- |
 | `crates/plexos-types` | Done. Formats and the layout emitter, 41 tests. |
 | `crates/plexos-gpu` | Done as a diagnostic tool, 41 tests. Never run against a real GPU. |
-| `crates/plexos-sys` | The audited unsafe surface: verity superblock, dm ioctls, mount, exec. Every syscall in it has now run on a real boot. |
-| `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role currently starts a shell and nothing else. |
-| `buildroot/` | Builds. defconfig, kernel fragment, plexos-systemd-boot, plexos-init. |
-| `post-image.sh` | All six stages run, and produce an image that boots. |
-| Installer, `plexosd`, Plex provisioning | Not started. |
+| `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec, partition-label lookup. Every syscall in it has run on real hardware. |
+| `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate and then starts a shell. |
+| `crates/plexosd` | Health gate and boot-counter clearing. No management API yet. |
+| `buildroot/` | Builds. defconfig, kernel fragment, and packages for `plexos-init`, `plexosd`, `plexos-gpu` and `plexos-systemd-boot`. |
+| `post-image.sh` | All six stages run, and produce an image that boots on hardware. |
+| Installer, Plex provisioning, updater | Not started. |
 
-**The image boots under QEMU to a shell**, with a tmpfs root, `/usr` verified by
-dm-verity and mounted read-only, `/var` writable, and `/etc` as an overlay — all
-confirmed from inside the running system, not inferred.
+**The image boots on the reference laptop, from a USB stick, to a shell.** tmpfs root,
+`/usr` verified by dm-verity and mounted read-only, `/var` writable, `/etc` an overlay.
+The health gate runs and `plexosd` clears the boot try counter, so a good slot becomes
+permanent — confirmed by the entry on the ESP being renamed.
 
-Next, in order: `plexosd` and the health gate (ADR-0005), without which nothing ever
-clears the boot try counter and every update would eventually roll back; then Plex
-provisioning; then a boot on the reference machine, which is the only way to learn
-anything about QuickSync.
+Next, in order:
 
-Still unproven: rollback, updates, and anything to do with hardware transcoding.
+1. **Run `plexos-gpu` on the reference laptop.** It has 41 tests and has never seen a
+   real GPU. This is the question the project exists to answer and it is still open.
+2. **Plex provisioning** (ADR-0010) and app-image mounting (ADR-0007). Until Plex is
+   installed the health gate's `plex-http` check reports `NotApplicable`, which is
+   correct but means the gate is weaker than ADR-0005 intends.
+3. **`plexos-update`** — nothing implements the update flow, so rollback has never
+   been exercised end to end.
+
+Still unproven: hardware transcoding, updates, rollback, and signing. Images are
+unsigned, so Secure Boot must be off.
 
 ## Known traps
 
@@ -81,6 +89,19 @@ Still unproven: rollback, updates, and anything to do with hardware transcoding.
 - **`/tmp` is small, and GCC uses it.** A Buildroot build dies partway through
   `host-gcc-initial` with `Disk quota exceeded` if `/tmp` is a modest tmpfs. The
   message names the compiler, not `/tmp`. Set `TMPDIR` alongside the output directory.
+- **The last `console=` on the kernel command line becomes `/dev/console`.** Kernel
+  messages go to every console listed; userspace output goes only to that one. Put
+  `console=tty0` last, or every diagnostic disappears into a serial port the machine
+  may not have. This cost three images to find.
+- **QEMU cannot test the console path.** Under `-nographic` the console is a serial
+  port, which is the one channel that is invisible on the reference laptop. Verify a
+  boot by booting a *copy* of the image and checking that the ESP entry was renamed
+  from `plexos-0.1.0+3.efi` to `plexos-0.1.0.efi` — on-disk evidence that does not
+  depend on where output went.
+- **`udev` does not exist here, and three separate things assumed it did.**
+  `/dev/mapper/<name>`, `/dev/disk/by-partlabel/*` for the root, and the same for the
+  ESP. `plexos_sys::device` resolves labels through sysfs `PARTNAME`; use it rather
+  than opening a `by-partlabel` path.
 - **The boot health gate must check Plex on loopback only.** USB Ethernet enumerates
   seconds after PCI; a gate that waited for the network would roll back good updates.
 
