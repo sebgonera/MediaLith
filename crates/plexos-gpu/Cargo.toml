@@ -1,0 +1,15 @@
+[package]
+name = "plexos-gpu"
+version = "0.1.0"
+description = "GPU detection, VA-API driver selection, and hardware transcode self-test"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

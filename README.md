@@ -36,8 +36,8 @@ Everything we own is Rust:
 | `plexosd` | Management API and setup wizard; applies declarative config to system state |
 | `plexos-types` | Shared definitions of every on-disk and on-wire format |
 
-Only `plexos-types` exists today, and deliberately so: it is the crate that pins the
-decisions we cannot revise later.
+`plexos-types` and `plexos-gpu` exist today. The first pins the decisions we cannot
+revise later; the second tests the premise the whole project rests on.
 
 ## Repository layout
 
@@ -45,8 +45,24 @@ decisions we cannot revise later.
 docs/ARCHITECTURE.md   System design and component responsibilities
 docs/adr/              Accepted architecture decision records
 crates/plexos-types/   On-disk and on-wire format definitions
+crates/plexos-gpu/     GPU detection and hardware transcode diagnosis
 buildroot/             BR2_EXTERNAL tree (skeleton)
 ```
+
+## Checking your hardware today
+
+`plexos-gpu` runs standalone on any Linux system, not just on PlexOS. If you are
+considering a machine as a Plex box, this answers whether its hardware transcoding
+actually works — and if not, what to do about it:
+
+```
+cargo run -p plexos-gpu           # human-readable report
+cargo run -p plexos-gpu -- --json # for tooling
+
+# exit status: 0 ready, 1 degraded, 2 unavailable
+```
+
+It needs `vainfo` (from `libva-utils`) to reach its most useful conclusions.
 
 ## Design principles
 

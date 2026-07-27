@@ -152,17 +152,21 @@ See [ADR-0008](adr/0008-configuration-model.md).
 | Crate | Status | Responsibility |
 | --- | --- | --- |
 | `plexos-types` | exists | Formats: partition contract, manifest, config schema, versions |
+| `plexos-gpu` | exists | GPU detection, driver selection, transcode diagnosis |
 | `plexos-init` | planned | PID 1, verity/mount setup, supervisor, health gate |
 | `plexos-update` | planned | Manifest verification, download, slot write, rollback arming |
-| `plexos-gpu` | planned | GPU detection, driver selection, transcode self-test |
 | `plexos-storage` | planned | Disk discovery, pools, SMART, snapshots |
 | `plexos-shares` | planned | ksmbd and NFS export configuration |
 | `plexosd` | planned | Management API, setup wizard, config reconciliation |
 | `xtask` | planned | Image assembly, signing, QEMU test harness |
 
-Crates are created when there is something real to put in them. `plexos-types` exists
-first because it is the only one whose mistakes cannot be corrected in a later
-release.
+Crates are created when there is something real to put in them.
+
+`plexos-types` came first because it is the only one whose mistakes cannot be corrected
+in a later release. `plexos-gpu` came second for the opposite reason: it is entirely
+revisable, and it tests the premise everything else rests on. It runs standalone on any
+Linux system, so the question "does QuickSync actually work on this box, and can we
+tell when it does not" is answerable before an image exists to answer it on.
 
 ## 9. Known risks
 

@@ -8,5 +8,11 @@ doc-valid-idents = [
     "VA-API",
     "dm-verity",
     "systemd-boot",
+    "GuC",
+    "HuC",
+    "NVENC",
+    "iGPU",
+    "iGPUs",
+    "FFmpeg",
     "..",
 ]
