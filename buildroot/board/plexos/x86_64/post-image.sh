@@ -213,6 +213,42 @@ build_verity() {
 # §3). The static link is what makes that possible: a dynamic plexos-init would drag
 # the loader and libc into the initrd, and they would have to be kept in step with a
 # /usr this early code cannot yet read.
+# GuC and HuC, into the initrd rather than into /usr.
+#
+# i915 is built into the kernel (CONFIG_DRM_I915=y) and fetches this firmware while it
+# probes, during do_initcalls. /usr does not exist yet at that moment and will not for
+# another second or so, so firmware living there is firmware i915 never sees: it
+# continues without GuC and HuC, silently, and the only symptom is transcodes that come
+# out worse than they should at a given bitrate.
+#
+# The initramfs is unpacked by rootfs_initcall, which runs *before* the device_initcall
+# that probes i915, so this is the earliest place the files can be and still be found.
+#
+# The alternative is CONFIG_EXTRA_FIRMWARE, which compiles them into the kernel. It
+# works, and it needs CONFIG_EXTRA_FIRMWARE_DIR to be an absolute path into Buildroot's
+# target directory — a path that differs per build tree and cannot be written into a
+# kconfig fragment that is checked in. This keeps image assembly in the script that
+# does image assembly.
+#
+# Whiskey Lake-U is Gen9.5 and i915 asks for the Kaby Lake blobs; the names come from
+# the fw_def table in drivers/gpu/drm/i915/gt/uc/intel_uc_fw.c rather than from
+# guesswork, and a mismatch is checked below rather than discovered on the machine.
+install_gpu_firmware() {
+    local wanted=(i915/kbl_guc_70.1.1.bin i915/kbl_huc_4.0.0.bin)
+    local from="${TARGET_DIR}/usr/lib/firmware"
+    local total=0
+
+    for blob in "${wanted[@]}"; do
+        [ -e "${from}/${blob}" ] || die \
+            "the kernel wants ${blob} and linux-firmware did not provide it" \
+            "check BR2_PACKAGE_LINUX_FIRMWARE_I915 is still set, and that the name still matches the fw_def table in drivers/gpu/drm/i915/gt/uc/intel_uc_fw.c — upstream renames these between kernel versions"
+        install -D -m 0444 "${from}/${blob}" "${WORK}/initrd/lib/firmware/${blob}"
+        total=$(( total + $(stat -c %s "${from}/${blob}") ))
+    done
+
+    msg "  GuC/HuC firmware in initrd: $(( total / 1024 )) KiB"
+}
+
 build_initrd() {
     msg "building initrd"
     local init="${TARGET_DIR}/usr/bin/plexos-init"
@@ -241,6 +277,8 @@ build_initrd() {
     # Creating them here rather than at runtime keeps step one of the plan honest: it
     # mounts, it does not also have to mkdir.
     mkdir -p "${WORK}/initrd"/{dev,proc,sys,run,sysroot}
+
+    install_gpu_firmware
 
     ( cd "${WORK}/initrd" && find . -print0 \
         | sort -z \
