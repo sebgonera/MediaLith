@@ -201,14 +201,24 @@ fn firmware_findings(status: FirmwareStatus) -> Vec<Finding> {
              and reboot. HuC cannot be authenticated without GuC.",
         ));
     }
-    // Unknown is the common case: debugfs is usually unmounted or unreadable. It is
-    // reported so the absence is visible, never as something to act on.
+    // Unknown is the common case off the appliance: debugfs is usually unmounted or
+    // unreadable. It is reported so the absence is visible.
+    //
+    // The remedy used to end "the transcode test below is the authoritative check".
+    // There is no transcode test, here or anywhere in this crate, and there never has
+    // been. Pointing a reader at a check that does not exist is the trap already in
+    // CLAUDE.md about `could not bind :80`: a wrong remedy costs more than none,
+    // because it is followed. On PlexOS this state now means something has gone wrong
+    // with the mount, since plexos-init mounts debugfs before anything reads this.
     if status.huc == LoadState::Unknown && status.guc == LoadState::Unknown {
         findings.push(Finding::new(
             Severity::Info,
             "Could not determine GuC/HuC firmware status",
-            "This is normal when debugfs is not mounted. Firmware may well be loaded; \
-             the transcode test below is the authoritative check.",
+            "The state lives in debugfs, and debugfs is not mounted. On PlexOS \
+             plexos-init mounts it during startup, so this means that mount failed — \
+             check the boot log. Elsewhere, `mount -t debugfs debugfs /sys/kernel/debug` \
+             makes it readable. HuC affects transcode quality at low bitrates, so this \
+             is worth resolving rather than living with.",
         ));
     }
     findings

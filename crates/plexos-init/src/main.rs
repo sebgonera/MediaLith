@@ -94,6 +94,32 @@ fn supervise_system() -> ExitCode {
     let mut log = execute::StderrLog;
     log.line("root assembled, /usr verified, running as the service manager");
 
+    // debugfs, purely so plexos-gpu can read the GuC/HuC load state. That state lives
+    // nowhere else: i915 publishes it under /sys/kernel/debug/dri/0/, and HuC is what
+    // gives QuickSync its quality at low bitrates, so "unknown" is the one answer this
+    // appliance must not settle for on the question it exists to answer.
+    //
+    // Here rather than in the boot plan: the plan runs in the initrd, and its /sys is
+    // moved into the new root near the end. Mounting a filesystem *underneath* one that
+    // is about to be moved works, but it makes the move's behaviour part of what has to
+    // be right, and there is nothing to gain from it being early.
+    //
+    // Failure is logged and ignored. A machine with no debugfs is a machine whose GPU
+    // report says "unknown" — worse, but not worth refusing to boot over.
+    match plexos_sys::mount::mount(
+        "debugfs",
+        "/sys/kernel/debug",
+        "debugfs",
+        "nosuid,nodev,noexec",
+    ) {
+        Ok(()) => log.line("debugfs mounted; the GPU report can read GuC/HuC state"),
+        Err(error) => log.line(&format!(
+            "could not mount debugfs: {error}. The GPU report will say its firmware \
+             state is unknown, which hides whether HuC is loaded. Everything else is \
+             unaffected."
+        )),
+    }
+
     // ARCHITECTURE.md §2 step 7. Run before the shell, and its result is reported
     // rather than acted on: a failed gate must leave the try counter standing so the
     // slot rolls back, which is precisely what plexosd does by not clearing it.
