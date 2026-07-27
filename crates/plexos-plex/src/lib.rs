@@ -34,6 +34,7 @@
 
 pub mod ar;
 pub mod manifest;
+pub mod store;
 pub mod verify;
 
 /// Fingerprint of the key every Plex package and repository index is signed with.
