@@ -1,0 +1,6 @@
+# PlexOS package menu entries are sourced here as packages are added, e.g.:
+#
+#   source "$BR2_EXTERNAL_PLEXOS_PATH/package/plexos-init/Config.in"
+#
+# Empty for now: no PlexOS packages exist yet. Buildroot accepts an empty
+# BR2_EXTERNAL Config.in, so this tree is usable as-is.

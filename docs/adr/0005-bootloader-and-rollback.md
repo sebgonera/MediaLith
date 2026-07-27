@@ -1,0 +1,79 @@
+# ADR-0005: systemd-boot with boot counting for rollback
+
+**Status:** Accepted
+**Date:** 2026-07-27
+
+## Context
+
+A bad update must undo itself with nobody present. That requires state that survives
+a reboot, is written before the risky boot and evaluated after it, and is durable
+against power loss at any instant — including during its own update.
+
+It also requires a definition of success. "The kernel started" is far too weak: a
+kernel that boots into a system where Plex cannot run has not succeeded, and it will
+happily keep not-succeeding forever.
+
+## Decision
+
+**Bootloader: `systemd-boot`**, used as a standalone EFI application. It does not
+imply systemd as PID 1 — PlexOS runs `plexos-init`.
+
+**Rollback state: `systemd-boot`'s boot-counting convention**, which encodes the
+counter in the UKI's filename on the ESP:
+
+```
+EFI/Linux/plexos-0.2.0+3.efi      3 tries left, none used
+EFI/Linux/plexos-0.2.0+2-1.efi    after one failed boot
+EFI/Linux/plexos-0.2.0+0-3.efi    exhausted; skipped in favour of the other entry
+EFI/Linux/plexos-0.2.0.efi        marked good; no counter
+```
+
+The bootloader decrements by renaming the file before handing off to the kernel. FAT
+directory entry renames are the closest thing to an atomic operation available this
+early in boot, and there is no dependence on EFI variable writes, which have limited
+write endurance and inconsistent firmware behaviour.
+
+**Success is declared by `plexosd`, not by `plexos-init`.** The current entry is
+renamed to its unsuffixed form only after:
+
+- `plexosd` is responding on its socket,
+- `/var` is mounted read-write,
+- Plex Media Server is answering HTTP.
+
+Until then the counter stands. Three bad boots and the previous slot wins.
+
+## Alternatives considered
+
+**Writing our own EFI bootloader in Rust.** Tempting for a project with "written in
+Rust" as a goal, and technically achievable. Rejected: a bootloader is the one
+component where a bug means an unrecoverable brick, `systemd-boot` already implements
+exactly the counting scheme needed, and the effort buys no Plex-specific value. This
+is the wrong place to spend novelty.
+
+**GRUB with a persistent environment block.** Widely deployed and well understood.
+Rejected: substantially larger, its scripting layer is a liability rather than an
+asset for a fixed two-entry appliance, and `grubenv` writes are less obviously atomic
+than a FAT rename.
+
+**EFI variables for the boot counter.** The obvious place to put boot state. Rejected:
+limited write endurance, and a genuine history of firmware bugs bricking machines on
+variable writes. Not somewhere to write on every boot.
+
+**`plexos-init` declaring success once services are spawned.** Rejected, and this is
+the important rejection. Spawning is not working. An update that breaks Plex while
+leaving PID 1 healthy would be marked good and never rolled back — precisely the
+failure this mechanism exists to catch.
+
+## Consequences
+
+- `systemd-boot` is a C dependency on the boot path, tracked and updated with the
+  same care as the kernel.
+- The health gate becomes safety-critical. If it is too strict, healthy systems roll
+  back into an older image on a transient failure — an infuriating and hard-to-debug
+  outcome. Its conditions must stay narrow, and each must be independently testable.
+- Rollback protects against one bad update, not two. A device that has taken two
+  consecutive bad updates has no known-good slot left and needs recovery media.
+- Rollback returns the system to the previous `/usr` and kernel. It does **not** roll
+  back `/var`. Any migration that rewrites persistent state must therefore stay
+  readable by the previous release — see ADR-0009.
+- The ESP must have room for three UKIs during an update. Sized for in ADR-0003.

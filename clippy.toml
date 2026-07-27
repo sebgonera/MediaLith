@@ -1,0 +1,12 @@
+# Product, project, and technology names that appear in prose throughout the docs.
+# Without these, clippy::doc_markdown demands backticks around them, which would
+# wrongly render names as code. ".." keeps clippy's own default list.
+doc-valid-idents = [
+    "PlexOS",
+    "OpenEmbedded",
+    "QuickSync",
+    "VA-API",
+    "dm-verity",
+    "systemd-boot",
+    "..",
+]

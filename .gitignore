@@ -1,0 +1,18 @@
+/target
+**/*.rs.bk
+
+# Buildroot output and pinned upstream checkout
+/buildroot/output/
+/buildroot/dl/
+/buildroot-upstream/
+
+# Build artifacts
+*.img
+*.erofs
+*.efi
+*.verity
+
+# Signing material must never be committed
+*.pem
+*.key
+secrets/

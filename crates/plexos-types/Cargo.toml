@@ -1,0 +1,16 @@
+[package]
+name = "plexos-types"
+version = "0.1.0"
+description = "On-disk and on-wire format definitions shared by every PlexOS component"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+[lints]
+workspace = true
