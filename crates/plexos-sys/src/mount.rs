@@ -169,11 +169,14 @@ pub fn move_mount(from: &str, to: &str) -> io::Result<()> {
 ///
 /// Any failure of the sequence. Each error names the step, because "No such file or
 /// directory" on its own could mean the new root, the init binary, or neither.
-pub fn switch_root(new_root: &str, init: &str) -> io::Result<std::convert::Infallible> {
+pub fn switch_root(
+    new_root: &str,
+    init: &str,
+    args: &[&str],
+) -> io::Result<std::convert::Infallible> {
     let c_new_root = c_string(new_root)?;
     let c_dot = c_string(".")?;
     let c_slash = c_string("/")?;
-    let c_init = c_string(init)?;
 
     if !Path::new(new_root)
         .join(init.trim_start_matches('/'))
@@ -235,16 +238,11 @@ pub fn switch_root(new_root: &str, init: &str) -> io::Result<std::convert::Infal
         ));
     }
 
-    let argv = [c_init.as_ptr(), std::ptr::null()];
-    // SAFETY: c_init outlives the call, and argv is NULL-terminated as execv
-    // requires. On success this never returns, so nothing after it can observe the
-    // borrowed pointers.
-    unsafe { libc::execv(c_init.as_ptr(), argv.as_ptr()) };
-
-    Err(io::Error::new(
-        io::Error::last_os_error().kind(),
-        format!("executing {init}: {}", io::Error::last_os_error()),
-    ))
+    // The new init is told which role it is playing. Without an argument it would
+    // read the same command line, compute the same plan, and run it again -- which
+    // is exactly what the first booting image did, failing at verity with EBUSY
+    // because the device it was about to create already existed.
+    crate::process::exec(init, args)
 }
 
 #[cfg(test)]
@@ -367,7 +365,7 @@ mod tests {
     fn switch_root_refuses_when_the_init_is_not_in_the_new_root() {
         // Checked before anything is moved, because after MS_MOVE there is no way
         // back and the kernel panics on a PID 1 that could not be executed.
-        let error = switch_root("/nonexistent-root", "/usr/bin/plexos-init").unwrap_err();
+        let error = switch_root("/nonexistent-root", "/usr/bin/plexos-init", &[]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(error.to_string().contains("cannot be booted"), "{error}");
     }

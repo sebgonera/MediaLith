@@ -78,11 +78,7 @@ fn read_superblock(hash_device: &str) -> io::Result<VeritySuperblock> {
         let mut file = fs::File::open(hash_device).map_err(|error| {
             io_error(
                 error.kind(),
-                format!(
-                    "opening verity hash device {hash_device}: {error}; \
-                     the partition label may be missing, which happens when a disk \
-                     imaging tool drops GPT labels (ADR-0003)"
-                ),
+                format!("opening verity hash device {hash_device}: {error}"),
             )
         })?;
         let mut buffer = vec![0u8; plexos_sys::verity::SUPERBLOCK_BYTES];
@@ -155,6 +151,52 @@ fn apply_state(action: StateAction, log: &mut dyn Log) -> io::Result<()> {
     }
 }
 
+/// Whether `path` is a mount point, without consulting `/proc`.
+///
+/// A mounted directory sits on a different device from its parent, so comparing the
+/// two `st_dev` values answers the question. Reading `/proc/self/mountinfo` would be
+/// the usual approach and cannot be used here: this is called to decide whether
+/// `/proc` itself is mounted.
+fn is_mounted(path: &str) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let Ok(target) = fs::metadata(path) else {
+        return false;
+    };
+    let Some(parent) = Path::new(path).parent() else {
+        return false;
+    };
+    let Ok(parent) = fs::metadata(parent) else {
+        return false;
+    };
+    target.dev() != parent.dev()
+}
+
+/// Mounts `/proc` so the kernel command line can be read.
+///
+/// This exists because of an ordering problem that only appears on a real boot, and
+/// did: the boot plan is a pure function of the kernel command line, the command line
+/// is read from `/proc/cmdline`, and mounting `/proc` is a step *in* the plan. The
+/// first image built panicked with "could not read /proc/cmdline: No such file or
+/// directory" for exactly this reason.
+///
+/// So a small bootstrap runs before planning. The plan still contains its own
+/// `/proc` mount, because the plan describes a complete boot and should be readable
+/// as such; [`perform`] skips any pseudo-filesystem already mounted rather than
+/// stacking a second mount over it.
+///
+/// # Errors
+///
+/// If `/proc` can neither be created nor mounted, in which case the command line
+/// cannot be read and there is nothing to plan from.
+pub fn bootstrap_proc() -> io::Result<()> {
+    if is_mounted("/proc") {
+        return Ok(());
+    }
+    fs::create_dir_all("/proc")?;
+    mount::mount("proc", "/proc", "proc", "nosuid,nodev,noexec")
+}
+
 /// Performs one step.
 fn perform(step: &BootStep, log: &mut dyn Log) -> io::Result<()> {
     match step {
@@ -163,11 +205,27 @@ fn perform(step: &BootStep, log: &mut dyn Log) -> io::Result<()> {
             target,
             options,
         } => {
+            // Already mounted by the bootstrap above, or by a previous attempt.
+            // Mounting again would succeed and stack a second mount on the same
+            // point, leaving MoveMount to carry only the top one into the new root.
+            if is_mounted(target) {
+                log.line(&format!("{target} is already mounted, skipping"));
+                return Ok(());
+            }
             fs::create_dir_all(target)?;
             mount::mount(fstype, target, fstype, options)
         }
 
         BootStep::CreateDir { path } => fs::create_dir_all(path),
+
+        BootStep::Symlink { target, link } => {
+            // Idempotent: a retried boot, or a link the image already carries,
+            // should not fail the whole sequence.
+            match std::os::unix::fs::symlink(target, link) {
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+                other => other,
+            }
+        }
 
         BootStep::SetupVerity {
             data_device,
@@ -175,15 +233,21 @@ fn perform(step: &BootStep, log: &mut dyn Log) -> io::Result<()> {
             root_hash,
             mapper_name,
         } => {
-            let superblock = read_superblock(hash_device)?;
+            // The plan names devices by GPT label, which is how ADR-0003 carries
+            // slot identity. udev is what normally turns those into paths, and the
+            // initrd has none, so resolve them here.
+            let data_device = crate::device::resolve(data_device)?;
+            let hash_device = crate::device::resolve(&hash_device.clone())?;
+            let superblock = read_superblock(&hash_device)?;
             log.line(&format!(
                 "verity: {} blocks of {} bytes, {}",
                 superblock.data_blocks, superblock.data_block_size, superblock.algorithm
             ));
+            log.line(&format!("verity: data {data_device}, hash {hash_device}"));
             let node = dm::create_verity(
                 mapper_name,
-                data_device,
-                hash_device,
+                &data_device,
+                &hash_device,
                 root_hash,
                 &superblock,
             )?;
@@ -196,7 +260,10 @@ fn perform(step: &BootStep, log: &mut dyn Log) -> io::Result<()> {
             target,
             fstype,
             options,
-        } => mount::mount(source, target, fstype, options),
+        } => {
+            let source = crate::device::resolve(source)?;
+            mount::mount(&source, target, fstype, options)
+        }
 
         BootStep::MountOverlay {
             lower,
@@ -218,7 +285,7 @@ fn perform(step: &BootStep, log: &mut dyn Log) -> io::Result<()> {
 
         BootStep::SwitchRoot { new_root, init } => {
             // Never returns on success.
-            mount::switch_root(new_root, init).map(|_| ())
+            mount::switch_root(new_root, init, &[crate::plan::SUPERVISE_FLAG]).map(|_| ())
         }
     }
 }
@@ -295,10 +362,7 @@ mod tests {
         let error = read_superblock("/nonexistent-hash-device").unwrap_err();
         let text = error.to_string();
         assert!(text.contains("/nonexistent-hash-device"), "{text}");
-        assert!(
-            text.contains("label"),
-            "a missing device here is usually a dropped GPT label: {text}"
-        );
+        assert!(text.contains("verity hash device"), "{text}");
     }
 
     #[test]
@@ -427,6 +491,41 @@ mod tests {
         let mut log = Collect(Vec::new());
         let error = execute(&[], &mut log).unwrap_err();
         assert!(error.to_string().contains("nothing to run"), "{error}");
+    }
+
+    #[test]
+    fn a_mounted_filesystem_is_recognised_without_reading_proc() {
+        // /proc is mounted on any machine running these tests, and sits on a
+        // different device from /. If this ever returns false, bootstrap_proc would
+        // stack a second /proc over the first on every boot.
+        assert!(is_mounted("/proc"), "/proc should be detected as a mount");
+    }
+
+    #[test]
+    fn an_ordinary_directory_is_not_mistaken_for_a_mount() {
+        // A false positive here is worse than a false negative: the pseudo-filesystem
+        // would be skipped and never mounted at all.
+        assert!(!is_mounted("/proc/self"), "/proc/self is not a mount point");
+        assert!(!is_mounted("/nonexistent-path-xyz"));
+    }
+
+    #[test]
+    fn an_already_mounted_pseudo_filesystem_is_skipped_not_stacked() {
+        // The bootstrap mounts /proc before planning, so the plan's own /proc step
+        // must become a no-op. Mounting again succeeds and stacks a second mount on
+        // the same point, after which MoveMount carries only the top one across.
+        let step = BootStep::MountPseudo {
+            fstype: "proc",
+            target: "/proc".to_owned(),
+            options: "nosuid,nodev,noexec",
+        };
+        let mut log = Collect(Vec::new());
+        perform(&step, &mut log).expect("skipping an existing mount must succeed");
+        assert!(
+            log.0.iter().any(|l| l.contains("already mounted")),
+            "the skip should be visible on the console: {:?}",
+            log.0
+        );
     }
 
     #[test]

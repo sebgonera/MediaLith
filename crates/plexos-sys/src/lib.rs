@@ -40,6 +40,7 @@
 
 pub mod dm;
 pub mod mount;
+pub mod process;
 pub mod verity;
 
 pub use verity::{VerityError, VeritySuperblock};

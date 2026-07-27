@@ -142,6 +142,22 @@ preflight() {
 # the root is a tmpfs assembled at boot, so anything outside /usr in the target
 # directory is either recreated by plexos-init or deliberately discarded.
 build_usr_image() {
+    # The /etc overlay takes its lower layer from inside the read-only image
+    # (paths::ETC_FACTORY), and its upper layer from /var. Buildroot leaves its
+    # configuration in /etc, which is not part of /usr and therefore is not in the
+    # image at all -- so without this the overlay mount fails with ENOENT on the
+    # lower directory, fifteen steps into an otherwise working boot.
+    #
+    # Staged into TARGET_DIR rather than a copy of it, so mkfs.erofs still has a
+    # single source tree. --all-root below makes the ownership right regardless of
+    # who ran the build.
+    local factory="${TARGET_DIR}/usr/share/factory/etc"
+    msg "staging factory /etc into the image"
+    rm -rf "${factory}"
+    mkdir -p "${factory}"
+    cp -a "${TARGET_DIR}/etc/." "${factory}/"
+    msg "  $(find "${factory}" -mindepth 1 -maxdepth 1 | wc -l) entries"
+
     msg "building /usr erofs image"
     "${HOST_DIR}/bin/mkfs.erofs" \
         --quiet \

@@ -29,11 +29,37 @@ use crate::state::StateAction;
 /// Where the real root is assembled before switching into it.
 pub const SYSROOT: &str = "/sysroot";
 
+/// The merged-`/usr` compatibility symlinks, as `(link, target)`.
+///
+/// A merged `/usr` is what makes `/usr` the unit of update at all (ADR-0001), and
+/// these four links are the other half of that arrangement: every `/bin/...` and
+/// `/lib/...` path in the system resolves through them. Buildroot creates them in its
+/// target root, but the root PlexOS boots is a tmpfs assembled here, so they have to
+/// be recreated — nothing carries them across.
+///
+/// Omitting them produces a system that mounts perfectly and then cannot execute
+/// `/bin/sh`, which is how the first image to reach the service manager failed.
+pub const MERGED_USR_LINKS: [(&str, &str); 4] = [
+    ("/bin", "usr/bin"),
+    ("/sbin", "usr/sbin"),
+    ("/lib", "usr/lib"),
+    ("/lib64", "lib"),
+];
+
 /// Device-mapper name for the verified `/usr` image.
 pub const VERITY_MAPPER_NAME: &str = "plexos-usr";
 
 /// The service manager `switch_root` hands control to.
 pub const REAL_INIT: &str = "/usr/bin/plexos-init";
+
+/// Passed to [`REAL_INIT`] so it knows it is the second of the two roles described in
+/// ARCHITECTURE.md §3, and must supervise rather than assemble a root that already
+/// exists.
+///
+/// Without it the second invocation reads the same command line, computes the same
+/// plan, and executes it again. The first image that booted this far did exactly
+/// that, and failed at verity with `EBUSY` on a device it had itself just created.
+pub const SUPERVISE_FLAG: &str = "--supervise";
 
 /// One operation in the boot sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +77,13 @@ pub enum BootStep {
     CreateDir {
         /// Path to create.
         path: String,
+    },
+    /// Create a symbolic link.
+    Symlink {
+        /// What the link points at.
+        target: &'static str,
+        /// Where the link is created.
+        link: String,
     },
     /// Set up dm-verity over a slot's `/usr` image.
     ///
@@ -115,6 +148,7 @@ impl fmt::Display for BootStep {
                 options,
             } => write!(f, "mount -t {fstype} -o {options} {fstype} {target}"),
             Self::CreateDir { path } => write!(f, "mkdir -p {path}"),
+            Self::Symlink { target, link } => write!(f, "ln -s {target} {link}"),
             Self::SetupVerity {
                 data_device,
                 hash_device,
@@ -222,6 +256,16 @@ pub fn boot_plan(args: &BootArgs, state: StateAction) -> Vec<BootStep> {
         fstype: "erofs",
         options: "ro,nodev,nosuid",
     });
+
+    // The compatibility links, created on the tmpfs root now that /usr is under it.
+    // Relative targets, so they resolve correctly both here under /sysroot and after
+    // switch_root has made it /.
+    for (link, target) in MERGED_USR_LINKS {
+        steps.push(BootStep::Symlink {
+            target,
+            link: under_sysroot(link),
+        });
+    }
 
     // /var carries executable app images (ADR-0007), so nosuid,nodev is not optional.
     let var_target = under_sysroot(paths::VAR);
@@ -370,6 +414,44 @@ mod tests {
         let var_prefix = under_sysroot("/var/");
         assert!(upper.starts_with(&var_prefix), "upper: {upper}");
         assert!(work.starts_with(&var_prefix), "work: {work}");
+    }
+
+    #[test]
+    fn the_merged_usr_links_are_created_after_usr_is_mounted() {
+        // They point into /usr, so creating them earlier would produce dangling
+        // links; the system would still boot and then fail to run anything.
+        let steps = plan_for(Slot::A);
+        let usr = position(
+            &steps,
+            |s| matches!(s, BootStep::Mount { target, .. } if target.ends_with("/usr")),
+        );
+        for (link, _) in MERGED_USR_LINKS {
+            let expected = under_sysroot(link);
+            let at = position(
+                &steps,
+                |s| matches!(s, BootStep::Symlink { link, .. } if *link == expected),
+            );
+            assert!(at > usr, "{link} is created before /usr is mounted");
+        }
+    }
+
+    #[test]
+    fn the_merged_usr_link_targets_are_relative() {
+        // An absolute target would point at the *initrd's* /usr while the plan runs
+        // under /sysroot, and the links would silently resolve to the wrong tree.
+        for (_, target) in MERGED_USR_LINKS {
+            assert!(!target.starts_with('/'), "{target} must be relative");
+        }
+    }
+
+    #[test]
+    fn every_link_needed_to_execute_a_binary_is_present() {
+        // /bin/sh is what the service manager starts, and shebang lines and the
+        // dynamic loader path both resolve through these.
+        let links: Vec<&str> = MERGED_USR_LINKS.iter().map(|(l, _)| *l).collect();
+        for required in ["/bin", "/sbin", "/lib", "/lib64"] {
+            assert!(links.contains(&required), "{required} link missing");
+        }
     }
 
     #[test]

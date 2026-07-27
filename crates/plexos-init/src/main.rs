@@ -24,6 +24,9 @@ use plexos_init::{execute, plan, state};
 use plexos_types::paths;
 use plexos_types::version::STATE_LAYOUT_VERSION;
 
+/// Started by [`supervise_system`] until there is a real supervisor.
+const DEBUG_SHELL: &str = "/bin/sh";
+
 const USAGE: &str = "\
 plexos-init — PlexOS PID 1
 
@@ -34,6 +37,8 @@ OPTIONS:
     --dry-run            Print the boot plan without performing it
     --cmdline <string>   Use this instead of reading /proc/cmdline
     --state-version <n>  Assume this /var layout version instead of reading it
+    --supervise          Run as the service manager, assuming the root is already
+                         assembled. switch_root passes this; it is not for humans.
     --force              Execute even when not PID 1. Destroys the mount namespace
                          it runs in; only meaningful inside a container or a
                          private namespace.
@@ -47,11 +52,29 @@ fn fail(message: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// The service manager role. Not yet a supervisor: it reports that the boot
+/// succeeded and hands over to a shell, which is what docs/DEVELOPMENT.md promises a
+/// first image does. `plexosd`, the health gate, and Plex itself come later.
+fn supervise_system() -> ExitCode {
+    let mut log = execute::StderrLog;
+    log.line("root assembled, /usr verified, running as the service manager");
+    log.line("no supervisor yet: starting a shell (ARCHITECTURE.md section 2, step 6)");
+
+    match plexos_sys::process::exec(DEBUG_SHELL, &[]) {
+        Ok(never) => match never {},
+        Err(error) => fail(&format!(
+            "could not start {DEBUG_SHELL}: {error}. The system booted and /usr is \
+             mounted; only the shell is missing."
+        )),
+    }
+}
+
 fn main() -> ExitCode {
     let cli: Vec<String> = std::env::args().skip(1).collect();
 
     let mut dry_run = false;
     let mut force = false;
+    let mut supervise = false;
     let mut cmdline: Option<String> = None;
     let mut state_version: Option<Option<u32>> = None;
 
@@ -60,6 +83,7 @@ fn main() -> ExitCode {
         match token.as_str() {
             "--dry-run" => dry_run = true,
             "--force" => force = true,
+            "--supervise" => supervise = true,
             "--help" | "-h" => {
                 print!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -81,11 +105,30 @@ fn main() -> ExitCode {
         }
     }
 
+    // /proc has to exist before the command line can be read, and mounting it is a
+    // step in the plan the command line produces. The first real boot panicked here
+    // with "could not read /proc/cmdline: No such file or directory". So bootstrap it
+    // first -- but only when actually booting: --dry-run must stay safe to run as an
+    // ordinary user, and must not try to mount anything.
+    if cmdline.is_none()
+        && !dry_run
+        && let Err(error) = execute::bootstrap_proc()
+    {
+        return fail(&format!(
+            "could not mount /proc, so the kernel command line cannot be read: {error}"
+        ));
+    }
+
     let cmdline = match cmdline {
         Some(value) => value,
         None => match std::fs::read_to_string("/proc/cmdline") {
             Ok(value) => value,
-            Err(error) => return fail(&format!("could not read /proc/cmdline: {error}")),
+            Err(error) => {
+                return fail(&format!(
+                    "could not read /proc/cmdline: {error}; /proc is mounted but the \
+                 kernel did not provide a command line"
+                ));
+            }
         },
     };
 
@@ -116,6 +159,14 @@ fn main() -> ExitCode {
         println!();
         print!("{}", plan::render(&steps));
         return ExitCode::SUCCESS;
+    }
+
+    // The second of the two roles in ARCHITECTURE.md §3. The root is already
+    // assembled and /usr is already verified; re-running the boot plan here would
+    // try to create a device-mapper target that exists, which is how the first
+    // booting image ended.
+    if supervise {
+        return supervise_system();
     }
 
     if !execute::is_pid_one() && !force {
