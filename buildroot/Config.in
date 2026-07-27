@@ -1,1 +1,2 @@
+source "$BR2_EXTERNAL_PLEXOS_PATH/package/plexos-init/Config.in"
 source "$BR2_EXTERNAL_PLEXOS_PATH/package/systemd-boot/Config.in"

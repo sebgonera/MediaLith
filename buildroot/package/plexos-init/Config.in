@@ -1,0 +1,19 @@
+config BR2_PACKAGE_PLEXOS_INIT
+	bool "plexos-init"
+	depends on BR2_x86_64
+	help
+	  PlexOS PID 1: sets up dm-verity over the /usr image, assembles
+	  the root filesystem, and supervises services.
+
+	  Built as a fully static binary, which is not a preference. The
+	  initrd inside the Unified Kernel Image is this one file and
+	  nothing else -- no dynamic loader, no libc, no modules
+	  (ARCHITECTURE.md section 3). A dynamically linked build boots to
+	  a panic naming a missing loader rather than the real cause.
+
+	  Unlike every other package here, this one is compiled by the
+	  workspace's own pinned Rust toolchain rather than by Buildroot.
+	  Buildroot 2026.02 carries rustc 1.88 while rust-toolchain.toml
+	  pins 1.94, and a static binary shares nothing with the target
+	  toolchain anyway. The tradeoff is that an image build needs
+	  cargo on the host; see package/plexos-init/plexos-init.mk.
