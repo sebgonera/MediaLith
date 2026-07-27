@@ -10,9 +10,19 @@
 //! knowledge. Slot identity is carried in the partition *label*, because the two `/usr`
 //! slots are interchangeable and must share a type.
 //!
-//! > **Before the first public image ships**, every GUID below must be checked against
-//! > the published Discoverable Partitions Specification. A wrong GUID here cannot be
-//! > corrected by an update — it can only be corrected by reinstalling every device.
+//! # Verification
+//!
+//! Every GUID below was checked byte-for-byte against systemd v258.7
+//! `src/systemd/sd-gpt.h`, which is the reference implementation of the specification.
+//! Two of the four were wrong when first written, and both were wrong in the way that
+//! is hardest to notice: the values were syntactically valid, unique, and unassigned,
+//! so every test in this module passed and `sfdisk` accepted them without complaint.
+//! The disk was simply illegible to the standard tooling these GUIDs exist to satisfy.
+//!
+//! `guids_match_the_discoverable_partitions_specification` below now pins all four.
+//! Re-run it, do not re-derive the values by hand, and never take them from memory —
+//! a wrong GUID here cannot be corrected by an update, only by reinstalling every
+//! device.
 
 use std::fmt;
 
@@ -20,10 +30,10 @@ use std::fmt;
 pub const GUID_ESP: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
 
 /// `/usr` partition, x86-64.
-pub const GUID_USR_X86_64: &str = "8484680c-9526-48f6-a2b7-a1c4bfc2ba0f";
+pub const GUID_USR_X86_64: &str = "8484680c-9521-48c6-9c11-b0720656f69e";
 
 /// dm-verity hash partition for `/usr`, x86-64.
-pub const GUID_USR_VERITY_X86_64: &str = "77ff5f63-e7b6-4633-acf4-1565b864c0e5";
+pub const GUID_USR_VERITY_X86_64: &str = "77ff5f63-e7b6-4633-acf4-1565b864c0e6";
 
 /// `/var` partition.
 pub const GUID_VAR: &str = "4d21b016-b534-45c2-a9fb-5c16e091fd2d";
@@ -155,6 +165,43 @@ mod tests {
                         .chars()
                         .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
             })
+    }
+
+    /// The values below are transcribed from systemd v258.7
+    /// `src/systemd/sd-gpt.h`, decoding each `SD_ID128_MAKE(...)` byte list into its
+    /// canonical UUID form:
+    ///
+    /// ```text
+    /// SD_GPT_ESP               c1,2a,73,28,f8,1f,11,d2,ba,4b,00,a0,c9,3e,c9,3b
+    /// SD_GPT_USR_X86_64        84,84,68,0c,95,21,48,c6,9c,11,b0,72,06,56,f6,9e
+    /// SD_GPT_USR_X86_64_VERITY 77,ff,5f,63,e7,b6,46,33,ac,f4,15,65,b8,64,c0,e6
+    /// SD_GPT_VAR               4d,21,b0,16,b5,34,45,c2,a9,fb,5c,16,e0,91,fd,2d
+    /// ```
+    ///
+    /// This is the one test in the crate whose expected values must never be updated
+    /// to match the code. If it fails, the code is wrong.
+    #[test]
+    fn guids_match_the_discoverable_partitions_specification() {
+        for (name, actual, expected) in [
+            ("ESP", GUID_ESP, "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"),
+            (
+                "USR_X86_64",
+                GUID_USR_X86_64,
+                "8484680c-9521-48c6-9c11-b0720656f69e",
+            ),
+            (
+                "USR_X86_64_VERITY",
+                GUID_USR_VERITY_X86_64,
+                "77ff5f63-e7b6-4633-acf4-1565b864c0e6",
+            ),
+            ("VAR", GUID_VAR, "4d21b016-b534-45c2-a9fb-5c16e091fd2d"),
+        ] {
+            assert_eq!(
+                actual, expected,
+                "{name} does not match the Discoverable Partitions Specification. \
+                 Correct the constant; do not change this expectation."
+            );
+        }
     }
 
     #[test]
