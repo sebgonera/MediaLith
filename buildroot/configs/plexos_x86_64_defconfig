@@ -128,8 +128,10 @@ BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_PLEXOS_PATH)/board/plexos/x86_64/po
 # Our own package, not Buildroot's. Buildroot's BR2_PACKAGE_SYSTEMD_BOOT sits inside
 # `if BR2_PACKAGE_SYSTEMD`, which is only ever selected by the BR2_INIT_SYSTEMD
 # choice — taking it would pull systemd in as PID 1, exactly what BR2_INIT_NONE above
-# rejects. package/systemd-boot builds the bootloader alone from the same source.
-BR2_PACKAGE_SYSTEMD_BOOT=y
+# rejects. package/plexos-systemd-boot builds the bootloader, and the UKI stub, alone
+# from the same source. The prefix keeps our symbol distinct from upstream's, which
+# kconfig would otherwise merge with ours without saying so.
+BR2_PACKAGE_PLEXOS_SYSTEMD_BOOT=y
 
 # ---------------------------------------------------------------------------
 # Resolved
@@ -139,6 +141,6 @@ BR2_PACKAGE_SYSTEMD_BOOT=y
 # sections added, which objcopy does. post-image.sh does it that way and avoids the
 # dependency entirely; the host objcopy was confirmed to support pei-x86-64.
 #
-# The stub itself comes from package/systemd-boot, which builds linuxx64.efi.stub
+# The stub itself comes from package/plexos-systemd-boot, which builds linuxx64.efi.stub
 # alongside the bootloader. Upstream Buildroot's systemd package never installs it,
 # so without that addition there would be nothing to build a UKI around.

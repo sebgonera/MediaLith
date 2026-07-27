@@ -51,7 +51,7 @@ weight_for() {
         mesa3d)                            echo  80 ;;
         intel-mediadriver)                 echo  40 ;;
         host-binutils|binutils)            echo  30 ;;
-        systemd-boot)                      echo  25 ;;
+        plexos-systemd-boot)               echo  25 ;;
         linux-firmware)                    echo  20 ;;
         host-python3|python3)              echo  20 ;;
         xfsprogs|cryptsetup|host-cryptsetup) echo 12 ;;

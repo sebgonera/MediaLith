@@ -164,7 +164,7 @@ elif [ -f /usr/lib/systemd/boot/efi/linuxx64.efi.stub ]; then
 fi
 
 if [ ! -f "${STUB}" ]; then
-    skipped "the whole stage" "no linuxx64.efi.stub; build package/systemd-boot, or apt install systemd-boot-efi"
+    skipped "the whole stage" "no linuxx64.efi.stub; build package/plexos-systemd-boot, or apt install systemd-boot-efi"
 elif [ -z "${ROOT_HASH:-}" ]; then
     skipped "the whole stage" "needs a root hash from stage 2"
 else

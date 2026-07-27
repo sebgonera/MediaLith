@@ -1,10 +1,18 @@
 ################################################################################
 #
-# systemd-boot (standalone)
+# plexos-systemd-boot
 #
-# Builds only the UEFI bootloader out of systemd's source tree, with none of
-# systemd itself. See package/systemd-boot/Config.in for why this exists rather
-# than using Buildroot's BR2_PACKAGE_SYSTEMD_BOOT.
+# Builds only the UEFI bootloader and the UKI stub out of systemd's source tree,
+# with none of systemd itself. See Config.in for why this exists rather than using
+# Buildroot's BR2_PACKAGE_SYSTEMD_BOOT.
+#
+# The plexos- prefix is not decoration. Buildroot derives a package's enable symbol
+# from its directory name, so a package called "systemd-boot" would declare
+# BR2_PACKAGE_SYSTEMD_BOOT -- a symbol upstream already defines in
+# package/systemd/Config.in. kconfig merges duplicate definitions instead of
+# erroring, and upstream's systemd.mk separately assigns SYSTEMD_BOOT_EFI_ARCH.
+# Both collisions happened to be harmless; neither was intended, and the prefix
+# removes them rather than relying on that luck holding.
 #
 # The meson options and dependency list below are lifted from Buildroot's own
 # package/systemd/systemd.mk, which is a configuration known to produce a working
@@ -19,22 +27,36 @@
 ################################################################################
 
 # Kept in step with Buildroot's systemd package so both fetch one tarball.
-SYSTEMD_BOOT_VERSION = 258.7
-SYSTEMD_BOOT_SITE = $(call github,systemd,systemd,v$(SYSTEMD_BOOT_VERSION))
-SYSTEMD_BOOT_LICENSE = LGPL-2.1+
-SYSTEMD_BOOT_LICENSE_FILES = LICENSE.LGPL2.1
+PLEXOS_SYSTEMD_BOOT_VERSION = 258.7
+PLEXOS_SYSTEMD_BOOT_SITE = $(call github,systemd,systemd,v$(PLEXOS_SYSTEMD_BOOT_VERSION))
 
-SYSTEMD_BOOT_DEPENDENCIES = host-pkgconf gnu-efi host-python-pyelftools
+# Both of these must be set, and neither is cosmetic. Buildroot names a downloaded
+# tarball after the *package* -- $(PKG)_BASENAME_RAW.tar.gz -- and stores it in a
+# directory of the same name. Left to the defaults this package would fetch
+# "plexos-systemd-boot-258.7.tar.gz" into dl/plexos-systemd-boot/, and the download
+# would fail outright: the hash file names systemd-258.7.tar.gz, so there would be no
+# hash entry for the file actually retrieved.
+#
+# Naming them explicitly makes the tarball and its directory identical to the ones
+# Buildroot's own systemd package uses, so the two genuinely share one download --
+# which is what the comment above always claimed and, until this was set, was not
+# true of either this package or its differently-named predecessor.
+PLEXOS_SYSTEMD_BOOT_SOURCE = systemd-$(PLEXOS_SYSTEMD_BOOT_VERSION).tar.gz
+PLEXOS_SYSTEMD_BOOT_DL_SUBDIR = systemd
+PLEXOS_SYSTEMD_BOOT_LICENSE = LGPL-2.1+
+PLEXOS_SYSTEMD_BOOT_LICENSE_FILES = LICENSE.LGPL2.1
+
+PLEXOS_SYSTEMD_BOOT_DEPENDENCIES = host-pkgconf gnu-efi host-python-pyelftools
 
 # The bootloader is a freestanding UEFI binary. Nothing belongs in the target
 # filesystem or in staging: it is placed on the ESP by post-image.sh, and never
 # runs from a mounted filesystem.
-SYSTEMD_BOOT_INSTALL_STAGING = NO
-SYSTEMD_BOOT_INSTALL_TARGET = NO
-SYSTEMD_BOOT_INSTALL_IMAGES = YES
+PLEXOS_SYSTEMD_BOOT_INSTALL_STAGING = NO
+PLEXOS_SYSTEMD_BOOT_INSTALL_TARGET = NO
+PLEXOS_SYSTEMD_BOOT_INSTALL_IMAGES = YES
 
-SYSTEMD_BOOT_EFI_ARCH = $(call qstrip,$(BR2_PACKAGE_SYSTEMD_BOOT_EFI_ARCH))
-SYSTEMD_BOOT_EFI_NAME = systemd-boot$(SYSTEMD_BOOT_EFI_ARCH).efi
+PLEXOS_SYSTEMD_BOOT_EFI_ARCH = $(call qstrip,$(BR2_PACKAGE_PLEXOS_SYSTEMD_BOOT_EFI_ARCH))
+PLEXOS_SYSTEMD_BOOT_EFI_NAME = systemd-boot$(PLEXOS_SYSTEMD_BOOT_EFI_ARCH).efi
 
 # The UKI stub, and not an optional extra. A Unified Kernel Image *is* this stub
 # with .osrel/.cmdline/.linux/.initrd sections appended (ADR-0004), so without it
@@ -44,16 +66,16 @@ SYSTEMD_BOOT_EFI_NAME = systemd-boot$(SYSTEMD_BOOT_EFI_ARCH).efi
 # Verified against systemd v258.7 src/boot/meson.build rather than recalled: the
 # executables are named "linux$(arch)" with name_suffix "elf.stub", and elf2efi.py
 # converts each to "<name>.efi.stub". Hence linuxx64.efi.stub on x86-64.
-SYSTEMD_BOOT_STUB_NAME = linux$(SYSTEMD_BOOT_EFI_ARCH).efi.stub
+PLEXOS_SYSTEMD_BOOT_STUB_NAME = linux$(PLEXOS_SYSTEMD_BOOT_EFI_ARCH).efi.stub
 
-SYSTEMD_BOOT_NINJA_TARGETS = \
-	src/boot/$(SYSTEMD_BOOT_EFI_NAME) \
-	src/boot/$(SYSTEMD_BOOT_STUB_NAME)
+PLEXOS_SYSTEMD_BOOT_NINJA_TARGETS = \
+	src/boot/$(PLEXOS_SYSTEMD_BOOT_EFI_NAME) \
+	src/boot/$(PLEXOS_SYSTEMD_BOOT_STUB_NAME)
 
 # Everything off except the bootloader. systemd's meson still configures the whole
 # tree, so each subsystem has to be turned off by name; only the bootloader target
-# is actually built (see SYSTEMD_BOOT_BUILD_CMDS).
-SYSTEMD_BOOT_CONF_OPTS = \
+# is actually built (see PLEXOS_SYSTEMD_BOOT_BUILD_CMDS).
+PLEXOS_SYSTEMD_BOOT_CONF_OPTS = \
 	-Dbootloader=enabled \
 	-Defi=true \
 	-Dmode=release \
@@ -92,22 +114,22 @@ SYSTEMD_BOOT_CONF_OPTS = \
 # this package then throws away. Overriding BUILD_CMDS rather than appending to
 # NINJA_OPTS because the infrastructure places NINJA_OPTS ahead of -C, and a ninja
 # target argument there is not reliably parsed.
-define SYSTEMD_BOOT_BUILD_CMDS
-	$(TARGET_MAKE_ENV) $(SYSTEMD_BOOT_NINJA_ENV) \
-		$(NINJA) $(NINJA_OPTS) -C $(@D)/buildroot-build $(SYSTEMD_BOOT_NINJA_TARGETS)
+define PLEXOS_SYSTEMD_BOOT_BUILD_CMDS
+	$(TARGET_MAKE_ENV) $(PLEXOS_SYSTEMD_BOOT_NINJA_ENV) \
+		$(NINJA) $(NINJA_OPTS) -C $(@D)/buildroot-build $(PLEXOS_SYSTEMD_BOOT_NINJA_TARGETS)
 endef
 
 # Flat in BINARIES_DIR rather than pre-arranged into an efi-part/ tree. Where the
 # bootloader goes on the ESP, and how boot entries are named, is PlexOS policy
 # expressed in post-image.sh and the installer -- not something a package that
 # compiles a binary should be deciding.
-define SYSTEMD_BOOT_INSTALL_IMAGES_CMDS
+define PLEXOS_SYSTEMD_BOOT_INSTALL_IMAGES_CMDS
 	$(INSTALL) -D -m 0644 \
-		$(@D)/buildroot-build/src/boot/$(SYSTEMD_BOOT_EFI_NAME) \
-		$(BINARIES_DIR)/$(SYSTEMD_BOOT_EFI_NAME)
+		$(@D)/buildroot-build/src/boot/$(PLEXOS_SYSTEMD_BOOT_EFI_NAME) \
+		$(BINARIES_DIR)/$(PLEXOS_SYSTEMD_BOOT_EFI_NAME)
 	$(INSTALL) -D -m 0644 \
-		$(@D)/buildroot-build/src/boot/$(SYSTEMD_BOOT_STUB_NAME) \
-		$(BINARIES_DIR)/$(SYSTEMD_BOOT_STUB_NAME)
+		$(@D)/buildroot-build/src/boot/$(PLEXOS_SYSTEMD_BOOT_STUB_NAME) \
+		$(BINARIES_DIR)/$(PLEXOS_SYSTEMD_BOOT_STUB_NAME)
 endef
 
 $(eval $(meson-package))

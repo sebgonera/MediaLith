@@ -124,11 +124,11 @@ preflight() {
 
     [ -f "${BINARIES_DIR}/linuxx64.efi.stub" ] || die \
         "no UKI stub at ${BINARIES_DIR}/linuxx64.efi.stub" \
-        "package/systemd-boot must install it; upstream Buildroot's systemd package does not"
+        "package/plexos-systemd-boot must install it; upstream Buildroot's systemd package does not"
 
     [ -f "${BINARIES_DIR}/systemd-bootx64.efi" ] || die \
         "no bootloader at ${BINARIES_DIR}/systemd-bootx64.efi" \
-        "set BR2_PACKAGE_SYSTEMD_BOOT=y"
+        "set BR2_PACKAGE_PLEXOS_SYSTEMD_BOOT=y"
 
     [ -d "${TARGET_DIR}/usr" ] || die \
         "no ${TARGET_DIR}/usr to build an image from" \
@@ -304,7 +304,7 @@ build_uki() {
     for section in .osrel .cmdline .linux .initrd; do
         objdump -h "${WORK}/plexos.efi" | grep -q " ${section}\$\| ${section} " || die \
             "section ${section} is missing from the assembled UKI" \
-            "the stub may lack reserved section headers; check -Defi-stub-extra-sections in package/systemd-boot"
+            "the stub may lack reserved section headers; check -Defi-stub-extra-sections in package/plexos-systemd-boot"
     done
 
     if [ -n "${PLEXOS_SB_KEY}" ] && [ -n "${PLEXOS_SB_CERT}" ]; then

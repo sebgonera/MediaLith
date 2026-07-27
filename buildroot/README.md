@@ -31,13 +31,13 @@ as reviewed but unproven — with the exceptions noted, which have been run.
 | --- | --- |
 | `configs/plexos_x86_64_defconfig` | Every option verified to survive kconfig, twice. |
 | `board/plexos/x86_64/linux.fragment` | Never compiled. |
-| `package/systemd-boot/` | Builds the bootloader **and** `linuxx64.efi.stub`. Never built. |
+| `package/plexos-systemd-boot/` | Builds the bootloader **and** `linuxx64.efi.stub`. Never built. |
 | `package/plexos-init/` | Never built by Buildroot; the command it runs has been run by hand. |
 | `board/plexos/x86_64/post-image.sh` | Stages 1, 2 and 6 exercised against real tools. Stages 3, 4, 5 await the build. |
 
 The upstream Buildroot version is pinned to **2026.02.3**. The `YYYY.02` series is the
 one upstream maintains long-term, which is what makes the CVE story in ADR-0002
-survivable. It carries systemd 258.7, matching `package/systemd-boot`, and rustc
+survivable. It carries systemd 258.7, matching `package/plexos-systemd-boot`, and rustc
 1.88.0 — see `package/plexos-init/plexos-init.mk` for why that last number matters.
 
 ## What comes next, in order
@@ -55,17 +55,22 @@ survivable. It carries systemd 258.7, matching `package/systemd-boot`, and rustc
 
 ## Two traps already paid for
 
-**`BR2_PACKAGE_SYSTEMD_BOOT` is a duplicate symbol.** Upstream defines it in
-`package/systemd/Config.in` inside `if BR2_PACKAGE_SYSTEMD`, and that file is sourced
-unconditionally. kconfig merges duplicate definitions rather than erroring. It happens
-to work — the prompt here keeps the symbol reachable, and upstream's
-`select BR2_PACKAGE_SYSTEMD_EFI` is scoped to the `if` and never fires — but it is
-fragile, and upstream's `systemd.mk` also assigns `SYSTEMD_BOOT_EFI_ARCH`. Renaming
-ours to `BR2_PACKAGE_PLEXOS_SYSTEMD_BOOT` is cheap hygiene that has not been done yet.
+**Package names become kconfig symbols, so ours are prefixed.** Buildroot derives a
+package's enable symbol from its directory name. A package called `systemd-boot` would
+therefore declare `BR2_PACKAGE_SYSTEMD_BOOT` — which upstream already defines in
+`package/systemd/Config.in`, inside `if BR2_PACKAGE_SYSTEMD`, from a file sourced
+unconditionally. kconfig merges duplicate definitions instead of erroring, and
+upstream's `systemd.mk` separately assigns `SYSTEMD_BOOT_EFI_ARCH`.
+
+Both collisions happened to be harmless: our prompt kept the symbol reachable, the
+`select BR2_PACKAGE_SYSTEMD_EFI` was scoped to the `if` and never fired, and both
+assignments computed `x64`. None of that was intended, and none of it was guaranteed
+to keep holding. Hence `package/plexos-systemd-boot/`. Anything added here that shares
+a name with an upstream package needs the same treatment.
 
 **Upstream never installs the UKI stub.** A Unified Kernel Image *is*
 `linuxx64.efi.stub` with sections appended, and Buildroot's systemd package installs
-only the bootloader. Without the addition in `package/systemd-boot/`, there is nothing
+only the bootloader. Without the addition in `package/plexos-systemd-boot/`, there is nothing
 to build an image around — the bootloader alone is not enough.
 
 ## Reference hardware

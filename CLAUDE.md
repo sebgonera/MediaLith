@@ -58,7 +58,10 @@ QEMU is the first real test, not a formality.
 
 - **Buildroot's `BR2_PACKAGE_SYSTEMD_BOOT` is unusable here** — it sits inside
   `if BR2_PACKAGE_SYSTEMD`, which only `BR2_INIT_SYSTEMD` selects. Hence
-  `buildroot/package/systemd-boot/`.
+  `buildroot/package/plexos-systemd-boot/`.
+- **A package's directory name becomes its kconfig symbol.** Name a package after an
+  upstream one and you get a duplicate `BR2_PACKAGE_*` definition, which kconfig
+  merges silently rather than rejecting. Prefix anything that collides with `plexos-`.
 - **kconfig drops options with unmet dependencies without erroring.** After editing
   the defconfig, always re-run kconfig and check the options actually survived. Four
   were being dropped at one point, and the result was a uClibc toolchain that Plex
