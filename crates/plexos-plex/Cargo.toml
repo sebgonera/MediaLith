@@ -10,6 +10,9 @@ publish = false
 [dependencies]
 # For the frozen /var paths, so the daemon, installer and updater cannot disagree
 # about where app images live (ADR-0009).
+# The syscall layer. mount(2) belongs there, not here: this crate forbids unsafe and
+# plexos-sys exists so that exactly one crate does not.
+plexos-sys = { path = "../plexos-sys" }
 plexos-types = { path = "../plexos-types" }
 
 [lints]

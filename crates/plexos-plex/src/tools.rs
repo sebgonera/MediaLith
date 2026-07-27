@@ -27,6 +27,8 @@ pub struct Tools {
     pub mkfs_erofs: PathBuf,
     /// Computes the integrity record.
     pub sha256sum: PathBuf,
+    /// Attaches an app image to a loop device so it can be mounted.
+    pub losetup: PathBuf,
 }
 
 /// A program that should be in the image and is not.
@@ -75,6 +77,7 @@ impl Tools {
             tar: one("tar")?,
             mkfs_erofs: one("mkfs.erofs")?,
             sha256sum: one("sha256sum")?,
+            losetup: one("losetup")?,
         })
     }
 
@@ -148,5 +151,6 @@ mod tests {
         assert_eq!(tools.tar, PathBuf::from("/sbin/tar"));
         assert_eq!(tools.mkfs_erofs, PathBuf::from("/sbin/mkfs.erofs"));
         assert_eq!(tools.sha256sum, PathBuf::from("/sbin/sha256sum"));
+        assert_eq!(tools.losetup, PathBuf::from("/sbin/losetup"));
     }
 }

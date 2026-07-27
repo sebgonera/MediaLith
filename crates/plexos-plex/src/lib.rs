@@ -36,6 +36,7 @@ pub mod ar;
 pub mod build;
 pub mod execute;
 pub mod manifest;
+pub mod mount;
 pub mod store;
 pub mod tools;
 pub mod verify;

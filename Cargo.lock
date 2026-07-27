@@ -116,6 +116,7 @@ dependencies = [
 name = "plexos-plex"
 version = "0.1.0"
 dependencies = [
+ "plexos-sys",
  "plexos-types",
 ]
 

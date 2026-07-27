@@ -266,6 +266,102 @@ fn activate(link: &Path, target: &str) -> Result<(), Failure> {
     fs::rename(&scratch, link).map_err(|e| Failure::new("activating the new image", e))
 }
 
+/// Attaches an app image to a free loop device and returns its path.
+///
+/// `losetup -f --show` picks a device and prints it, which is one command instead of
+/// finding a free one and racing another process to claim it.
+///
+/// # Errors
+/// [`Failure`] if `losetup` cannot run, fails, or prints something that is not a device
+/// path. The last case is worth distinguishing: a `losetup` that succeeds and prints
+/// nothing would otherwise become a mount of the empty string.
+pub fn attach_loop(tools: &Tools, image: &Path) -> Result<std::path::PathBuf, Failure> {
+    let output = Command::new(&tools.losetup)
+        .arg("-f")
+        .arg("--show")
+        .arg(image)
+        .output()
+        .map_err(|e| Failure::new("running losetup", e))?;
+
+    if !output.status.success() {
+        return Err(Failure::new(
+            "attaching the app image to a loop device",
+            format!(
+                "losetup exited {}: {}. All eight of the kernel's pre-created loop \
+                 devices may be in use — `losetup -a` lists them.",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ));
+    }
+
+    let device = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !device.starts_with("/dev/loop") {
+        return Err(Failure::new(
+            "attaching the app image to a loop device",
+            format!("losetup printed {device:?}, which is not a loop device path"),
+        ));
+    }
+    Ok(std::path::PathBuf::from(device))
+}
+
+/// Carries out a mount plan against an image whose bytes have already been checked.
+///
+/// Returns the loop device, so the caller can detach it if the mount is later undone.
+///
+/// # Errors
+/// [`Failure`] naming the step. A loop device attached before a failed mount is left
+/// attached rather than silently detached: `losetup -a` then shows what happened, and
+/// unwinding here would mean a second failure path to get wrong during the first.
+pub fn mount_plan(
+    steps: &[crate::mount::Step],
+    tools: &Tools,
+    log: &mut dyn FnMut(&str),
+) -> Result<std::path::PathBuf, Failure> {
+    let mut device = None;
+
+    for one in steps {
+        match one {
+            crate::mount::Step::CreateDir(path) => {
+                fs::create_dir_all(path)
+                    .map_err(|e| Failure::new("creating the Plex mount point", e))?;
+            }
+            crate::mount::Step::AttachLoop { image } => {
+                let attached = attach_loop(tools, image)?;
+                log(&format!(
+                    "{} attached to {}",
+                    image.display(),
+                    attached.display()
+                ));
+                device = Some(attached);
+            }
+            crate::mount::Step::Mount { target } => {
+                let source = device.as_ref().ok_or_else(|| {
+                    Failure::new(
+                        "mounting the app image",
+                        "no loop device was attached; the plan is out of order",
+                    )
+                })?;
+                plexos_sys::mount::mount(
+                    &source.to_string_lossy(),
+                    &target.to_string_lossy(),
+                    crate::mount::FSTYPE,
+                    crate::mount::MOUNT_OPTIONS,
+                )
+                .map_err(|e| Failure::new("mounting the app image", e))?;
+                log(&format!("Plex mounted at {}", target.display()));
+            }
+        }
+    }
+
+    device.ok_or_else(|| {
+        Failure::new(
+            "mounting the app image",
+            "the plan attached no loop device, so nothing was mounted",
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
