@@ -33,6 +33,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ar;
+pub mod build;
 pub mod manifest;
 pub mod store;
 pub mod verify;

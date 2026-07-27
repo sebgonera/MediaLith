@@ -8,6 +8,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# For the frozen /var paths, so the daemon, installer and updater cannot disagree
+# about where app images live (ADR-0009).
+plexos-types = { path = "../plexos-types" }
 
 [lints]
 workspace = true
