@@ -4,13 +4,18 @@
 //! kernel console, and its job is narrow: answer "is this machine working, and if not,
 //! what do I do about it" from a browser on another device.
 //!
-//! # It shows; it does not do
+//! # It shows, and now it does
 //!
-//! Every route here is read-only, and [`http`] refuses any method but
-//! `GET` and `HEAD` so that stays true. There is no authentication, which is
-//! defensible exactly as long as that holds — see the note in
-//! [`http`]'s documentation. The moment a route can change the machine,
-//! authentication has to come first.
+//! Reading needs nothing: the status, the GPU verdict and the health check answer any
+//! browser on the LAN, because a console that demanded a credential before it would say
+//! why a boot failed would defeat the reason it exists.
+//!
+//! Changing anything needs the device token. `POST /api/provision` installs Plex, and it
+//! is [`http::route`] rather than this module that refuses it without a credential — the
+//! check sits in front of the whole route table, so a route added here is authenticated
+//! whether or not its author thought about it. ADR-0013 describes where the token comes
+//! from; [`claim`] is what issues it, on the console attached to the machine, at first
+//! start.
 //!
 //! # Binding
 //!
@@ -39,9 +44,58 @@ pub const DEFAULT_PORT: u16 = 80;
 ///
 /// Separated from the socket so the whole route table can be tested against a recorded
 /// machine, which is the same boundary every other module here draws.
+///
+/// `job` carries the state of any provisioning run. It is reached from every request
+/// because `GET /api/provision` is how the page follows one, and a request that started
+/// an installation returns before that installation is anywhere near finished.
+///
+/// This function does **not** check the device token. [`http::route`] does, before this
+/// is called, for every method that is not a read — so a route added here is
+/// authenticated by construction rather than by its author remembering to be.
 #[must_use]
-pub fn respond(request: &Request, env: &impl Environment) -> Response {
-    match request.path.as_str() {
+pub fn respond(
+    request: &Request,
+    env: &impl Environment,
+    job: &std::sync::Arc<crate::provision::Job>,
+) -> Response {
+    match (request.method.as_str(), request.path.as_str()) {
+        // Starting an installation. Returns as soon as the work is handed to a thread:
+        // the download alone is minutes, and a request held open for it would time out
+        // in the browser with the install still running and no way to say so.
+        ("POST", "/api/provision") => {
+            if !job.begin() {
+                return Response::text(
+                    409,
+                    "An installation is already running on this machine. Watch it at \
+                     GET /api/provision; starting a second would unpack into the same \
+                     directory as the first.\n",
+                );
+            }
+            // The job that was just claimed, not a fresh one: the whole point of
+            // begin() is that the thread reports into the state the page is polling.
+            crate::provision::spawn(
+                job,
+                std::path::PathBuf::from(plexos_types::paths::PLEX_APPS),
+                std::path::PathBuf::from(plexos_plex::verify::PLEX_KEYRING),
+            );
+            Response::json("{\"started\":true}")
+        }
+
+        // Following one. Polled by the page every second or so, so it is deliberately
+        // cheap: it reads a struct behind a mutex and serialises it.
+        ("GET" | "HEAD", "/api/provision") => match serde_json::to_string(&job.snapshot()) {
+            Ok(json) => Response::json(json),
+            Err(error) => Response::text(500, format!("could not serialise progress: {error}\n")),
+        },
+
+        (_, path) => respond_read_only(request, env, path),
+    }
+}
+
+/// The routes that only ever report.
+fn respond_read_only(request: &Request, env: &impl Environment, path: &str) -> Response {
+    let _ = request;
+    match path {
         "/" | "/index.html" => Response::html(PAGE),
 
         "/api/status" => match Status::gather(env).to_json() {
@@ -74,11 +128,85 @@ pub fn respond(request: &Request, env: &impl Environment) -> Response {
         other => Response::text(
             404,
             format!(
-                "no such page: {other}\n\nThis console serves / , /api/status, /api/gpu \
-                 and /healthz.\n"
+                "no such page: {other}\n\nThis console serves / , /api/status, /api/gpu, \
+                 /healthz and /api/provision (GET to follow an installation, POST with \
+                 the device token to start one).\n"
             ),
         ),
     }
+}
+
+/// Reads the device's credential, claiming the device if it has none.
+///
+/// This is the moment ADR-0013 describes: a device with no credential generates one,
+/// stores only its fingerprint, and shows the token itself exactly once, on the console
+/// physically attached to the machine. Whoever can read that screen becomes the
+/// administrator. There is no other way in, and no default credential to forget to
+/// change.
+///
+/// Shown once and never again is deliberate. Only the fingerprint is kept, so nothing on
+/// the appliance can reprint the token — which is the same property that makes a stolen
+/// copy of `/var` useless. Losing it is recoverable by deleting
+/// [`crate::auth::CREDENTIAL_FILE`] and restarting, and the banner says so, because an
+/// administrator who has lost the token will otherwise conclude the appliance is bricked.
+///
+/// # Failing closed
+///
+/// If the token cannot be generated or stored, this returns [`Credential::Unset`], which
+/// makes every mutating route answer 503. The alternative — carrying on with a token that
+/// was never written — would leave a device that accepts a credential now and rejects it
+/// after a reboot, which is worse than one that plainly cannot be claimed yet.
+///
+/// [`Credential::Unset`]: crate::auth::Credential::Unset
+pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::Credential {
+    use crate::auth::Credential;
+
+    if let Credential::Set(fingerprint) = crate::auth::read(path) {
+        log("device claimed; changes need its token");
+        return Credential::Set(fingerprint);
+    }
+
+    let token = match crate::auth::generate() {
+        Ok(token) => token,
+        Err(error) => {
+            log(&format!(
+                "could not generate a device token: {error}. Nothing may change this \
+                 machine until one exists. /dev/urandom is unreadable, which means /dev \
+                 is not mounted -- a larger fault than the missing token."
+            ));
+            return Credential::Unset;
+        }
+    };
+
+    let fingerprint = crate::auth::fingerprint(&token);
+    if let Err(error) = crate::auth::write(path, &fingerprint) {
+        log(&format!(
+            "could not store the device credential at {}: {error}. The token above is \
+             therefore not this device's and nothing may change it. Check that /var is \
+             mounted and writable.",
+            path.display()
+        ));
+        return Credential::Unset;
+    }
+
+    // Banner rather than a log line. This is the one secret the machine will ever show,
+    // it is shown once, and it has to be findable in a scrollback of boot messages.
+    log("");
+    log("================================================================");
+    log("  This device is now claimed. Its token, shown only this once:");
+    log("");
+    log(&format!("      {token}"));
+    log("");
+    log("  Type it into the console page to install or change anything.");
+    log("  Reading the status page needs nothing.");
+    log(&format!(
+        "  Lost it? Delete {} and restart to be issued another.",
+        path.display()
+    ));
+    log("================================================================");
+    log("");
+
+    Credential::Set(fingerprint)
 }
 
 /// Brings the network up, then serves the console until the listener fails.
@@ -151,19 +279,17 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     // The credential is read once, here, and what it is decides how the console
     // behaves rather than merely what it logs: an unclaimed device refuses every
     // mutating route outright (ADR-0013).
-    let credential = crate::auth::read(std::path::Path::new(crate::auth::CREDENTIAL_FILE));
-    match &credential {
-        crate::auth::Credential::Set(_) => log("device claimed; changes need its token"),
-        crate::auth::Credential::Unset => log(
-            "device NOT claimed: nothing may change it yet. Claim it from the console \
-             attached to the machine.",
-        ),
-    }
+    let credential = claim(std::path::Path::new(crate::auth::CREDENTIAL_FILE), log);
+
+    // One job for the life of the daemon, shared by every connection thread. Provisioning
+    // is a property of the machine rather than of whoever asked for it: a second browser
+    // must see the run the first one started, not an idle console.
+    let job = std::sync::Arc::new(crate::provision::Job::new());
 
     http::serve(
         &listener,
         credential,
-        |request| respond(request, &System),
+        move |request| respond(request, &System, &job),
         log,
     )
 }
@@ -172,6 +298,15 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
 mod tests {
     use super::*;
     use plexos_gpu::env::Fixture;
+
+    /// `respond` against a console that has never provisioned anything.
+    fn respond_test(request: &Request, env: &impl Environment) -> Response {
+        respond(
+            request,
+            env,
+            &std::sync::Arc::new(crate::provision::Job::new()),
+        )
+    }
 
     fn get(path: &str) -> Request {
         Request {
@@ -184,7 +319,7 @@ mod tests {
 
     #[test]
     fn the_root_path_serves_the_page() {
-        let response = respond(&get("/"), &Fixture::new());
+        let response = respond_test(&get("/"), &Fixture::new());
         assert_eq!(response.status, 200);
         assert_eq!(response.content_type, "text/html; charset=utf-8");
         assert!(response.body.starts_with(b"<!doctype html>"));
@@ -199,7 +334,10 @@ mod tests {
             PAGE.contains("\"/api/status\""),
             "the page must fetch the route respond() actually serves"
         );
-        assert_eq!(respond(&get("/api/status"), &Fixture::new()).status, 200);
+        assert_eq!(
+            respond_test(&get("/api/status"), &Fixture::new()).status,
+            200
+        );
     }
 
     #[test]
@@ -224,7 +362,7 @@ mod tests {
 
     #[test]
     fn the_status_route_returns_parsable_json() {
-        let response = respond(&get("/api/status"), &Fixture::new());
+        let response = respond_test(&get("/api/status"), &Fixture::new());
         assert_eq!(response.status, 200);
         let parsed: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
         assert!(parsed.get("gpu").is_some());
@@ -232,7 +370,7 @@ mod tests {
 
     #[test]
     fn the_gpu_route_returns_the_report_alone() {
-        let response = respond(&get("/api/gpu"), &Fixture::new());
+        let response = respond_test(&get("/api/gpu"), &Fixture::new());
         let parsed: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
         assert!(
             parsed.get("health").is_some() && parsed.get("findings").is_some(),
@@ -240,10 +378,141 @@ mod tests {
         );
     }
 
+    /// Runs `claim` against a fresh path, returning the credential and everything logged.
+    fn claim_into(name: &str) -> (crate::auth::Credential, Vec<String>, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_file(&path);
+        let mut lines = Vec::new();
+        let credential = claim(&path, &mut |line| lines.push(line.to_owned()));
+        (credential, lines, path)
+    }
+
+    /// The 64-hex-character token out of a banner, if one was printed.
+    fn token_in(lines: &[String]) -> Option<String> {
+        lines
+            .iter()
+            .map(|line| line.trim())
+            .find(|line| line.len() == 64 && line.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn the_progress_route_answers_before_anything_has_been_installed() {
+        // The page polls this from the moment it loads, including on a machine nobody
+        // has ever provisioned. Answering 404 there would have the console render its
+        // error state on a perfectly good appliance.
+        let response = respond_test(&get("/api/provision"), &Fixture::new());
+        assert_eq!(response.status, 200);
+        let parsed: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(parsed["phase"], "idle");
+    }
+
+    #[test]
+    fn a_second_installation_is_refused_while_one_is_running() {
+        // Two runs would unpack into the same staging directory and produce an image
+        // neither could vouch for. Refused here rather than by the page, because the
+        // page is not the only thing that can send a POST.
+        let job = std::sync::Arc::new(crate::provision::Job::new());
+        assert!(
+            job.begin(),
+            "something is already running before the test started"
+        );
+
+        let request = Request {
+            method: "POST".to_owned(),
+            path: "/api/provision".to_owned(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let response = respond(&request, &Fixture::new(), &job);
+        assert_eq!(response.status, 409);
+        assert!(
+            String::from_utf8_lossy(&response.body).contains("GET /api/provision"),
+            "and says where to watch the one that is running"
+        );
+    }
+
+    // The success path of POST /api/provision is deliberately not exercised here: it
+    // spawns a thread that downloads 83 MB from Plex, which is not a unit test. What it
+    // depends on is covered where it can be — provision::Job's exclusivity and its
+    // outcome handling in that module's tests, and the whole pipeline by the
+    // `provision` example against real packages. It has not run on the appliance.
+
+    #[test]
+    fn a_device_with_no_credential_claims_itself_and_shows_the_token() {
+        // The whole of ADR-0013's first step. Until this ran, auth:: could generate and
+        // store a token and nothing called it, so Credential::Unset was permanent and
+        // every mutating route answered 503 for ever.
+        let (credential, lines, path) = claim_into("plexos-claim-fresh");
+
+        let token = token_in(&lines).expect("the token is printed on the attached console");
+        let crate::auth::Credential::Set(fingerprint) = credential else {
+            panic!("claiming must leave the device claimed");
+        };
+        assert!(
+            crate::auth::matches(&token, &fingerprint),
+            "the token shown is the one the console will accept"
+        );
+        assert_eq!(
+            crate::auth::read(&path),
+            crate::auth::Credential::Set(fingerprint),
+            "and it survives a restart"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_token_itself_is_never_written_to_disk() {
+        // Only the fingerprint is stored, which is what makes a pulled disk or a backup
+        // of /var useless to whoever has it.
+        let (_, lines, path) = claim_into("plexos-claim-not-stored");
+        let token = token_in(&lines).expect("a token");
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !stored.contains(&token),
+            "the file holds the digest, not the token"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_already_claimed_device_is_not_reissued_a_token() {
+        // Reclaiming on every start would invalidate the token the administrator wrote
+        // down, and would do it silently at the next power cut.
+        let (first, _, path) = claim_into("plexos-claim-twice");
+        let mut lines = Vec::new();
+        let second = claim(&path, &mut |line| lines.push(line.to_owned()));
+
+        assert_eq!(first, second, "the same credential");
+        assert_eq!(
+            token_in(&lines),
+            None,
+            "and no second token printed: {lines:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_credential_that_cannot_be_stored_leaves_the_device_unclaimed() {
+        // Fail closed. Carrying on with a token that was never written would give a
+        // device that accepts a credential now and rejects it after a reboot, which is
+        // harder to diagnose than one that plainly cannot be claimed.
+        let unwritable = std::path::Path::new("/proc/plexos-claim-cannot-exist/token");
+        let mut lines = Vec::new();
+        let credential = claim(unwritable, &mut |line| lines.push(line.to_owned()));
+
+        assert_eq!(credential, crate::auth::Credential::Unset);
+        let logged = lines.join("\n");
+        assert!(
+            logged.contains("/var is mounted") || logged.contains("could not store"),
+            "and names a remedy: {logged}"
+        );
+    }
+
     #[test]
     fn an_unknown_path_lists_the_ones_that_exist() {
         // Every diagnostic names a remedy, including a 404.
-        let response = respond(&get("/dashboard"), &Fixture::new());
+        let response = respond_test(&get("/dashboard"), &Fixture::new());
         assert_eq!(response.status, 404);
         let body = String::from_utf8(response.body).unwrap();
         assert!(

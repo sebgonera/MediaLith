@@ -30,9 +30,13 @@
 //! would roll back good updates. Putting the network in the same binary is safe only
 //! because it cannot run before the decision it must not influence.
 //!
-//! It shows and does not do. Every route is read-only and there is no authentication;
-//! [`http`] holds the test that keeps the first half of that sentence true, and the
-//! day it fails is the day the second half has to change.
+//! # It now does, as well as shows
+//!
+//! [`provision`] installs Plex, which is the first route that changes the machine, and
+//! [`auth`] is why it may: ADR-0013's device token is generated on first start, stored
+//! as a fingerprint, and demanded by [`http`]'s gate before any non-`GET` request
+//! reaches a handler. Reads still need nothing at all -- a console that asked for a
+//! credential before it would say why a boot failed would defeat the reason it exists.
 
 #![forbid(unsafe_code)]
 
@@ -44,6 +48,7 @@ pub mod esp;
 pub mod health;
 pub mod http;
 pub mod net;
+pub mod provision;
 pub mod status;
 
 pub use bootcounter::BootEntry;

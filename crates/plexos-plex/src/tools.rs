@@ -27,6 +27,13 @@ pub struct Tools {
     pub mkfs_erofs: PathBuf,
     /// Computes the integrity record.
     pub sha256sum: PathBuf,
+    /// Measures the package's members against the signed manifest.
+    ///
+    /// SHA-1 because that is what Plex's manifest states, not because it is a good
+    /// choice today. Nothing here relies on it being collision-resistant: the manifest
+    /// is covered by a GPG signature, and this only ties the bytes on disk to the bytes
+    /// that signature attests to.
+    pub sha1sum: PathBuf,
     /// Attaches an app image to a loop device so it can be mounted.
     pub losetup: PathBuf,
 }
@@ -77,6 +84,7 @@ impl Tools {
             tar: one("tar")?,
             mkfs_erofs: one("mkfs.erofs")?,
             sha256sum: one("sha256sum")?,
+            sha1sum: one("sha1sum")?,
             losetup: one("losetup")?,
         })
     }
@@ -185,12 +193,13 @@ mod tests {
     }
 
     #[test]
-    fn all_three_programs_resolve_when_they_are_present() {
+    fn every_program_resolves_when_they_are_present() {
         let everything = |_: &Path| true;
         let tools = Tools::find(&everything).unwrap();
         assert_eq!(tools.tar, PathBuf::from("/sbin/tar"));
         assert_eq!(tools.mkfs_erofs, PathBuf::from("/sbin/mkfs.erofs"));
         assert_eq!(tools.sha256sum, PathBuf::from("/sbin/sha256sum"));
+        assert_eq!(tools.sha1sum, PathBuf::from("/sbin/sha1sum"));
         assert_eq!(tools.losetup, PathBuf::from("/sbin/losetup"));
     }
 

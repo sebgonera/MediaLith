@@ -15,14 +15,21 @@
 //! Browsers handle that correctly; it is simply slower than it could be, which for a
 //! page one person loads occasionally is not a cost worth paying code for.
 //!
-//! # What this deliberately does not do
+//! # Where authentication sits
 //!
-//! **There is no authentication.** Every route is read-only — nothing here changes the
-//! machine — and the appliance is expected to sit on a home LAN. That reasoning stops
-//! being sufficient the moment a route can *do* something, so
-//! `every_route_is_read_only` fails if a non-`GET` method is ever answered with
-//! anything but 405. When the management API grows verbs, it needs authentication
-//! before it grows them, and that test is the reminder.
+//! In [`route`], in front of the handler, and not in the handlers themselves. Anything
+//! that is not a `GET` or a `HEAD` must present the device token (ADR-0013) before a
+//! handler sees it, so a route added to the console is authenticated by construction
+//! rather than by its author remembering to be. `no_mutating_route_is_reachable_without_
+//! the_device_token` is what keeps that true.
+//!
+//! The safe list is the one that needs maintaining: [`Request::is_mutating`] treats
+//! every unknown verb as a write, so a method added to HTTP tomorrow arrives needing a
+//! credential rather than arriving without one because nobody listed it.
+//!
+//! **There is still no TLS.** A token crossing an unencrypted LAN is visible to anything
+//! that can see the traffic, which ADR-0013 accepts for v1 and records as the weakest
+//! part of the design.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};

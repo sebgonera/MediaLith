@@ -163,6 +163,7 @@ fn find_tools() -> Result<tools::Tools, Box<dyn std::error::Error>> {
         tar: one("tar")?,
         mkfs_erofs: one("mkfs.erofs")?,
         sha256sum: one("sha256sum")?,
+        sha1sum: one("sha1sum")?,
         losetup: one("losetup")?,
     })
 }
