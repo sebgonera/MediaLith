@@ -206,12 +206,22 @@ pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::
     }
 
     // Banner rather than a log line. This is the one secret the machine will ever show,
-    // it is shown once, and it has to be findable in a scrollback of boot messages.
+    // it is shown once, and it has to be findable in a scrollback of boot messages on a
+    // 2160x1440 panel — which is also why the token is sixteen characters in four
+    // groups rather than sixty-four unbroken ones.
     log("");
     log("================================================================");
+    log("");
     log("  This device is now claimed. Its token, shown only this once:");
     log("");
-    log(&format!("      {token}"));
+    log(&format!(
+        "        {}",
+        crate::auth::grouped(&token).replace('-', " - ")
+    ));
+    log("");
+    log("  16 characters. There is no O, I, L or U, so nothing here is");
+    log("  ambiguous: a 0 is always a zero and a 1 is always a one.");
+    log("  Case does not matter. Type it with or without the dashes.");
     log("");
     log("  Type it into the console page to install or change anything.");
     log("  Reading the status page needs nothing.");
@@ -219,6 +229,7 @@ pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::
         "  Lost it? Delete {} and restart to be issued another.",
         path.display()
     ));
+    log("");
     log("================================================================");
     log("");
 
@@ -474,13 +485,19 @@ mod tests {
         (credential, lines, path)
     }
 
-    /// The 64-hex-character token out of a banner, if one was printed.
+    /// The token out of a banner, in the form a person would type back, if one was
+    /// printed.
+    ///
+    /// Matched by normalising each line rather than by looking for an exact format, so
+    /// this keeps working if the banner's spacing changes and stops working if the token
+    /// itself does.
     fn token_in(lines: &[String]) -> Option<String> {
-        lines
-            .iter()
-            .map(|line| line.trim())
-            .find(|line| line.len() == 64 && line.bytes().all(|b| b.is_ascii_hexdigit()))
-            .map(str::to_owned)
+        lines.iter().find_map(|line| {
+            let candidate = crate::auth::normalise(line);
+            (candidate.len() == crate::auth::TOKEN_CHARS
+                && line.chars().all(|c| !c.is_ascii_lowercase()))
+            .then_some(candidate)
+        })
     }
 
     #[test]

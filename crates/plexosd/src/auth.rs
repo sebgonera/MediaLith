@@ -1,18 +1,32 @@
 //! The device token, and what it does and does not protect (ADR-0013).
 //!
 //! One appliance, one administrator, one secret. There is no user database, no password
-//! and no default credential: the token is 256 bits from `/dev/urandom`, generated on
-//! the machine at first start and shown on the console attached to it. Whoever can read
-//! that screen may claim the device, which is the same trust model as a router's reset
-//! button and is stated so that it is a decision rather than an oversight.
+//! and no default credential: the token is 80 bits from `/dev/urandom`, generated on the
+//! machine at first start and shown on the console attached to it. Whoever can read that
+//! screen may claim the device, which is the same trust model as a router's reset button
+//! and is stated so that it is a decision rather than an oversight.
 //!
 //! # Why a token and not a password
 //!
 //! A key-derivation function exists to make guessing a low-entropy secret expensive.
-//! Against 256 bits of entropy there is nothing to guess, so a single SHA-256 is
-//! sufficient and no KDF — and therefore no hand-written cryptography — is needed. What
-//! hashing does buy is that a copy of `/var`, from a backup or a pulled disk, yields
-//! nothing that can be presented to the console.
+//! Against 80 bits of entropy there is nothing to guess — a million attempts a second,
+//! which is orders of magnitude beyond what this server could be made to answer, would
+//! take longer than the age of the universe — so a single SHA-256 is sufficient and no
+//! KDF, and therefore no hand-written cryptography, is needed. What hashing does buy is
+//! that a copy of `/var`, from a backup or a pulled disk, yields nothing that can be
+//! presented to the console.
+//!
+//! # Why it is short, and shaped the way it is
+//!
+//! The token is read off a 2160x1440 laptop panel in a console font and typed into a
+//! browser on another machine. That is its whole life, and it is what the format is for:
+//! sixteen characters in four groups, from an alphabet with no `I`, `L`, `O` or `U`, so
+//! there is no pair to confuse and nothing to spell. [`normalise`] accepts it in any
+//! case, with or without the dashes, and folds `O` onto `0` and `I`/`L` onto `1` — so a
+//! reader who saw the wrong one of a pair is not punished for it.
+//!
+//! It began as 64 hex characters. Entropy nobody can transcribe is not security; it is
+//! an obstacle to the only person entitled to get past it.
 //!
 //! For the same reason there is no lockout and no rate limit. Both exist to slow
 //! guessing; here they would only give anyone on the LAN a way to lock the
@@ -43,9 +57,32 @@ pub const CREDENTIAL_FILE: &str = "/var/lib/plexos/device-token";
 
 /// Bytes of entropy in a token.
 ///
-/// 32, so that guessing is not a threat model and the absence of a lockout needs no
-/// further defence.
-pub const TOKEN_BYTES: usize = 32;
+/// 10, which is 80 bits. That is not a compromise between security and convenience: at
+/// a million guesses a second — far beyond what this hand-written HTTP server could be
+/// made to answer — exhausting 2^80 takes longer than the age of the universe. Guessing
+/// is still not a threat model, so the absence of a lockout still needs no further
+/// defence.
+///
+/// It was 32 bytes, and 64 hex characters turned out to be the wrong shape for the one
+/// place this is read: a 2160x1440 laptop panel with a console font, transcribed by
+/// hand into a browser on another machine. Entropy nobody can type is not security, it
+/// is an obstacle to the person who owns the device.
+pub const TOKEN_BYTES: usize = 10;
+
+/// Characters in a token, which is [`TOKEN_BYTES`] at five bits each.
+pub const TOKEN_CHARS: usize = TOKEN_BYTES * 8 / 5;
+
+/// Characters per group when a token is shown to a person.
+const GROUP: usize = 4;
+
+/// Crockford's base32 alphabet.
+///
+/// Not RFC 4648's. The difference is the point: `I`, `L`, `O` and `U` are absent, so
+/// there is no pair a person can confuse when reading one off a screen — no `O` to
+/// mistake for `0`, no `l` for `1` — and no combination of the remainder spells anything
+/// unfortunate. Upper case because a console font makes it the more legible of the two,
+/// and [`normalise`] means it does not matter what is typed.
+const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 /// Where the kernel's randomness comes from.
 ///
@@ -55,24 +92,94 @@ pub const TOKEN_BYTES: usize = 32;
 /// possibility of blocking forever on a machine with no entropy sources for nothing.
 const RANDOM_SOURCE: &str = "/dev/urandom";
 
-/// A token as the administrator sees it: lower-case hex.
+/// Bytes as lower-case hex.
 ///
-/// Hex rather than base64 because it survives being read off a screen and typed back in
-/// without a case-sensitivity argument or a `+`/`/` mistaken for punctuation.
+/// This is the *stored* form — the fingerprint — and not what anybody types. It stays
+/// hex because a SHA-256 digest is read by machines only.
 #[must_use]
-pub fn encode(bytes: &[u8]) -> String {
+pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().fold(String::new(), |mut out, b| {
         let _ = write!(out, "{b:02x}");
         out
     })
 }
 
+/// A token as the administrator sees it: [`ALPHABET`], upper case, no separators.
+///
+/// The canonical form. [`grouped`] adds dashes for display and [`normalise`] takes any
+/// of it back to this.
+#[must_use]
+pub fn encode_token(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(TOKEN_CHARS);
+    let mut buffer: u32 = 0;
+    let mut bits: u32 = 0;
+
+    for &byte in bytes {
+        buffer = (buffer << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            let index = ((buffer >> bits) & 0x1f) as usize;
+            out.push(ALPHABET[index] as char);
+        }
+    }
+    // Only reachable if TOKEN_BYTES stops being a multiple of five bits. Kept so that
+    // changing it produces a shorter token rather than a silently truncated one.
+    if bits > 0 {
+        let index = ((buffer << (5 - bits)) & 0x1f) as usize;
+        out.push(ALPHABET[index] as char);
+    }
+    out
+}
+
+/// The token as it is printed: groups of [`GROUP`] separated by dashes.
+///
+/// Grouping is not decoration. Sixteen unbroken characters are read by counting; four
+/// groups of four are read by shape, and the reader can keep their place after looking
+/// away at a keyboard.
+#[must_use]
+pub fn grouped(token: &str) -> String {
+    token
+        .chars()
+        .collect::<Vec<_>>()
+        .chunks(GROUP)
+        .map(|chunk| chunk.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Takes anything a person might type back to the canonical form.
+///
+/// Upper-cases, drops separators and whitespace, and folds the characters the alphabet
+/// deliberately excludes onto the ones they are mistaken for: `O` is a zero, `I` and `L`
+/// are ones. Anything else is dropped, which makes a token containing a genuinely wrong
+/// character fail to match rather than match something else.
+///
+/// This is why the token can be typed in any case, with or without the dashes, and why a
+/// reader who saw `O` where a `0` was printed is not punished for it.
+#[must_use]
+pub fn normalise(input: &str) -> String {
+    input
+        .chars()
+        .filter_map(|c| match c.to_ascii_uppercase() {
+            'O' => Some('0'),
+            'I' | 'L' => Some('1'),
+            upper if ALPHABET.contains(&(upper as u8)) => Some(upper),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The stored form of a token.
+///
+/// The token is normalised first, so that what is stored does not depend on how the
+/// administrator happened to type it. Both sides of [`matches`] go through here, which
+/// is what keeps that true rather than merely intended.
 #[must_use]
 pub fn fingerprint(token: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    encode(&hasher.finalize())
+    hasher.update(normalise(token).as_bytes());
+    hex(&hasher.finalize())
 }
 
 /// Reads a fresh token from the kernel.
@@ -83,7 +190,7 @@ pub fn fingerprint(token: &str) -> String {
 pub fn generate() -> std::io::Result<String> {
     let mut bytes = [0_u8; TOKEN_BYTES];
     std::fs::File::open(RANDOM_SOURCE)?.read_exact(&mut bytes)?;
-    Ok(encode(&bytes))
+    Ok(encode_token(&bytes))
 }
 
 /// Compares a presented token against a stored fingerprint without leaking where they
@@ -172,26 +279,104 @@ pub fn bearer(header_value: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
-    /// A token is 64 hex characters; this is a convenient one that is not secret.
-    const SAMPLE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    /// A token shaped like a real one. Not secret: it is in a public repository.
+    const SAMPLE: &str = "4K7QM2XR9T8BHVWP";
 
     #[test]
-    fn the_fingerprint_is_sha256_of_the_token_text() {
-        // Pinned against a value from a different implementation — `printf %s ... |
+    fn the_fingerprint_is_sha256_of_the_normalised_token() {
+        // Pinned against a value from a different implementation — `printf %s ABC |
         // sha256sum` — rather than against this module's own output, which would agree
         // with itself however wrong it was.
+        //
+        // ABC and not abc: the token is normalised before it is hashed, so that what is
+        // stored does not depend on how the administrator happened to type it. This test
+        // pins both facts at once, and it caught the change when normalisation arrived.
         assert_eq!(
             fingerprint("abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-            "the NIST test vector for SHA-256 of \"abc\""
+            "b5d4045c3f466fa91fe2cc6abe79232a1a57cdf104f7a26e716e0a1e2789df78",
+            "SHA-256 of \"ABC\", computed by sha256sum"
         );
+        assert_eq!(
+            fingerprint(SAMPLE),
+            "fe8da1592814bca5332729e156f4ba5e3d5031e8260d2fd7a5f2a037214c5495",
+            "and of the sample token, likewise"
+        );
+    }
+
+    #[test]
+    fn a_token_is_accepted_however_it_was_typed() {
+        // The whole point of the shape. Somebody reading four groups off a laptop panel
+        // types them with dashes or without, in whatever case their keyboard was in.
+        let stored = fingerprint(SAMPLE);
+        for typed in [
+            "4K7QM2XR9T8BHVWP",
+            "4K7Q-M2XR-9T8B-HVWP",
+            "4k7q-m2xr-9t8b-hvwp",
+            "4K7Q M2XR 9T8B HVWP",
+            "  4K7Q-M2XR-9T8B-HVWP  ",
+        ] {
+            assert!(matches(typed, &stored), "{typed:?} must be accepted");
+        }
+    }
+
+    #[test]
+    fn the_letters_the_alphabet_excludes_are_folded_onto_the_digits() {
+        // A reader who saw O where a 0 was printed, or l where a 1 was, has made the
+        // mistake the alphabet exists to prevent. Rejecting them would blame the reader
+        // for an ambiguity the format claims not to have.
+        assert_eq!(normalise("O0Il1"), "00111");
+        assert_eq!(normalise("4K7Q-M2XR"), "4K7QM2XR");
+    }
+
+    #[test]
+    fn the_alphabet_contains_nothing_a_reader_can_confuse() {
+        // The property, asserted rather than assumed: the four characters Crockford
+        // leaves out are the four that cause this.
+        for excluded in [b'I', b'L', b'O', b'U'] {
+            assert!(
+                !ALPHABET.contains(&excluded),
+                "{} is in the alphabet and should not be",
+                excluded as char
+            );
+        }
+        assert_eq!(ALPHABET.len(), 32, "five bits per character");
+        let mut seen = ALPHABET.to_vec();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 32, "and every character distinct");
+    }
+
+    #[test]
+    fn a_token_is_shown_in_groups_and_accepted_without_them() {
+        // Sixteen unbroken characters are read by counting; four groups of four are read
+        // by shape, and the reader can keep their place after looking at a keyboard.
+        assert_eq!(grouped(SAMPLE), "4K7Q-M2XR-9T8B-HVWP");
+        assert_eq!(normalise(&grouped(SAMPLE)), SAMPLE);
+    }
+
+    #[test]
+    fn the_encoding_agrees_with_crockfords_own_example() {
+        // Pinned outside this module: Crockford's base32 maps five zero bytes to eight
+        // zeros, and the alphabet's order is what makes 0x00..0x09 the digits.
+        assert_eq!(encode_token(&[0; 10]), "0".repeat(16));
+        assert_eq!(encode_token(&[0xff; 10]), "Z".repeat(16));
+        // 0b00001_00010_00011_00100_00101_00110_00111_01000 -> "123456789" prefix rules
+        assert_eq!(encode_token(&[0x00, 0x44, 0x32, 0x14, 0xc7]).len(), 8);
     }
 
     #[test]
     fn a_generated_token_has_the_entropy_the_adr_claims() {
         let token = generate().expect("/dev/urandom");
-        assert_eq!(token.len(), TOKEN_BYTES * 2, "hex doubles the byte count");
-        assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(token.len(), TOKEN_CHARS, "five bits per character");
+        assert_eq!(
+            token.len(),
+            16,
+            "and sixteen is what a person is asked to type"
+        );
+        assert!(
+            token.bytes().all(|b| ALPHABET.contains(&b)),
+            "every character must come from the unambiguous alphabet: {token}"
+        );
     }
 
     #[test]
@@ -201,7 +386,7 @@ mod tests {
         let a = generate().unwrap();
         let b = generate().unwrap();
         assert_ne!(a, b);
-        assert_ne!(a, "0".repeat(TOKEN_BYTES * 2), "not a zeroed buffer");
+        assert_ne!(a, "0".repeat(TOKEN_CHARS), "not a zeroed buffer");
     }
 
     #[test]
@@ -217,7 +402,7 @@ mod tests {
         let stored = fingerprint(SAMPLE);
         let mut nearly = SAMPLE.to_owned();
         nearly.pop();
-        nearly.push('0');
+        nearly.push('2');
         assert_ne!(nearly, SAMPLE);
         assert!(!matches(&nearly, &stored));
     }

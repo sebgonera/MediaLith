@@ -482,13 +482,15 @@ function renderPlex(report) {
        downloads the official package from Plex, checks its signature, and turns it into
        an app image on this machine. Doing so means accepting Plex's terms.</p>
     <div class="row">
-      <input type="password" id="token" placeholder="device token"
-             autocomplete="off" spellcheck="false" value="${esc(token())}">
+      <input type="text" id="token" placeholder="4K7Q-M2XR-9T8B-HVWP"
+             autocomplete="off" spellcheck="false" autocapitalize="characters"
+             value="${esc(token())}">
       <button id="install" ${busy ? "disabled" : ""}>${phase === "failed" ? "Try again" : "Install Plex"}</button>
     </div>
     <p class="hint">The token was printed on the screen attached to this machine the
-       first time it started. Reading this page needs nothing; installing needs the
-       token.</p>
+       first time it started — sixteen characters in four groups. Case does not matter
+       and the dashes are optional. Reading this page needs nothing; installing needs
+       the token.</p>
     ${progress}`;
 
   document.getElementById("install").addEventListener("click", startInstall);
