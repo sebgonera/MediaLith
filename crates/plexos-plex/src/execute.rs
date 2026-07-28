@@ -15,9 +15,11 @@
 //!
 //! # What is verified and what is not
 //!
-//! The plan's orderings are covered by tests in `build`. This module has been run end
-//! to end against a real Plex package **on a build host**, producing a mountable erofs
-//! image. It has never run on the appliance. Delete this notice when it has.
+//! The plan's orderings are covered by tests in `build`, and this module has now run end
+//! to end **on the appliance** as well as on a build host: all eight steps, producing an
+//! app image that mounted and ran. It needed two image fixes to get there, both recorded
+//! in CLAUDE.md's trap list -- a `tar` that could not read `.xz` and an `mkfs.erofs`
+//! built without a compressor.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};

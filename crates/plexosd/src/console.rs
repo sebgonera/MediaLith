@@ -627,7 +627,8 @@ mod tests {
     // spawns a thread that downloads 83 MB from Plex, which is not a unit test. What it
     // depends on is covered where it can be — provision::Job's exclusivity and its
     // outcome handling in that module's tests, and the whole pipeline by the
-    // `provision` example against real packages. It has not run on the appliance.
+    // `provision` example against real packages -- and, since then, by the appliance
+    // itself running the whole path from a browser.
 
     #[test]
     fn a_device_with_no_credential_claims_itself_and_shows_the_token() {

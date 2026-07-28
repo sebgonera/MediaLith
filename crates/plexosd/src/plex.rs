@@ -25,9 +25,10 @@
 //!
 //! # What has run
 //!
-//! **Nothing here has started Plex on the appliance.** The pieces below are ordinary
-//! filesystem and process calls, and the confinement they lead to has never executed
-//! outside a test. Delete this notice when it has.
+//! **This has now started Plex on the appliance**, which then served its own web
+//! interface and was claimed to a Plex account. The child's output is captured rather
+//! than inherited, and that is why: two failures had to be diagnosed by experiment
+//! before it was, and the third was read off the network in one request.
 
 use std::io;
 use std::path::{Path, PathBuf};

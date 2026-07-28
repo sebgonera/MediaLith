@@ -20,8 +20,13 @@
 //!
 //! # What is verified and what is not
 //!
-//! The spec and the ordering are tested. **Plex has never been started by this.**
-//! Delete this notice when it has.
+//! The spec and the ordering are tested, and **Plex has now been started by this on the
+//! appliance**: cgroup joined, Landlock applied, privileges dropped to 900:900, and
+//! `execve` into Plex, which then served and was claimed to a Plex account.
+//!
+//! Getting there cost two corrections to the grant list, both of the same shape and both
+//! recorded as traps: a deny-by-default policy has to be *executed* before it can be
+//! believed, because the paths a process needs are mostly ones nobody thinks to list.
 
 use std::path::{Path, PathBuf};
 

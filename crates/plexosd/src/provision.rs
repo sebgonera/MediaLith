@@ -35,9 +35,9 @@
 //!
 //! # What has run
 //!
-//! The pipeline below is the one `plexos-plex`'s `provision` example runs end to end on
-//! a build host against real downloads. **This module has not run on the appliance.**
-//! Delete this notice when it has.
+//! The pipeline below has now run end to end **on the appliance**, from a browser on
+//! another machine: catalogue, download, checksum, signature, manifest, build, publish,
+//! mount and start, finishing with a Plex that answered on port 32400.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};

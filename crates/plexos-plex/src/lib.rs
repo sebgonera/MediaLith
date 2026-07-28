@@ -28,7 +28,11 @@
 //! are MD5 and SHA1: a stricter `GnuPG` would break provisioning on the device while
 //! still working on a build host.
 //!
-//! **Nothing in this crate has run on the appliance.** Delete this notice when it has.
+//! **This crate has now run on the appliance, end to end.** A Plex package was fetched
+//! from Plex's own endpoint, its signature verified against the pinned key, every member
+//! matched against the signed manifest, the payload unpacked, an erofs app image built
+//! and published, mounted through a loop device, and Plex started confined under it. The
+//! server was then claimed to a Plex account. What is still unproven is a transcode.
 
 #![forbid(unsafe_code)]
 

@@ -25,8 +25,9 @@
 //!
 //! # What is verified and what is not
 //!
-//! The plan and the integrity check are tested. **Nothing in this module has attached a
-//! loop device or mounted anything on the appliance.** Delete this notice when it has.
+//! The plan and the integrity check are tested, and this has now attached a loop device
+//! and mounted an app image on the appliance: `/var/lib/plexos/apps/plex/<version>.img
+//! attached to /dev/loop0`, mounted at `/run/plexos/plex`, with the hash checked first.
 
 use std::path::{Path, PathBuf};
 
