@@ -39,7 +39,7 @@ Everything else is cheap to revise. Prefer revising it.
 | Component | State |
 | --- | --- |
 | `crates/plexos-types` | Done. Formats and the layout emitter, 41 tests. |
-| `crates/plexos-gpu` | Done as a diagnostic tool, 41 tests. Never run against a real GPU. |
+| `crates/plexos-gpu` | Done, 41 tests, and it has now answered the question it was written for. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
 | `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec, partition-label lookup. Every syscall in it has run on real hardware. |
 | `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate, spawns the status console, and then starts a shell. 50 tests. |
 | `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, and a read-only page. 82 tests, including the device token of ADR-0013. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
@@ -68,22 +68,30 @@ where the thing being waited for had already happened.
 
 Next, in order:
 
-1. **Run `plexos-gpu` on the reference laptop.** It has 41 tests and has now seen
-   exactly one real GPU — an NVIDIA GTX 1060 on the build host, which it correctly
-   reported as unsupported. It has still never seen the UHD 620 it was written for.
-   This is the question the project exists to answer and it is still open. The status
-   console exists partly to make the answer readable when it arrives.
-2. **Reach the provisioning code from the device.** `plexos-plex` does the whole job —
+1. **Reach the provisioning code from the device.** `plexos-plex` does the whole job —
    verify, unpack, build, publish, activate — and nothing on the appliance can call it.
    What is missing is a downloader, an authenticated upload route (ADR-0013), a
    removable-media path (ADR-0010), and mounting the image once it exists (ADR-0007).
    Until Plex actually runs, the gate's `plex-http` check reports `NotApplicable`,
    which is correct and means the gate is weaker than ADR-0005 intends.
+2. **Run Plex confined** (ADR-0007): an unprivileged user, cgroup v2, Landlock and
+   seccomp, with access to exactly its data directory, the media paths read-only, the
+   transcode directory and the render node. The app image is mounted at boot already;
+   nothing starts what is inside it. Until it does, the gate's `plex-http` check
+   reports `NotApplicable`, which is correct and means the gate is weaker than ADR-0005
+   intends.
 3. **`plexos-update`** — nothing implements the update flow, so rollback has never
    been exercised end to end.
 
-Still unproven: hardware transcoding, updates, rollback, and signing. Images are
-unsigned, so Secure Boot must be off.
+**Hardware transcoding works.** `/api/gpu` on the reference laptop reports H.264 and
+HEVC Main and Main10 decode *and* encode, plus VP9 decode, with GuC and HuC running —
+the full set a Plex transcoding appliance needs. Getting HuC there took two fixes that
+had to be found in the kernel source rather than guessed; both are in the trap list.
+What remains unproven is Plex itself transcoding through it, which waits on Plex
+running at all.
+
+Still unproven: updates, rollback, and signing. Images are unsigned, so Secure Boot
+must be off.
 
 ## Known traps
 
@@ -162,6 +170,26 @@ unsigned, so Secure Boot must be off.
   real one by name. Only hardware has a `device` symlink in sysfs; that is the
   discriminator. The appliance has no bridges today, which is exactly why this is worth
   encoding before something adds one.
+- **`i915.enable_guc` defaults to auto, and auto means off below Gen12.**
+  `uc_expand_default_options()` opens with `if (GRAPHICS_VER(i915) < 12) {
+  enable_guc = 0; return; }`. Whiskey Lake-U is Gen9.5, so the driver never requests
+  GuC or HuC firmware and shipping the blobs changes nothing. `i915.enable_guc=2` is
+  `ENABLE_GUC_LOAD_HUC`; 3 would add GuC submission, which a transcoding appliance does
+  not want. Without it HuC is silently absent and transcodes are worse at a given
+  bitrate — the exact failure `plexos-gpu` exists to catch, which it could not do until
+  debugfs was mounted.
+- **Firmware for a built-in driver must be in the initramfs, not in `/usr`.** `i915` is
+  `CONFIG_DRM_I915=y` and fetches firmware during `do_initcalls`, a second before
+  `plexos-init` mounts `/usr`. Blobs in `/usr` are blobs the driver never sees, and it
+  continues without them rather than retrying. `rootfs_initcall` unpacks the initramfs
+  before `device_initcall` probes drivers, so that is the earliest place a file can be
+  and still be found. `CONFIG_EXTRA_FIRMWARE` also works but needs an absolute path
+  into the Buildroot target directory, which cannot live in a checked-in fragment.
+- **The verity root hash cannot tell two images apart when only the UKI changed.** A
+  kernel parameter or console setting leaves `/usr` byte-identical, so a reflashed
+  machine and an untouched one report the same hash. `/api/status` reports the whole
+  command line for this reason: it is the only field that distinguishes them, and
+  without it "the fix did not work" and "the image was not flashed" look the same.
 - **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error
