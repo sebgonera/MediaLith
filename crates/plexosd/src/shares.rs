@@ -189,6 +189,17 @@ pub enum Error {
         /// Why.
         cause: String,
     },
+    /// Every option profile was refused. Carries what was tried.
+    ///
+    /// A separate variant from [`Error::Mount`] because the useful information is the
+    /// *set* of refusals, not the last one — and because the last one is the least
+    /// specific profile, which is the least informative of the three.
+    Refused {
+        /// Where it was going.
+        target: PathBuf,
+        /// What was tried and what each attempt said.
+        attempts: Vec<String>,
+    },
     /// The mount itself failed.
     Mount {
         /// Where it was going.
@@ -259,6 +270,15 @@ impl std::fmt::Display for Error {
                     target.display()
                 )
             }
+            Self::Refused { target, attempts } => write!(
+                f,
+                "nothing would mount at {}. Every option set was refused:\n  {}\n\
+                 An EINVAL here is the kernel rejecting the options and is a fault in \
+                 PlexOS; an EACCES is the server refusing this machine's address, which \
+                 is not the build host's.",
+                target.display(),
+                attempts.join("\n  ")
+            ),
             Self::Io(cause) => write!(f, "{cause}"),
         }
     }
@@ -478,30 +498,59 @@ pub fn mount_one(share: &Share, log: &mut dyn FnMut(&str)) -> Result<(), Error> 
     } else {
         None
     };
-    let options = options_for(share, &address, client.as_deref(), secret.as_deref());
-
     std::fs::create_dir_all(&target)?;
-
-    // The options are not logged: they carry the password for an SMB share.
     log(&format!(
         "mounting {} ({}) at {} from {address}",
         share.source,
         share.kind,
         target.display()
     ));
-    plexos_sys::mount::mount(
-        &share.source,
-        &target.to_string_lossy(),
-        share.kind.fstype(),
-        &options,
-    )
-    .map_err(|cause| Error::Mount {
-        target: target.clone(),
-        cause,
-    })?;
 
-    log(&format!("{} mounted read-only", target.display()));
-    Ok(())
+    // SMB is asked one way; NFS is tried against a ladder, because servers differ and
+    // the kernel reports every disagreement as EINVAL.
+    let profiles: &[&str] = match share.kind {
+        Kind::Nfs => &NFS_PROFILES,
+        Kind::Smb => &[""],
+    };
+
+    let mut attempts = Vec::new();
+    for profile in profiles {
+        let options = options_with(
+            share,
+            &address,
+            client.as_deref(),
+            secret.as_deref(),
+            profile,
+        );
+        let named = if profile.is_empty() {
+            "the kernel's defaults"
+        } else {
+            profile
+        };
+        // The profile is named; the whole option string is not, because for SMB it holds
+        // the password.
+        match plexos_sys::mount::mount(
+            &share.source,
+            &target.to_string_lossy(),
+            share.kind.fstype(),
+            &options,
+        ) {
+            Ok(()) => {
+                log(&format!(
+                    "{} mounted read-only, with {named}",
+                    target.display()
+                ));
+                return Ok(());
+            }
+            Err(cause) => {
+                let note = format!("[{named}] refused: {cause}");
+                log(&format!("  {note}"));
+                attempts.push(note);
+            }
+        }
+    }
+
+    Err(Error::Refused { target, attempts })
 }
 
 /// Unmounts one share, leaving its configuration alone.
@@ -685,6 +734,24 @@ mod tests {
         let options = options_for(&nfs(), "192.168.2.165", Some("192.168.2.102"), None);
         assert!(options.contains("addr=192.168.2.165"), "{options}");
         assert!(options.contains("vers=4.2"), "{options}");
+    }
+
+    #[test]
+    fn a_total_refusal_reports_every_attempt_and_not_just_the_last() {
+        // The last attempt is the least specific profile, which is the least informative
+        // of the three. What is worth reading is the set: which combinations the server
+        // would not take.
+        let error = Error::Refused {
+            target: PathBuf::from("/var/media/nas"),
+            attempts: vec![
+                "[vers=4.2,proto=tcp] refused: Invalid argument".to_owned(),
+                "[vers=4.2] refused: Invalid argument".to_owned(),
+            ],
+        };
+        let message = error.to_string();
+        assert!(message.contains("proto=tcp"), "{message}");
+        assert!(message.contains("EINVAL here is the kernel"), "{message}");
+        assert!(message.contains("not the build host"), "{message}");
     }
 
     #[test]
