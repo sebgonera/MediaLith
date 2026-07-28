@@ -228,14 +228,37 @@ impl std::fmt::Display for Error {
                  starts. Try the IP address instead, which also removes DNS from the \
                  path between this appliance and your library."
             ),
-            Self::Mount { target, cause } => write!(
-                f,
-                "mounting at {} failed: {cause}. The usual causes are the export not \
-                 permitting this machine's address, a firewall, or the server not \
-                 running the protocol asked for -- the kernel reports all three the same \
-                 way. Check the server's export list first.",
-                target.display()
-            ),
+            Self::Mount { target, cause } => {
+                // The remedy has to match the error kind. This message once listed three
+                // causes and all three were about access, while the actual failure was
+                // EINVAL from a malformed option string -- so it sent the reader to the
+                // NAS to check an export list that was already correct.
+                let remedy = match cause.kind() {
+                    io::ErrorKind::InvalidInput => {
+                        "The kernel rejected the mount options, not the server. This is a \
+                         fault in PlexOS rather than anything to check on the NAS: the \
+                         option string is built in plexosd::shares."
+                    }
+                    io::ErrorKind::PermissionDenied => {
+                        "The server refused this machine. Check that its export permits \
+                         this appliance's address, which is not the same address as the \
+                         build host's."
+                    }
+                    io::ErrorKind::TimedOut | io::ErrorKind::HostUnreachable => {
+                        "Nothing answered. Check the server is on and reachable from this \
+                         appliance -- the status page shows its address and route."
+                    }
+                    _ => {
+                        "Check that the server is running the protocol asked for and that \
+                         its export exists."
+                    }
+                };
+                write!(
+                    f,
+                    "mounting at {} failed: {cause}. {remedy}",
+                    target.display()
+                )
+            }
             Self::Io(cause) => write!(f, "{cause}"),
         }
     }
@@ -330,12 +353,36 @@ fn address_of(host: &str) -> Result<String, Error> {
         })
 }
 
+/// The address this machine would use to reach `server`.
+///
+/// `NFSv4` needs it: the protocol has a callback channel, so the server has to be told
+/// where to call back. `mount.nfs` works this out and passes `clientaddr=`; a raw
+/// `mount(2)` has to do the same, and omitting it is why the first attempt came back
+/// `EINVAL` rather than anything about permissions.
+///
+/// Found by asking the routing table rather than by picking an address off an interface:
+/// a UDP socket is connected to the server and its local address read back. Nothing is
+/// sent — `connect` on a UDP socket only fixes the peer — and on a machine with more than
+/// one route this gives the address that would actually be used, which is the one the
+/// server will accept a callback from.
+#[must_use]
+pub fn client_address_for(server: &str) -> Option<String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect((server, 2049_u16)).ok()?;
+    Some(socket.local_addr().ok()?.ip().to_string())
+}
+
 /// The full option string handed to `mount(2)`.
 ///
 /// Separated from the mounting so the string can be checked by a test rather than by a
 /// server. Passwords are taken by value here and never logged.
 #[must_use]
-pub fn options_for(share: &Share, address: &str, password: Option<&str>) -> String {
+pub fn options_for(
+    share: &Share,
+    address: &str,
+    client: Option<&str>,
+    password: Option<&str>,
+) -> String {
     use std::fmt::Write as _;
 
     let mut options = format!("{FIXED_OPTIONS},addr={address}");
@@ -344,6 +391,12 @@ pub fn options_for(share: &Share, address: &str, password: Option<&str>) -> Stri
             // 4.2 is what a current NAS speaks and what the kernel prefers; naming it
             // avoids a negotiation that fails confusingly against older servers.
             options.push_str(",vers=4.2");
+            // Without this the kernel refuses the mount with EINVAL -- an error about
+            // arguments, which reads like an error about the server. NFSv4 has a
+            // callback channel and the server must be told where to reach us.
+            if let Some(here) = client {
+                let _ = write!(options, ",clientaddr={here}");
+            }
         }
         Kind::Smb => {
             options.push_str(",vers=3.0");
@@ -383,7 +436,20 @@ pub fn mount_one(share: &Share, log: &mut dyn FnMut(&str)) -> Result<(), Error> 
     let host = share.host().unwrap_or_default().to_owned();
     let address = address_of(&host)?;
     let secret = passwords().get(&share.name).cloned();
-    let options = options_for(share, &address, secret.as_deref());
+    let client = if share.kind == Kind::Nfs {
+        let found = client_address_for(&address);
+        if found.is_none() {
+            log(&format!(
+                "could not work out which address this machine reaches {address} from. \
+                 NFSv4 needs one for its callback channel, and the kernel will refuse \
+                 the mount without it."
+            ));
+        }
+        found
+    } else {
+        None
+    };
+    let options = options_for(share, &address, client.as_deref(), secret.as_deref());
 
     std::fs::create_dir_all(&target)?;
 
@@ -576,7 +642,7 @@ mod tests {
     fn every_share_is_mounted_read_only_and_cannot_be_executed_from() {
         // Not configurable. A media library is something to read: nothing on it should be
         // executable, and a compromised NAS must not become a way to run code here.
-        let options = options_for(&nfs(), "192.168.2.165", None);
+        let options = options_for(&nfs(), "192.168.2.165", Some("192.168.2.102"), None);
         for required in ["ro", "nosuid", "nodev", "noexec"] {
             assert!(
                 options.split(',').any(|o| o == required),
@@ -587,9 +653,39 @@ mod tests {
 
     #[test]
     fn the_kernel_is_told_the_address_because_it_has_no_resolver() {
-        let options = options_for(&nfs(), "192.168.2.165", None);
+        let options = options_for(&nfs(), "192.168.2.165", Some("192.168.2.102"), None);
         assert!(options.contains("addr=192.168.2.165"), "{options}");
         assert!(options.contains("vers=4.2"), "{options}");
+    }
+
+    #[test]
+    fn nfs_is_told_where_to_call_back_or_the_kernel_refuses_the_mount() {
+        // The first attempt on the appliance came back EINVAL -- an error about
+        // arguments, which reads like an error about the server, and my own message
+        // helpfully suggested three causes that were all about access. The missing option
+        // was clientaddr, which mount.nfs would have supplied and a raw mount(2) does not.
+        let with = options_for(&nfs(), "192.168.2.165", Some("192.168.2.102"), None);
+        assert!(with.contains("clientaddr=192.168.2.102"), "{with}");
+
+        // And SMB must not be given one: it has no callback channel and the option is
+        // not in its vocabulary.
+        let smb = Share {
+            kind: Kind::Smb,
+            source: "//nas/media".to_owned(),
+            ..nfs()
+        };
+        let theirs = options_for(&smb, "192.168.2.165", Some("192.168.2.102"), None);
+        assert!(!theirs.contains("clientaddr"), "{theirs}");
+    }
+
+    #[test]
+    fn the_client_address_comes_from_the_routing_table() {
+        // Asked of the kernel rather than picked off an interface, so a machine with more
+        // than one route gives the address that would actually be used -- which is the
+        // one the server will accept a callback from. Nothing is sent.
+        let found = client_address_for("192.168.2.165");
+        assert!(found.is_some(), "a route to a LAN address should resolve");
+        assert!(client_address_for("this is not a host").is_none());
     }
 
     #[test]
@@ -602,7 +698,7 @@ mod tests {
             username: Some("sebastian".to_owned()),
             ..nfs()
         };
-        let options = options_for(&smb, "192.168.2.165", Some("hunter2"));
+        let options = options_for(&smb, "192.168.2.165", None, Some("hunter2"));
         assert!(options.contains("username=sebastian"));
         assert!(options.contains("password=hunter2"));
 
@@ -645,14 +741,31 @@ mod tests {
     }
 
     #[test]
-    fn a_mount_failure_names_the_three_causes_that_look_identical() {
-        let error = Error::Mount {
+    fn a_rejected_option_is_not_reported_as_a_rejected_machine() {
+        // What happened on the appliance: EINVAL from a missing clientaddr, reported as
+        // three possible causes all about access. It sent the reader to check an export
+        // list that was already correct.
+        let bad_options = Error::Mount {
+            target: PathBuf::from("/var/media/nas"),
+            cause: io::Error::from(io::ErrorKind::InvalidInput),
+        };
+        let message = bad_options.to_string();
+        assert!(message.contains("fault in PlexOS"), "{message}");
+        assert!(
+            !message.contains("export"),
+            "and does not blame the NAS: {message}"
+        );
+
+        let refused = Error::Mount {
             target: PathBuf::from("/var/media/nas"),
             cause: io::Error::from(io::ErrorKind::PermissionDenied),
         };
-        let message = error.to_string();
-        assert!(message.contains("export list"), "{message}");
-        assert!(message.contains("firewall"), "{message}");
+        let refused = refused.to_string();
+        assert!(refused.contains("export permits"), "{refused}");
+        assert!(
+            refused.contains("not the same address as the build host"),
+            "the mistake somebody will actually make: {refused}"
+        );
     }
 }
 
