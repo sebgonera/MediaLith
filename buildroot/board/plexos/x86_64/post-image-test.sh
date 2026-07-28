@@ -272,6 +272,23 @@ else
 fi
 
 # --------------------------------------------------------------------------
+stage "stage 0b — the version stamp"
+# build_uki reads ${WORK}/os-release, which stage_os_release writes before the /usr image
+# is built. Calling build_uki without it used to work and now dies -- deliberately, since
+# that ordering is what kept /usr/lib/os-release saying "Buildroot 2026.02.3" while the
+# boot entry said something else. The test has to follow the same order the build does.
+stage_os_release >/dev/null
+assert "an os-release is written" "[ -s '${WORK}/os-release' ]"
+check "it carries the PlexOS version rather than Buildroot's" \
+      "$(sed -n 's/^VERSION_ID=//p' "${WORK}/os-release")" \
+      "${PLEXOS_VERSION}"
+assert "and the same file reaches the image tree" \
+       "[ -s '${MOCK}/target/usr/lib/os-release' ]"
+check "with the same version in it" \
+      "$(sed -n 's/^VERSION_ID=//p' "${MOCK}/target/usr/lib/os-release")" \
+      "${PLEXOS_VERSION}"
+
+# --------------------------------------------------------------------------
 stage "stage 4 — Unified Kernel Image"
 STUB="${MOCK}/images/linuxx64.efi.stub"
 if [ -f "${OUTPUT}/images/linuxx64.efi.stub" ]; then
