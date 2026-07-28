@@ -34,6 +34,13 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
+/// Where the device's credential lives.
+///
+/// Under the state root, so it survives an OS update and a rollback -- claiming a
+/// device again after every update would be absurd, and ADR-0009 permits an addition
+/// like this because a release that has never heard of the file simply ignores it.
+pub const CREDENTIAL_FILE: &str = "/var/lib/plexos/device-token";
+
 /// Bytes of entropy in a token.
 ///
 /// 32, so that guessing is not a threat model and the absence of a lockout needs no

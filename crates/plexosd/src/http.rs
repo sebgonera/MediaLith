@@ -46,6 +46,8 @@ pub struct Request {
     pub method: String,
     /// Path with the query string removed, percent-encoding untouched.
     pub path: String,
+    /// Header fields, in the order sent.
+    pub headers: Vec<(String, String)>,
 }
 
 impl Request {
@@ -53,6 +55,31 @@ impl Request {
     #[must_use]
     pub fn wants_body(&self) -> bool {
         self.method != "HEAD"
+    }
+
+    /// One header, matched without regard to case.
+    ///
+    /// HTTP field names are case-insensitive and clients differ: `curl` sends
+    /// `Authorization`, some libraries send `authorization`. Comparing exactly means a
+    /// token that works from one client is rejected from another, with a 401 that
+    /// blames the credential rather than the comparison.
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(field, _)| field.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Whether this request could change the machine.
+    ///
+    /// Anything that is not a read counts, including methods nobody has implemented.
+    /// The list that needs maintaining is therefore the *safe* one: a verb added to
+    /// HTTP tomorrow arrives needing a token, rather than arriving unauthenticated
+    /// because no one thought to list it.
+    #[must_use]
+    pub fn is_mutating(&self) -> bool {
+        !matches!(self.method.as_str(), "GET" | "HEAD")
     }
 }
 
@@ -189,9 +216,22 @@ pub fn parse_request(head: &str) -> Result<Request, ParseError> {
     // that does something, and see the note about authentication in the module docs.
     let path = target.split('?').next().unwrap_or(target);
 
+    // Header lines are everything after the request line. A line without a colon is
+    // dropped rather than failing the request: a proxy that inserts something odd
+    // should not take the console down.
+    let headers = head
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_owned(), value.trim().to_owned()))
+        })
+        .collect();
+
     Ok(Request {
         method: method.to_owned(),
         path: path.to_owned(),
+        headers,
     })
 }
 
@@ -224,6 +264,7 @@ fn read_head(stream: &mut impl BufRead) -> io::Result<Result<String, ParseError>
 /// Handles one connection, from parse to response.
 fn handle(
     stream: &mut TcpStream,
+    credential: &crate::auth::Credential,
     handler: &(impl Fn(&Request) -> Response + ?Sized),
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
@@ -236,7 +277,7 @@ fn handle(
             Err(error) => (error.response(), true),
             Ok(request) => {
                 let with_body = request.wants_body();
-                (route(&request, handler), with_body)
+                (route(&request, credential, handler), with_body)
             }
         },
     };
@@ -250,16 +291,47 @@ fn handle(
 /// Kept separate from the connection handling so the policy can be tested without a
 /// socket.
 #[must_use]
-pub fn route(request: &Request, handler: &(impl Fn(&Request) -> Response + ?Sized)) -> Response {
-    if request.method != "GET" && request.method != "HEAD" {
-        // See the module documentation: nothing here may change the machine while
-        // there is no authentication in front of it.
-        return Response::text(
-            405,
-            "plexosd serves a read-only status console; only GET and HEAD are accepted\n",
-        );
+pub fn route(
+    request: &Request,
+    credential: &crate::auth::Credential,
+    handler: &(impl Fn(&Request) -> Response + ?Sized),
+) -> Response {
+    if !request.is_mutating() {
+        return handler(request);
     }
-    handler(request)
+
+    // Everything past here changes the machine, and ADR-0013 says a token comes first.
+    match credential {
+        // An unclaimed device. Refusing rather than allowing is the only safe reading:
+        // "no credential is set" must never mean "no credential is needed", which is
+        // how appliances ship with an open management interface.
+        crate::auth::Credential::Unset => Response::text(
+            503,
+            "This device has not been claimed yet, so there is no credential to check \
+             and nothing may change it. The token is printed on the console attached to \
+             the machine at first start (ADR-0013).\n",
+        ),
+        crate::auth::Credential::Set(fingerprint) => {
+            let presented = request
+                .header("Authorization")
+                .and_then(crate::auth::bearer);
+            match presented {
+                Some(token) if crate::auth::matches(token, fingerprint) => handler(request),
+                Some(_) => Response::text(
+                    403,
+                    "That token is not this device's. The one printed on its console at \
+                     first start is the only one it accepts; deleting the credential \
+                     file and restarting issues a new one.\n",
+                ),
+                None => Response::text(
+                    401,
+                    "This route changes the machine and needs the device token: send it \
+                     as `Authorization: Bearer <token>`. Reading the status page needs \
+                     nothing.\n",
+                ),
+            }
+        }
+    }
 }
 
 /// Serves connections until the listener fails, one thread per connection.
@@ -273,18 +345,28 @@ pub fn route(request: &Request, handler: &(impl Fn(&Request) -> Response + ?Size
 /// Fails only if accepting stops working. A failure on an individual connection is
 /// logged and the loop continues, because one broken client must not take the console
 /// down.
-pub fn serve<F>(listener: &TcpListener, handler: F, log: &mut dyn FnMut(&str)) -> io::Result<()>
+pub fn serve<F>(
+    listener: &TcpListener,
+    credential: crate::auth::Credential,
+    handler: F,
+    log: &mut dyn FnMut(&str),
+) -> io::Result<()>
 where
     F: Fn(&Request) -> Response + Send + Sync + 'static,
 {
     let handler = std::sync::Arc::new(handler);
+    // Read once, at startup, and shared. Re-reading per request would let a file
+    // replaced mid-session take effect without a restart, which is a way to change the
+    // credential that does not go through the console.
+    let credential = std::sync::Arc::new(credential);
 
     for incoming in listener.incoming() {
         match incoming {
             Ok(mut stream) => {
                 let handler = std::sync::Arc::clone(&handler);
+                let credential = std::sync::Arc::clone(&credential);
                 std::thread::spawn(move || {
-                    let _ = handle(&mut stream, handler.as_ref());
+                    let _ = handle(&mut stream, credential.as_ref(), handler.as_ref());
                 });
             }
             Err(error) => log(&format!("could not accept a connection: {error}")),
@@ -297,10 +379,16 @@ where
 mod tests {
     use super::*;
 
+    /// A token shaped like a real one. Not a secret: it is in a public repository.
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    /// A different one, for the wrong-token path.
+    const WRONG: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
     fn get(path: &str) -> Request {
         Request {
             method: "GET".to_owned(),
             path: path.to_owned(),
+            headers: Vec::new(),
         }
     }
 
@@ -326,19 +414,115 @@ mod tests {
     }
 
     #[test]
-    fn every_route_is_read_only() {
-        // The console has no authentication, which is defensible only while nothing it
-        // serves can change the machine. If a verb is ever added, this fails first and
-        // the fix is authentication, not deleting the test.
+    fn no_mutating_route_is_reachable_without_the_device_token() {
+        // This replaces every_route_is_read_only, which said a verb must never be
+        // answered at all. The property it protected -- nothing changes this machine
+        // without authority -- is unchanged; only its shape is, now that ADR-0013
+        // provides the authority. Deleting it and not replacing it was never an option.
         let handler = |_: &Request| Response::text(200, "should not be reached");
-        for method in ["POST", "PUT", "DELETE", "PATCH"] {
-            let request = Request {
+        let claimed = crate::auth::Credential::Set(crate::auth::fingerprint(TOKEN));
+
+        for method in ["POST", "PUT", "DELETE", "PATCH", "BREW"] {
+            let anonymous = Request {
                 method: method.to_owned(),
-                path: "/".to_owned(),
+                path: "/api/provision".to_owned(),
+                headers: Vec::new(),
             };
-            let response = route(&request, &handler);
-            assert_eq!(response.status, 405, "{method} must not be answered");
+            assert_eq!(
+                route(&anonymous, &claimed, &handler).status,
+                401,
+                "{method} without a token"
+            );
+
+            let wrong = Request {
+                headers: vec![("Authorization".to_owned(), format!("Bearer {WRONG}"))],
+                ..anonymous.clone()
+            };
+            assert_eq!(
+                route(&wrong, &claimed, &handler).status,
+                403,
+                "{method} with the wrong token"
+            );
         }
+    }
+
+    #[test]
+    fn an_unclaimed_device_refuses_changes_rather_than_allowing_them() {
+        // The reading that ships appliances with open management interfaces: "no
+        // credential is set" taken to mean "no credential is needed". A device nobody
+        // has claimed is the one most likely to be reachable and least likely to be
+        // watched.
+        let handler = |_: &Request| Response::text(200, "should not be reached");
+        let request = Request {
+            method: "POST".to_owned(),
+            path: "/api/provision".to_owned(),
+            headers: vec![("Authorization".to_owned(), format!("Bearer {TOKEN}"))],
+        };
+        let response = route(&request, &crate::auth::Credential::Unset, &handler);
+        assert_eq!(response.status, 503);
+        assert!(
+            String::from_utf8_lossy(&response.body).contains("not been claimed"),
+            "and says why"
+        );
+    }
+
+    #[test]
+    fn the_right_token_gets_through() {
+        let handler = |_: &Request| Response::text(200, "reached");
+        let claimed = crate::auth::Credential::Set(crate::auth::fingerprint(TOKEN));
+        let request = Request {
+            method: "POST".to_owned(),
+            path: "/api/provision".to_owned(),
+            headers: vec![("Authorization".to_owned(), format!("Bearer {TOKEN}"))],
+        };
+        assert_eq!(route(&request, &claimed, &handler).status, 200);
+    }
+
+    #[test]
+    fn reading_still_needs_nothing_at_all() {
+        // The console exists to be readable when the machine is broken. Requiring a
+        // token before it will say why a boot failed defeats the reason it was built,
+        // and ADR-0013 keeps reads open for exactly that.
+        let handler = |_: &Request| Response::text(200, "the status page");
+        for credential in [
+            crate::auth::Credential::Unset,
+            crate::auth::Credential::Set(crate::auth::fingerprint(TOKEN)),
+        ] {
+            for method in ["GET", "HEAD"] {
+                let request = Request {
+                    method: method.to_owned(),
+                    path: "/api/status".to_owned(),
+                    headers: Vec::new(),
+                };
+                assert_eq!(route(&request, &credential, &handler).status, 200);
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_verb_is_treated_as_a_write() {
+        // The safe list is the one that needs maintaining. A verb added to HTTP
+        // tomorrow arrives needing a token rather than arriving unauthenticated
+        // because nobody listed it.
+        let request = Request {
+            method: "QUERY".to_owned(),
+            path: "/".to_owned(),
+            headers: Vec::new(),
+        };
+        assert!(request.is_mutating());
+    }
+
+    #[test]
+    fn header_lookup_ignores_case_because_clients_differ() {
+        // curl sends Authorization, some libraries send authorization. An exact
+        // comparison rejects a valid token and blames the credential.
+        let request = Request {
+            method: "POST".to_owned(),
+            path: "/".to_owned(),
+            headers: vec![("authorization".to_owned(), "Bearer x".to_owned())],
+        };
+        assert_eq!(request.header("Authorization"), Some("Bearer x"));
+        assert_eq!(request.header("AUTHORIZATION"), Some("Bearer x"));
     }
 
     #[test]
@@ -347,8 +531,9 @@ mod tests {
         let request = Request {
             method: "HEAD".to_owned(),
             path: "/".to_owned(),
+            headers: Vec::new(),
         };
-        let response = route(&request, &handler);
+        let response = route(&request, &crate::auth::Credential::Unset, &handler);
         assert_eq!(response.status, 200);
 
         let bytes = response.to_bytes(request.wants_body());
@@ -405,7 +590,13 @@ mod tests {
                 Response::text(404, "no such page\n")
             }
         };
-        assert_eq!(route(&get("/"), &handler).status, 200);
-        assert_eq!(route(&get("/nope"), &handler).status, 404);
+        assert_eq!(
+            route(&get("/"), &crate::auth::Credential::Unset, &handler).status,
+            200
+        );
+        assert_eq!(
+            route(&get("/nope"), &crate::auth::Credential::Unset, &handler).status,
+            404
+        );
     }
 }

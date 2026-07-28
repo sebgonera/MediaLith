@@ -148,7 +148,24 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
         }
     }
 
-    http::serve(&listener, |request| respond(request, &System), log)
+    // The credential is read once, here, and what it is decides how the console
+    // behaves rather than merely what it logs: an unclaimed device refuses every
+    // mutating route outright (ADR-0013).
+    let credential = crate::auth::read(std::path::Path::new(crate::auth::CREDENTIAL_FILE));
+    match &credential {
+        crate::auth::Credential::Set(_) => log("device claimed; changes need its token"),
+        crate::auth::Credential::Unset => log(
+            "device NOT claimed: nothing may change it yet. Claim it from the console \
+             attached to the machine.",
+        ),
+    }
+
+    http::serve(
+        &listener,
+        credential,
+        |request| respond(request, &System),
+        log,
+    )
 }
 
 #[cfg(test)]
@@ -160,6 +177,7 @@ mod tests {
         Request {
             method: "GET".to_owned(),
             path: path.to_owned(),
+            headers: Vec::new(),
         }
     }
 
