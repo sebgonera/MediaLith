@@ -93,7 +93,10 @@ silently failed. All five are in the trap list. The lesson they share is in ther
 capability is not presence, and a deny-by-default policy has to be executed before it can
 be believed.
 
-What is still unproven is a transcode.
+**And it transcodes on the GPU.** 4K HDR10, HEVC Main 10, decoded and re-encoded to
+1080p HEVC with `(hw)` on both ends — which is the sentence this whole project was
+written to be able to write, and exactly the capability set `plexos-gpu` predicted from
+the hardware alone months before Plex existed on the machine.
 
 Next, in order:
 
@@ -108,16 +111,14 @@ Next, in order:
 3. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
    asked for and both are deferred: an 83 MB upload has to stream to disk, and
    `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
-4. **Run Plex through a real transcode**, which is the last thing standing between
-   "QuickSync works" and "this appliance does its job".
-5. **`plexos-update`** — nothing implements the update flow, so rollback has never been
+4. **`plexos-update`** — nothing implements the update flow, so rollback has never been
    exercised end to end. It is the riskiest untested path in the project, because a bug
    there bricks a device rather than degrading it.
-6. **A supervisor.** `plexos-init` still prints "no supervisor yet" and hands over to a
+5. **A supervisor.** `plexos-init` still prints "no supervisor yet" and hands over to a
    shell. Nothing restarts a service that dies — and `plexosd::plex` says so rather than
    pretending: a Plex that exits stays exited, and a newly provisioned version does not
    replace a running one without a reboot.
-7. **A terminal in the status console**, so administering the appliance stops meaning
+6. **A terminal in the status console**, so administering the appliance stops meaning
    PuTTY on another machine. The pieces are mostly there — `plexosd` already owns an
    HTTP server and the ADR-0013 token gate, and busybox provides the shell — but two
    decisions come first. The server answers request/response only, so this needs either
@@ -132,8 +133,9 @@ Next, in order:
 HEVC Main and Main10 decode *and* encode, plus VP9 decode, with GuC and HuC running —
 the full set a Plex transcoding appliance needs. Getting HuC there took two fixes that
 had to be found in the kernel source rather than guessed; both are in the trap list.
-What remains unproven is Plex itself transcoding through it, which waits on Plex
-running at all.
+Plex now transcodes through it: 4K HDR10 HEVC Main 10 to 1080p HEVC, `(hw)` on the
+decode and `(hw)` on the encode. The verdict `plexos-gpu` reached from sysfs and vainfo
+turned out to describe what the machine actually does.
 
 Still unproven: updates, rollback, and signing. Images are unsigned, so Secure Boot
 must be off.

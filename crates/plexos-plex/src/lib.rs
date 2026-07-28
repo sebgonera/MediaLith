@@ -32,7 +32,9 @@
 //! from Plex's own endpoint, its signature verified against the pinned key, every member
 //! matched against the signed manifest, the payload unpacked, an erofs app image built
 //! and published, mounted through a loop device, and Plex started confined under it. The
-//! server was then claimed to a Plex account. What is still unproven is a transcode.
+//! server was then claimed to a Plex account, and it has since transcoded 4K HDR10
+//! HEVC Main 10 down to 1080p HEVC with both the decode and the encode on the GPU.
+//! Nothing in this crate is now unproven on hardware.
 
 #![forbid(unsafe_code)]
 
