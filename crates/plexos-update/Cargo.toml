@@ -1,0 +1,18 @@
+[package]
+name = "plexos-update"
+version = "0.1.0"
+description = "Writing a new /usr into the inactive slot, and making the bootloader try it"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+plexos-types = { path = "../plexos-types" }
+plexos-sys = { path = "../plexos-sys" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true

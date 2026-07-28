@@ -138,6 +138,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "plexos-update"
+version = "0.1.0"
+dependencies = [
+ "plexos-sys",
+ "plexos-types",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "plexosd"
 version = "0.1.0"
 dependencies = [
