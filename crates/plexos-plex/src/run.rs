@@ -157,6 +157,24 @@ pub fn grants(mount: &Path, media: &[PathBuf]) -> Vec<Grant> {
             access: access::READ_FILE | access::WRITE_FILE | access::READ_DIR,
             required: true,
         },
+        // /run, read-only, and this one is not obvious. /etc/resolv.conf is a symlink to
+        // ../run/resolv.conf -- Buildroot's skeleton makes it one so that a read-only
+        // /etc can still have a lease-managed resolver. Landlock resolves symlinks, so a
+        // rule on /etc does not cover the target, and without this Plex cannot read the
+        // file at all. musl does not report that as an error: it falls back to
+        // 127.0.0.1, where nothing listens, and every lookup fails with "Could not
+        // resolve host". That is what stopped the server being claimed, and it looked
+        // like a network fault on a machine whose network was fine.
+        //
+        // The directory rather than the file, deliberately. udhcpc rewrites resolv.conf
+        // on every lease renewal, and a rule tied to the old file would stop covering
+        // the new one -- so DNS would work until the first renewal and then stop, which
+        // is a far worse bug than this one.
+        Grant {
+            path: PathBuf::from("/run"),
+            access: access::READ_ONLY,
+            required: true,
+        },
         // Hardware discovery. Not required: a machine whose sysfs is unreadable is
         // broken in ways that are not Plex's problem, and the transcoder falls back to
         // software rather than failing.
@@ -385,10 +403,29 @@ mod tests {
     }
 
     #[test]
+    fn the_resolver_configuration_is_reachable_through_its_symlink() {
+        // /etc/resolv.conf is a symlink to ../run/resolv.conf, and Landlock resolves
+        // symlinks -- so granting /etc does not grant the target. Without /run, musl
+        // falls back to 127.0.0.1 without saying so and every DNS lookup fails. Plex
+        // could not be claimed because of exactly this.
+        let grants = grants(&mount(), &[]);
+        let run = grants
+            .iter()
+            .find(|g| g.path == Path::new("/run"))
+            .expect("/run must be granted or Plex has no DNS");
+        assert_ne!(run.access & access::READ_FILE, 0);
+        assert_eq!(run.access & access::WRITE_FILE, 0, "read-only is enough");
+        assert!(
+            run.required,
+            "a Plex that cannot resolve a name is not working"
+        );
+    }
+
+    #[test]
     fn the_base_system_is_readable_and_never_writable() {
         // What granting /usr, /etc, /proc and /sys must not cost: Plex may read the
         // system it runs on and may not change any of it.
-        for path in [paths::USR, "/etc", "/proc", "/sys"] {
+        for path in [paths::USR, "/etc", "/proc", "/sys", "/run"] {
             let grant = grants(&mount(), &[])
                 .into_iter()
                 .find(|g| g.path == Path::new(path))

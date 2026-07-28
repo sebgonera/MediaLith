@@ -272,6 +272,16 @@ must be off.
   re-running the policy on a build host and reasoning backwards. `plexosd` now pipes both
   streams, drains them on threads and serves the tail from `/api/provision`; the third
   failure was read off the network in one request and identified in a minute.
+- **Landlock follows symlinks out of a granted directory, and musl does not complain.**
+  `/etc/resolv.conf` is a symlink to `../run/resolv.conf` — Buildroot's skeleton makes it
+  one so a read-only `/etc` can still have a lease-managed resolver. Granting `/etc`
+  therefore does not grant the file: Landlock resolves the symlink and checks the target,
+  which was in `/run`, which was not granted. musl reports none of this — it falls back
+  to `127.0.0.1`, where nothing listens, so every lookup fails with "Could not resolve
+  host" on a machine whose DNS is fine from a shell. That is what stopped the Plex server
+  being claimed. Grant the *directory* rather than the file: `udhcpc` rewrites
+  `resolv.conf` on every renewal, and a rule tied to the old inode would stop covering
+  the new one, giving DNS that works until the first lease renewal.
 - **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error

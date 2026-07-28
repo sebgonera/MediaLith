@@ -479,7 +479,16 @@ build_uki() {
     # GuC submission, which is a scheduling change with its own history on Gen9 and
     # buys a transcoding appliance nothing. HuC is what affects encode quality, and
     # loading it pulls in GuC anyway, because GuC is what authenticates it.
-    printf 'plexos.slot=a plexos.roothash=%s i915.enable_guc=2 earlycon=efifb console=ttyS0,115200 console=tty0 fbcon=font:TER16x32\n' \
+    # video=1280x720 -- the console has to be readable, and TER16x32 is the largest font
+    # the kernel has. On a 2160x1440 panel that is still 135 columns of very small text,
+    # which is how an `ls -la` came to be unreadable and a diagnosis had to go round by
+    # experiment. Shrinking the framebuffer is the only lever left: at 1280x720 the same
+    # font gives 80 columns at roughly three times the physical size.
+    #
+    # No connector name, so it applies to whichever output exists. A mode the panel
+    # cannot do is not fatal -- DRM falls back to the preferred mode, which is today's
+    # behaviour, so the worst case is no improvement rather than no picture.
+    printf 'plexos.slot=a plexos.roothash=%s i915.enable_guc=2 earlycon=efifb console=ttyS0,115200 console=tty0 video=1280x720 fbcon=font:TER16x32\n' \
         "${ROOT_HASH}" > "${WORK}/cmdline"
 
     if [ -f "${TARGET_DIR}/usr/lib/os-release" ]; then
