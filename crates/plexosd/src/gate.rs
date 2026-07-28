@@ -34,6 +34,32 @@ use crate::health::Health;
 /// short enough that a genuinely broken one is reported while somebody is still watching.
 pub const PLEX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
+/// What the gate last decided, for anything that wants to report it.
+///
+/// The verdict is reached once, on a thread, seconds into a boot — and then the only
+/// record of it is a line on a console nobody can read remotely. That is the gap this
+/// closes: whether the try counter was actually cleared is exactly the kind of "should
+/// have" this project keeps discovering was a "did not", and it belongs on the network
+/// rather than on a screen.
+static LAST: std::sync::OnceLock<std::sync::Mutex<Option<String>>> = std::sync::OnceLock::new();
+
+/// The gate's last verdict, if it has run.
+#[must_use]
+pub fn last_verdict() -> Option<String> {
+    LAST.get()?
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Records a verdict for [`last_verdict`].
+fn remember(verdict: &Verdict) {
+    let slot = LAST.get_or_init(|| std::sync::Mutex::new(None));
+    *slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(verdict.to_string());
+}
+
 /// The ESP's GPT label, resolved through sysfs because this system has no `udev`.
 const ESP_LABEL: &str = plexos_types::partition::LABEL_ESP;
 
@@ -86,13 +112,15 @@ pub fn run(esp_device: Option<&str>, log: &mut dyn FnMut(&str)) -> Verdict {
     }
 
     if !health.is_healthy() {
-        return Verdict::Unhealthy(
+        let verdict = Verdict::Unhealthy(
             health
                 .failures()
                 .iter()
                 .map(|c| format!("{}: {}", c.name, c.detail))
                 .collect(),
         );
+        remember(&verdict);
+        return verdict;
     }
 
     // Resolved late: an unhealthy boot must not fail for want of an ESP it was never
@@ -101,14 +129,20 @@ pub fn run(esp_device: Option<&str>, log: &mut dyn FnMut(&str)) -> Verdict {
         Some(explicit) => explicit,
         None => match plexos_sys::device::by_partlabel(ESP_LABEL) {
             Ok(found) => found,
-            Err(error) => return Verdict::Unrecorded(format!("the ESP was not found: {error}")),
+            Err(error) => {
+                let verdict = Verdict::Unrecorded(format!("the ESP was not found: {error}"));
+                remember(&verdict);
+                return verdict;
+            }
         },
     };
 
-    match clear_counter(&device) {
+    let verdict = match clear_counter(&device) {
         Ok(outcome) => Verdict::Good(outcome),
         Err(error) => Verdict::Unrecorded(error),
-    }
+    };
+    remember(&verdict);
+    verdict
 }
 
 /// Waits for Plex, then runs the gate.
@@ -185,6 +219,19 @@ fn clear_counter(device: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_verdict_is_remembered_so_it_can_be_read_over_the_network() {
+        // Whether the try counter was cleared is the kind of "should have" this project
+        // keeps finding was a "did not", and until now the only record was a line on a
+        // console nobody can read remotely.
+        remember(&Verdict::Good(
+            "plexos-0.1.0+3.efi -> plexos-0.1.0.efi".to_owned(),
+        ));
+        let seen = last_verdict().expect("a verdict was recorded");
+        assert!(seen.contains("plexos-0.1.0.efi"), "{seen}");
+        assert!(seen.starts_with("healthy"), "{seen}");
+    }
 
     #[test]
     fn an_unhealthy_verdict_says_the_slot_rolls_back_and_names_what_failed() {

@@ -103,6 +103,12 @@ pub struct Progress {
     /// Whether anything vouched for the bundle. Always false today, and reported so the
     /// page can say it rather than the reader having to know.
     pub trusted: bool,
+    /// What the boot health gate decided about this boot, once it has decided.
+    ///
+    /// Here because "did this slot become permanent" is a question about the system's
+    /// relationship with its slots, which is what this endpoint is about — and because
+    /// the answer was previously only ever printed to a console.
+    pub gate: Option<String>,
     /// Everything logged so far.
     pub log: Vec<String>,
 }
@@ -118,6 +124,7 @@ impl Default for Progress {
             staged: None,
             error: None,
             trusted: Metadata::TRUSTED,
+            gate: crate::gate::last_verdict(),
             log: Vec::new(),
         }
     }
@@ -169,6 +176,7 @@ impl Job {
         // stale answer to "what am I running" is worse than none.
         state.running = running_version();
         state.slot = running_slot().to_string();
+        state.gate = crate::gate::last_verdict();
         state.clone()
     }
 
