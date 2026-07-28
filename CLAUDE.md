@@ -40,11 +40,11 @@ Everything else is cheap to revise. Prefer revising it.
 | --- | --- |
 | `crates/plexos-types` | Done. Formats and the layout emitter, 41 tests. |
 | `crates/plexos-gpu` | Done, 41 tests, and it has now answered the question it was written for. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
-| `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec, partition-label lookup. Every syscall in it has run on real hardware. |
+| `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping. 65 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host; privilege dropping has not run anywhere. |
 | `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate, spawns the status console, and then starts a shell. 50 tests. |
-| `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, and a read-only page. 82 tests, including the device token of ADR-0013. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
-| `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store. 64 tests. Runs end to end on the build host against real Plex downloads; never run on the appliance. |
-| `buildroot/` | Builds. defconfig, kernel fragment, and packages for `plexos-init`, `plexosd`, `plexos-gpu` and `plexos-systemd-boot`. |
+| `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, and mounting the Plex app image at boot. 98 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
+| `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 94 tests. Provisioning runs end to end on the build host against real Plex downloads; nothing here has run on the appliance. |
+| `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. |
 | `post-image.sh` | All six stages run, and produce an image that boots on hardware. |
 | Installer, updater, first-boot wizard | Not started. |
 
@@ -66,22 +66,44 @@ assembled root, which broke udhcpc's lease script. The lesson worth keeping is t
 every one of them passed a full test suite, because every test described a machine
 where the thing being waited for had already happened.
 
-Next, in order:
+Next, in order. The first four are one job — a Plex a person can install from a
+browser — and each is a few hundred lines:
 
-1. **Reach the provisioning code from the device.** `plexos-plex` does the whole job —
-   verify, unpack, build, publish, activate — and nothing on the appliance can call it.
-   What is missing is a downloader, an authenticated upload route (ADR-0013), a
-   removable-media path (ADR-0010), and mounting the image once it exists (ADR-0007).
-   Until Plex actually runs, the gate's `plex-http` check reports `NotApplicable`,
-   which is correct and means the gate is weaker than ADR-0005 intends.
-2. **Run Plex confined** (ADR-0007): an unprivileged user, cgroup v2, Landlock and
-   seccomp, with access to exactly its data directory, the media paths read-only, the
-   transcode directory and the render node. The app image is mounted at boot already;
-   nothing starts what is inside it. Until it does, the gate's `plex-http` check
-   reports `NotApplicable`, which is correct and means the gate is weaker than ADR-0005
-   intends.
-3. **`plexos-update`** — nothing implements the update flow, so rollback has never
-   been exercised end to end.
+1. **Claim the device on first start.** `plexosd::auth` can generate a token, hash it
+   and store it, and *nothing calls any of it* — only the tests do. So the credential
+   file never exists, `Credential::Unset` is permanent, and every mutating route
+   answers 503 for ever. Until this is wired the console cannot be used to change
+   anything at all, which makes it the first thing rather than a detail of the third.
+   `console::run` is the place: if `auth::read` comes back `Unset`, generate, write to
+   `auth::CREDENTIAL_FILE`, and print the token on the console attached to the machine
+   (ADR-0013 — physical access is the initial trust).
+2. **`POST /api/provision`, with the work in the background.** The gate that lets a
+   verb through exists and is tested (`plexosd::http::route`); no route uses it yet.
+   Downloading takes a minute, so the request must start a thread and return, with a
+   second route reporting progress for the page to poll. Everything it needs to call is
+   built and tested: `plexos_plex::{ar, verify, manifest, build, execute, store}`.
+   `curl` and a CA store are in the image as of the TLS commit.
+3. **Start Plex.** `plexos_plex::run::confine_and_exec` is written and does the whole
+   sequence — join the cgroup, apply Landlock, drop to uid 900, `execve`. What is
+   missing is the caller: create `/var/lib/plex` and `/var/cache/plex-transcode` owned
+   by 900, create the cgroup with `cgroup::apply`, then spawn `plexosd` with a flag that
+   makes it the confined child. It re-executes rather than using `pre_exec`, and
+   `run.rs` explains why. After this the gate's `plex-http` check stops reporting
+   `NotApplicable` and ADR-0005 finally means what it says.
+4. **The page.** `crates/plexosd/src/ui/console.html` is one self-contained file with no
+   external references, and a test enforces that. It needs a field for the device token,
+   a button, and a progress area. The token goes in an `Authorization: Bearer` header
+   from JavaScript — no cookie and no session, which is why ADR-0013 chose a token.
+5. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
+   asked for and both are deferred: an 83 MB upload has to stream to disk, and
+   `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
+6. **Run Plex through a real transcode**, which is the last thing standing between
+   "QuickSync works" and "this appliance does its job".
+7. **`plexos-update`** — nothing implements the update flow, so rollback has never been
+   exercised end to end. It is the riskiest untested path in the project, because a bug
+   there bricks a device rather than degrading it.
+8. **A supervisor.** `plexos-init` still prints "no supervisor yet" and hands over to a
+   shell. Nothing restarts a service that dies.
 
 **Hardware transcoding works.** `/api/gpu` on the reference laptop reports H.264 and
 HEVC Main and Main10 decode *and* encode, plus VP9 decode, with GuC and HuC running —
@@ -156,6 +178,13 @@ must be off.
   and nothing noticed until udhcpc's lease script called `mktemp`, which failed with
   `mktemp: : No such file or directory`: a message whose empty path names neither
   `/tmp` nor the script's intent. Anything the plan does not create does not exist.
+- **The image had no TLS at all, and nothing said so.** No `ssl_client` applet, no
+  `curl`, no `openssl`, no TLS library — while ADR-0010 fetches Plex from
+  `downloads.plex.tv`, which serves HTTPS and nothing else. Provisioning could never
+  have worked, and the symptom would have been a download failing on a machine whose
+  network was demonstrably fine. `BR2_PACKAGE_OPENSSL`, `BR2_PACKAGE_LIBCURL_CURL` and
+  `BR2_PACKAGE_CA_CERTIFICATES` fix it; the trust store is not optional, because
+  `--insecure` would make the transport prove nothing.
 - **There is no `PATH`, so run programs by absolute path.** PID 1 gets the environment
   the kernel provides, which is empty, and everything it spawns inherits that. glibc's
   `execvp` then falls back to `confstr(_CS_PATH)` — `/bin:/usr/bin`, confirmed with
