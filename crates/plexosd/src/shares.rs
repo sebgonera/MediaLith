@@ -372,6 +372,23 @@ pub fn client_address_for(server: &str) -> Option<String> {
     Some(socket.local_addr().ok()?.ip().to_string())
 }
 
+/// Option sets tried in order, most complete first.
+///
+/// Not guesswork dressed up: NFS servers differ in what they accept, and the kernel
+/// answers every disagreement with the same `EINVAL`. Rather than encode one opinion and
+/// fail opaquely, the first profile is exactly what a working client negotiated against
+/// this NAS — read out of `/proc/mounts` on a machine that has it mounted — and the
+/// later ones drop the parts a simpler server might refuse. Each attempt is logged with
+/// what it tried, so a failure says which combinations the server would not take.
+///
+/// The empty profile is last and is not a joke: it lets the kernel choose everything but
+/// the address, which is what an unusually old or unusually strict server may want.
+const NFS_PROFILES: [&str; 3] = [
+    "vers=4.2,proto=tcp,sec=sys,hard,timeo=600,retrans=2,rsize=1048576,wsize=1048576",
+    "vers=4.2,proto=tcp,sec=sys",
+    "vers=4.2",
+];
+
 /// The full option string handed to `mount(2)`.
 ///
 /// Separated from the mounting so the string can be checked by a test rather than by a
@@ -383,14 +400,26 @@ pub fn options_for(
     client: Option<&str>,
     password: Option<&str>,
 ) -> String {
+    options_with(share, address, client, password, NFS_PROFILES[0])
+}
+
+/// The option string for one NFS profile.
+#[must_use]
+pub fn options_with(
+    share: &Share,
+    address: &str,
+    client: Option<&str>,
+    password: Option<&str>,
+    profile: &str,
+) -> String {
     use std::fmt::Write as _;
 
     let mut options = format!("{FIXED_OPTIONS},addr={address}");
     match share.kind {
         Kind::Nfs => {
-            // 4.2 is what a current NAS speaks and what the kernel prefers; naming it
-            // avoids a negotiation that fails confusingly against older servers.
-            options.push_str(",vers=4.2");
+            if !profile.is_empty() {
+                let _ = write!(options, ",{profile}");
+            }
             // Without this the kernel refuses the mount with EINVAL -- an error about
             // arguments, which reads like an error about the server. NFSv4 has a
             // callback channel and the server must be told where to reach us.
@@ -656,6 +685,42 @@ mod tests {
         let options = options_for(&nfs(), "192.168.2.165", Some("192.168.2.102"), None);
         assert!(options.contains("addr=192.168.2.165"), "{options}");
         assert!(options.contains("vers=4.2"), "{options}");
+    }
+
+    #[test]
+    fn every_profile_keeps_the_options_that_are_not_negotiable() {
+        // The ladder exists to vary what a server might refuse. It must not vary what
+        // protects the machine: read-only and no execution are properties of a media
+        // library, not preferences a NAS gets a say in.
+        for profile in NFS_PROFILES {
+            let options = options_with(
+                &nfs(),
+                "192.168.2.165",
+                Some("192.168.2.102"),
+                None,
+                profile,
+            );
+            for required in ["ro", "nosuid", "nodev", "noexec"] {
+                assert!(
+                    options.split(',').any(|o| o == required),
+                    "{required} missing from [{profile}]"
+                );
+            }
+            assert!(options.contains("clientaddr="), "[{profile}]");
+            assert!(options.contains("addr=192.168.2.165"), "[{profile}]");
+        }
+    }
+
+    #[test]
+    fn the_profiles_go_from_most_specific_to_least() {
+        // A server that refuses the first should be offered less, not more. If this
+        // order were reversed the ladder would stop at whatever the kernel defaults to
+        // and never try the settings a real client negotiated.
+        let lengths: Vec<usize> = NFS_PROFILES.iter().map(|p| p.len()).collect();
+        assert!(
+            lengths.windows(2).all(|w| w[0] >= w[1]),
+            "profiles must narrow, not widen: {lengths:?}"
+        );
     }
 
     #[test]
