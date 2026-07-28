@@ -42,8 +42,8 @@ Everything else is cheap to revise. Prefer revising it.
 | `crates/plexos-gpu` | Done, 41 tests, and it has now answered the question it was written for. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
 | `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping. 65 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host; privilege dropping has not run anywhere. |
 | `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate, spawns the status console, and then starts a shell. 50 tests. |
-| `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, and mounting the Plex app image at boot. 98 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
-| `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 94 tests. Provisioning runs end to end on the build host against real Plex downloads; nothing here has run on the appliance. |
+| `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, and starting it confined. 130 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
+| `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 94 tests. Provisioning runs end to end on the build host against real Plex downloads; nothing here has run on the appliance. `plexosd::provision` is now its caller. |
 | `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. |
 | `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 42 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree. |
 | Installer, updater, first-boot wizard | Not started. |
@@ -66,45 +66,32 @@ assembled root, which broke udhcpc's lease script. The lesson worth keeping is t
 every one of them passed a full test suite, because every test described a machine
 where the thing being waited for had already happened.
 
-Next, in order. Items 1 to 4 are one job — a Plex a person can install from a
-browser — and each is a few hundred lines:
+**A Plex a person can install from a browser is now written, and none of it has run
+on the appliance.** The console claims the device at first start and prints the token,
+`POST /api/provision` installs Plex in the background while `GET /api/provision`
+reports progress, `plexosd::plex` starts it confined, and the page has a token field, a
+button, a progress area and a link to Plex itself. What is unproven is everything: no
+appliance has claimed itself, downloaded a package, or started Plex. That is the next
+thing to do and it needs hardware, not code.
 
-1. **Claim the device on first start.** `plexosd::auth` can generate a token, hash it
-   and store it, and *nothing calls any of it* — only the tests do. So the credential
-   file never exists, `Credential::Unset` is permanent, and every mutating route
-   answers 503 for ever. Until this is wired the console cannot be used to change
-   anything at all, which makes it the first thing rather than a detail of the second.
-   `console::run` is the place: if `auth::read` comes back `Unset`, generate, write to
-   `auth::CREDENTIAL_FILE`, and print the token on the console attached to the machine
-   (ADR-0013 — physical access is the initial trust).
-2. **`POST /api/provision`, with the work in the background.** The gate that lets a
-   verb through exists and is tested (`plexosd::http::route`); no route uses it yet.
-   Downloading takes a minute, so the request must start a thread and return, with a
-   second route reporting progress for the page to poll. Everything it needs to call is
-   built and tested: `plexos_plex::{ar, verify, manifest, build, execute, store}`.
-   `curl` and a CA store are in the image as of the TLS commit.
-3. **Start Plex.** `plexos_plex::run::confine_and_exec` is written and does the whole
-   sequence — join the cgroup, apply Landlock, drop to uid 900, `execve`. What is
-   missing is the caller: create `/var/lib/plex` and `/var/cache/plex-transcode` owned
-   by 900, create the cgroup with `cgroup::apply`, then spawn `plexosd` with a flag that
-   makes it the confined child. It re-executes rather than using `pre_exec`, and
-   `run.rs` explains why. After this the gate's `plex-http` check stops reporting
-   `NotApplicable` and ADR-0005 finally means what it says.
-4. **The page.** `crates/plexosd/src/ui/console.html` is one self-contained file with no
-   external references, and a test enforces that. It needs a field for the device token,
-   a button, and a progress area. The token goes in an `Authorization: Bearer` header
-   from JavaScript — no cookie and no session, which is why ADR-0013 chose a token.
-5. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
+Next, in order:
+
+1. **Prove the four above on the reference laptop**, in that order, because each one
+   only becomes reachable once the one before it worked. The token banner appears on
+   the attached screen; the browser on another machine does the rest.
+2. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
    asked for and both are deferred: an 83 MB upload has to stream to disk, and
    `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
-6. **Run Plex through a real transcode**, which is the last thing standing between
+3. **Run Plex through a real transcode**, which is the last thing standing between
    "QuickSync works" and "this appliance does its job".
-7. **`plexos-update`** — nothing implements the update flow, so rollback has never been
+4. **`plexos-update`** — nothing implements the update flow, so rollback has never been
    exercised end to end. It is the riskiest untested path in the project, because a bug
    there bricks a device rather than degrading it.
-8. **A supervisor.** `plexos-init` still prints "no supervisor yet" and hands over to a
-   shell. Nothing restarts a service that dies.
-9. **A terminal in the status console**, so administering the appliance stops meaning
+5. **A supervisor.** `plexos-init` still prints "no supervisor yet" and hands over to a
+   shell. Nothing restarts a service that dies — and `plexosd::plex` says so rather than
+   pretending: a Plex that exits stays exited, and a newly provisioned version does not
+   replace a running one without a reboot.
+6. **A terminal in the status console**, so administering the appliance stops meaning
    PuTTY on another machine. The pieces are mostly there — `plexosd` already owns an
    HTTP server and the ADR-0013 token gate, and busybox provides the shell — but two
    decisions come first. The server answers request/response only, so this needs either
