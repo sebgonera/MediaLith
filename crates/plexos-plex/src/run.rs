@@ -161,6 +161,70 @@ pub fn grants(mount: &Path, media: &[PathBuf]) -> Vec<Grant> {
     grants
 }
 
+/// Confines this process and replaces it with Plex.
+///
+/// Runs in the child, which is a fresh `plexosd` started for the purpose — see the
+/// module documentation for why that is a re-exec rather than a `pre_exec` closure.
+///
+/// The order is the whole of it, and each step is where it is because the next one
+/// takes away the ability to do it:
+///
+/// 1. **Join the cgroup.** Writing to `cgroup.procs` needs privilege this still has.
+///    Done first so there is no instant in which Plex runs outside its bounds.
+/// 2. **Apply Landlock.** Before dropping privileges, because the paths being granted
+///    have to be opened, and some of them are root-owned.
+/// 3. **Drop to the Plex account.** Irreversible.
+/// 4. **`exec`.** Landlock and `no_new_privs` are inherited across it; that is the
+///    property that makes this worth doing at all.
+///
+/// # Errors
+/// Any step failing. None is recoverable: a process that meant to confine itself and
+/// did not must not go on to run a network-facing media server.
+pub fn confine_and_exec(
+    spec: &Spec,
+    grants: &[Grant],
+    cgroup: Option<&Path>,
+    log: &mut dyn FnMut(&str),
+) -> std::io::Result<std::convert::Infallible> {
+    use plexos_sys::landlock::Ruleset;
+
+    if let Some(group) = cgroup {
+        crate::cgroup::join(group, std::process::id())?;
+        log(&format!("joined {}", group.display()));
+    }
+
+    let mut ruleset = Ruleset::new(plexos_sys::landlock::access::ALL)?;
+    for grant in grants {
+        match ruleset.allow(&grant.path, grant.access) {
+            Ok(()) => log(&format!("granted {}", grant.path.display())),
+            // A missing media directory is a library nobody has created yet, and
+            // refusing to start Plex over it would make an ordinary misconfiguration
+            // look like a broken appliance. A missing *required* path is different:
+            // Plex cannot work without it and starting anyway only moves the failure.
+            Err(error) if !grant.required => {
+                log(&format!("skipped {}: {error}", grant.path.display()));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    ruleset.enforce()?;
+    log("Landlock applied; no path outside those grants is reachable from here");
+
+    plexos_sys::privilege::drop_to(paths::PLEX_UID, paths::PLEX_GID)?;
+    log(&format!(
+        "running as {}:{}",
+        paths::PLEX_UID,
+        paths::PLEX_GID
+    ));
+
+    let environment: Vec<(&str, &str)> = spec
+        .environment
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    plexos_sys::process::exec_with_env(&spec.binary.to_string_lossy(), &[], &environment)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
