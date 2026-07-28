@@ -337,6 +337,19 @@ must be off.
   correct until Plex was installed — after which that card renders as a single link, the
   field is gone, and every button needing a token silently refuses. Ask what a piece of
   interface looks like in the state its own success produces.
+- **A `CONFIG_*` symbol at `=y` does not mean the feature you want is present.**
+  `CONFIG_NFS_V4=y` gives NFS 4.0 and nothing later; 4.1 and 4.2 are separate symbols and
+  were off. A mount asking for `vers=4.2` therefore came back `EINVAL` — an error about
+  *arguments*, which reads as a malformed option string and says nothing about versions.
+  Four build-and-reboot cycles were spent varying options that were never the problem.
+  This is the same trap as `BR2_PACKAGE_EROFS_UTILS` without its `_LZ4` sub-option,
+  already recorded here, walked into from the kernel side: **check the sub-symbols, and
+  check them against the feature you are about to ask for by name.**
+- **When a diagnosis costs a build cycle, stop guessing after the first one.** Each of
+  those four attempts cost a build, a bundle, an update and a reboot, and none of them was
+  informed by evidence — the kernel had already written the reason to its ring buffer and
+  nothing here could read it. Reach for the log, or ask the person with a shell, before
+  the second guess.
 - **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error

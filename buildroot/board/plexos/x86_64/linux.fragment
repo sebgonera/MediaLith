@@ -180,3 +180,13 @@ CONFIG_MODULES=n
 # on loopback. A gate that waited for the network would roll back a perfectly good
 # update because a USB dongle was slow to appear, which is precisely the
 # too-strict-health-gate failure that ADR-0005 warns about.
+
+# NFS minor versions. CONFIG_NFS_V4 alone gives 4.0 and nothing later, and a client that
+# asks for 4.2 against such a kernel is told EINVAL -- an error about arguments, which is
+# how four attempts to mount a NAS were spent looking at option strings. 4.1 brings
+# sessions and 4.2 brings server-side copy and better read-ahead, both of which matter
+# for streaming large files.
+#
+# CONFIG_NFS_V4_2 depends on CONFIG_NFS_V4_1, which is why both are here.
+CONFIG_NFS_V4_1=y
+CONFIG_NFS_V4_2=y

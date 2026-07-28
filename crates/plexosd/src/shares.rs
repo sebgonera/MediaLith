@@ -407,12 +407,19 @@ pub fn client_address_for(server: &str) -> Option<String> {
 /// later ones drop the parts a simpler server might refuse. Each attempt is logged with
 /// what it tried, so a failure says which combinations the server would not take.
 ///
-/// The empty profile is last and is not a joke: it lets the kernel choose everything but
-/// the address, which is what an unusually old or unusually strict server may want.
-const NFS_PROFILES: [&str; 3] = [
+/// The ladder walks *down the protocol version*, and that is what it is for. This kernel
+/// was built with `CONFIG_NFS_V4` and without `CONFIG_NFS_V4_1`, so it speaks 4.0 and
+/// nothing later — and a request for 4.2 comes back as `EINVAL`, indistinguishable from a
+/// malformed option. Four attempts were spent on that before anybody looked at the sub-
+/// options of a config symbol that said `=y`.
+///
+/// So a client that asks for one version and stops is a client that fails against half
+/// the servers it meets, for reasons its own error message cannot express.
+const NFS_PROFILES: [&str; 4] = [
     "vers=4.2,proto=tcp,sec=sys,hard,timeo=600,retrans=2,rsize=1048576,wsize=1048576",
-    "vers=4.2,proto=tcp,sec=sys",
-    "vers=4.2",
+    "vers=4.1,proto=tcp,sec=sys",
+    "vers=4.0,proto=tcp,sec=sys",
+    "vers=3,proto=tcp,sec=sys",
 ];
 
 /// The full option string handed to `mount(2)`.
@@ -838,14 +845,19 @@ mod tests {
     }
 
     #[test]
-    fn the_profiles_go_from_most_specific_to_least() {
-        // A server that refuses the first should be offered less, not more. If this
-        // order were reversed the ladder would stop at whatever the kernel defaults to
-        // and never try the settings a real client negotiated.
-        let lengths: Vec<usize> = NFS_PROFILES.iter().map(|p| p.len()).collect();
-        assert!(
-            lengths.windows(2).all(|w| w[0] >= w[1]),
-            "profiles must narrow, not widen: {lengths:?}"
+    fn the_profiles_walk_down_the_protocol_version() {
+        // The reason the first four attempts against a real NAS all failed: this kernel
+        // has CONFIG_NFS_V4 and not CONFIG_NFS_V4_1, so it speaks 4.0 and answers a
+        // request for 4.2 with EINVAL -- which reads as a bad option, not a bad version.
+        let versions: Vec<&str> = NFS_PROFILES
+            .iter()
+            .map(|p| p.split(',').next().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            versions,
+            ["vers=4.2", "vers=4.1", "vers=4.0", "vers=3"],
+            "the ladder must walk down the protocol version: a kernel or a server that \
+             cannot do 4.2 answers EINVAL, which says nothing about versions at all"
         );
     }
 
