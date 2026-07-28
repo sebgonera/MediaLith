@@ -67,6 +67,7 @@ trap 'rm -rf "${TMP}"' EXIT
 export PLEXOS_IMAGE_SIZE="${PLEXOS_IMAGE_SIZE:-4G}"
 
 MKFS_EROFS="$(find_tool mkfs.erofs || true)"
+FSCK_EROFS="$(find_tool fsck.erofs || true)"
 VERITYSETUP="$(find_tool veritysetup || true)"
 SGDISK="$(find_tool sgdisk || true)"
 MKFS_VFAT="$(find_tool mkfs.vfat || true)"
@@ -82,7 +83,15 @@ printf 'mcopy:       %s\n' "${MCOPY:-NOT FOUND}"
 # A mock Buildroot tree: enough shape for post-image.sh to work on, and nothing more.
 # --------------------------------------------------------------------------
 MOCK="${TMP}/mock"
-mkdir -p "${MOCK}"/{images,host/bin,host/sbin,target/usr/{bin,lib,share/factory/etc}}
+mkdir -p "${MOCK}"/{images,host/bin,host/sbin,target/etc,target/usr/{bin,lib,share/factory/etc}}
+
+# A skeleton /etc, because Buildroot's target always has one and mkusers appends to the
+# files rather than creating them. Root only: every other account is meant to arrive
+# from the users table, which is the thing under test.
+printf 'root:x:0:0:root:/root:/bin/sh\n'  > "${MOCK}/target/etc/passwd"
+printf 'root:x:0:\n'                      > "${MOCK}/target/etc/group"
+printf 'root:*:::::::\n'                  > "${MOCK}/target/etc/shadow"
+chmod 600 "${MOCK}/target/etc/shadow"
 
 for tool in MKFS_EROFS:bin/mkfs.erofs VERITYSETUP:sbin/veritysetup SGDISK:sbin/sgdisk \
             MKFS_VFAT:sbin/mkfs.vfat MCOPY:bin/mcopy; do
@@ -106,6 +115,81 @@ IMAGE="${MOCK}/images/plexos.img"
 mkdir -p "${WORK}"
 
 # --------------------------------------------------------------------------
+stage "stage 0 — the users table"
+# The bug this stage exists for: Buildroot applies the users table to a *copy* of the
+# target while generating each filesystem image, so TARGET_DIR/etc never gains the
+# accounts, and the factory /etc staged from it therefore ships without them. It cost
+# nothing to build and nothing to boot -- uid 900 simply had no name on the appliance.
+#
+# Buildroot's real mkusers is used, not a stand-in. A stand-in would agree with whatever
+# this script believed the passwd format to be, which is the failure mode described in
+# CLAUDE.md: a test that only compares a thing to itself.
+BR_TOPDIR="${PLEXOS_BUILDROOT_DIR:-}"
+if [ -z "${BR_TOPDIR}" ] && [ -f "${OUTPUT}/Makefile" ]; then
+    BR_TOPDIR="$(sed -n 's/^MAKEARGS := -C //p' "${OUTPUT}/Makefile" | head -n 1)"
+fi
+
+if [ ! -x "${BR_TOPDIR}/support/scripts/mkusers" ]; then
+    skipped "the whole stage" \
+        "no Buildroot source tree; set PLEXOS_BUILDROOT_DIR, or point this at an output dir built out-of-tree"
+else
+    PLEXOS_BUILDROOT_DIR="${BR_TOPDIR}"
+    BUILD_DIR="${MOCK}/build"
+
+    # What Buildroot merges from package-declared users and BR2_ROOTFS_USERS_TABLES.
+    # With no package declaring one, that is exactly this board's table.
+    mkdir -p "${BUILD_DIR}/buildroot-fs"
+    cp "${BOARD_DIR}/users.table" "${BUILD_DIR}/buildroot-fs/full_users_table.txt"
+
+    BR2_CONFIG="${MOCK}/.config"
+    if [ -f "${OUTPUT}/.config" ]; then
+        cp "${OUTPUT}/.config" "${BR2_CONFIG}"
+    else
+        printf 'BR2_TARGET_GENERIC_PASSWD_METHOD="sha-256"\n' > "${BR2_CONFIG}"
+    fi
+
+    # In a subshell throughout: post-image.sh's die() calls exit, which from this shell
+    # would take the whole test run with it and lose the summary. Its effects are file
+    # writes, which a subshell makes just the same.
+    ( apply_users_table ) >/dev/null 2>&1
+    check "mkusers runs against the target tree" "$?" "0"
+
+    check "the account reaches the target's /etc/passwd" \
+          "$(awk -F: '$1 == "plex" { print $3 ":" $4 }' "${MOCK}/target/etc/passwd")" \
+          "900:900"
+    check "and its group" \
+          "$(awk -F: '$1 == "plex" { print $3 }' "${MOCK}/target/etc/group")" \
+          "900"
+    check "with the home directory ADR-0009 names" \
+          "$(awk -F: '$1 == "plex" { print $6 }' "${MOCK}/target/etc/passwd")" \
+          "/var/lib/plex"
+    check "and no usable shell" \
+          "$(awk -F: '$1 == "plex" { print $7 }' "${MOCK}/target/etc/passwd")" \
+          "/bin/false"
+
+    # Buildroot itself runs mkusers again on every rebuild, against a tree this one has
+    # already written. If a second pass were an error rather than a consistency check,
+    # every incremental build would fail.
+    ( apply_users_table ) >/dev/null 2>&1
+    check "a second pass is not an error" "$?" "0"
+    check "and does not duplicate the account" \
+          "$(awk -F: '$1 == "plex"' "${MOCK}/target/etc/passwd" | wc -l)" \
+          "1"
+fi
+
+# Stage 1 stages the factory /etc and refuses to build an image without the declared
+# accounts in it. When stage 0 was skipped there is no mkusers to have put them there,
+# so they are written by hand — which keeps the stages below running on a machine with
+# no Buildroot checkout, at the cost of proving nothing about mkusers itself. Said out
+# loud, because a quiet substitution here would read as coverage that does not exist.
+if ! awk -F: '$1 == "plex"' "${MOCK}/target/etc/passwd" | grep -q .; then
+    printf 'plex:x:900:900:Plex Media Server:/var/lib/plex:/bin/false\n' \
+        >> "${MOCK}/target/etc/passwd"
+    printf 'plex:x:900:\n' >> "${MOCK}/target/etc/group"
+    printf 'note: accounts written by hand for the stages below; stage 0 was skipped\n'
+fi
+
+# --------------------------------------------------------------------------
 stage "stage 1 — /usr erofs"
 if [ -z "${MKFS_EROFS}" ]; then
     skipped "the whole stage" "mkfs.erofs not built; enable BR2_TARGET_ROOTFS_EROFS and build"
@@ -126,6 +210,39 @@ else
     check "a rebuild is byte-identical" \
           "$(sha256sum < "${WORK}/usr.erofs" | cut -d' ' -f1)" \
           "$(sha256sum < "${WORK}/first.erofs" | cut -d' ' -f1)"
+
+    check "the account is in the staged factory /etc" \
+          "$(awk -F: '$1 == "plex" { print $3 }' \
+             "${MOCK}/target/usr/share/factory/etc/passwd")" \
+          "900"
+
+    # The check that would have caught the original bug, and the only one here that
+    # inspects the artifact a machine actually boots rather than a tree on the way to
+    # it. Everything upstream of the image can be right while the image is wrong.
+    if [ -z "${FSCK_EROFS}" ]; then
+        skipped "the account survives into the image" "fsck.erofs not available to extract it"
+    else
+        rm -rf "${TMP}/extract"
+        mkdir -p "${TMP}/extract"
+        "${FSCK_EROFS}" --extract="${TMP}/extract" --overwrite "${WORK}/usr.erofs" \
+            >/dev/null 2>&1
+        check "the account survives into the image" \
+              "$(awk -F: '$1 == "plex" { print $3 ":" $6 }' \
+                 "${TMP}/extract/share/factory/etc/passwd" 2>/dev/null)" \
+              "900:/var/lib/plex"
+    fi
+
+    # And the guard itself, which is worth nothing if it cannot fail. Without this the
+    # two checks above would keep passing against a check_factory_accounts that had
+    # been quietly turned into a no-op.
+    cp "${MOCK}/target/etc/passwd" "${TMP}/passwd.keep"
+    grep -v '^plex:' "${TMP}/passwd.keep" > "${MOCK}/target/etc/passwd"
+    ( build_usr_image ) >/dev/null 2>&1
+    check "an image without the account is refused" "$?" "1"
+    cp "${TMP}/passwd.keep" "${MOCK}/target/etc/passwd"
+
+    # Left as the successful build found it, since the stages below verify this image.
+    build_usr_image >/dev/null
 fi
 
 # --------------------------------------------------------------------------

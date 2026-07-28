@@ -45,7 +45,7 @@ Everything else is cheap to revise. Prefer revising it.
 | `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, and mounting the Plex app image at boot. 98 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
 | `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 94 tests. Provisioning runs end to end on the build host against real Plex downloads; nothing here has run on the appliance. |
 | `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. |
-| `post-image.sh` | All six stages run, and produce an image that boots on hardware. |
+| `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 42 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree. |
 | Installer, updater, first-boot wizard | Not started. |
 
 **The image boots on the reference laptop, from a USB stick, to a shell.** tmpfs root,
@@ -66,57 +66,54 @@ assembled root, which broke udhcpc's lease script. The lesson worth keeping is t
 every one of them passed a full test suite, because every test described a machine
 where the thing being waited for had already happened.
 
-Next, in order. Items 2 to 5 are one job — a Plex a person can install from a
+Next, in order. Items 1 to 4 are one job — a Plex a person can install from a
 browser — and each is a few hundred lines:
 
-1. **The `plex` account does not reach the running system, and this is a defect, not
-   a missing feature.** `mkusers` runs during Buildroot's *filesystem image* step and
-   writes into a copy of the target, so `rootfs.erofs` has `plex:x:900:900` in
-   `/etc/passwd` — confirmed by extracting it. `post-image.sh` stages the factory `/etc`
-   from `${TARGET_DIR}/etc`, which is the tree *before* `mkusers` ran, so
-   `/usr/share/factory/etc/passwd` has no such entry. On the appliance `/etc` is an
-   overlay whose lower layer is that directory, so uid 900 exists as a number and as
-   nothing else: `getpwuid` finds no name, no home, no shell. `privilege::drop_to` works
-   regardless, since it takes numbers — which is exactly why this would have gone
-   unnoticed until something asked who uid 900 is. The fix belongs in `post-image.sh`:
-   stage factory `/etc` from a tree `mkusers` has processed, or run
-   `support/scripts/mkusers` against `TARGET_DIR` before copying. Neither has been
-   tried.
-2. **Claim the device on first start.** `plexosd::auth` can generate a token, hash it
+1. **Claim the device on first start.** `plexosd::auth` can generate a token, hash it
    and store it, and *nothing calls any of it* — only the tests do. So the credential
    file never exists, `Credential::Unset` is permanent, and every mutating route
    answers 503 for ever. Until this is wired the console cannot be used to change
-   anything at all, which makes it the first thing rather than a detail of the third.
+   anything at all, which makes it the first thing rather than a detail of the second.
    `console::run` is the place: if `auth::read` comes back `Unset`, generate, write to
    `auth::CREDENTIAL_FILE`, and print the token on the console attached to the machine
    (ADR-0013 — physical access is the initial trust).
-3. **`POST /api/provision`, with the work in the background.** The gate that lets a
+2. **`POST /api/provision`, with the work in the background.** The gate that lets a
    verb through exists and is tested (`plexosd::http::route`); no route uses it yet.
    Downloading takes a minute, so the request must start a thread and return, with a
    second route reporting progress for the page to poll. Everything it needs to call is
    built and tested: `plexos_plex::{ar, verify, manifest, build, execute, store}`.
    `curl` and a CA store are in the image as of the TLS commit.
-4. **Start Plex.** `plexos_plex::run::confine_and_exec` is written and does the whole
+3. **Start Plex.** `plexos_plex::run::confine_and_exec` is written and does the whole
    sequence — join the cgroup, apply Landlock, drop to uid 900, `execve`. What is
    missing is the caller: create `/var/lib/plex` and `/var/cache/plex-transcode` owned
    by 900, create the cgroup with `cgroup::apply`, then spawn `plexosd` with a flag that
    makes it the confined child. It re-executes rather than using `pre_exec`, and
    `run.rs` explains why. After this the gate's `plex-http` check stops reporting
    `NotApplicable` and ADR-0005 finally means what it says.
-5. **The page.** `crates/plexosd/src/ui/console.html` is one self-contained file with no
+4. **The page.** `crates/plexosd/src/ui/console.html` is one self-contained file with no
    external references, and a test enforces that. It needs a field for the device token,
    a button, and a progress area. The token goes in an `Authorization: Bearer` header
    from JavaScript — no cookie and no session, which is why ADR-0013 chose a token.
-6. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
+5. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
    asked for and both are deferred: an 83 MB upload has to stream to disk, and
    `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
-7. **Run Plex through a real transcode**, which is the last thing standing between
+6. **Run Plex through a real transcode**, which is the last thing standing between
    "QuickSync works" and "this appliance does its job".
-8. **`plexos-update`** — nothing implements the update flow, so rollback has never been
+7. **`plexos-update`** — nothing implements the update flow, so rollback has never been
    exercised end to end. It is the riskiest untested path in the project, because a bug
    there bricks a device rather than degrading it.
-9. **A supervisor.** `plexos-init` still prints "no supervisor yet" and hands over to a
+8. **A supervisor.** `plexos-init` still prints "no supervisor yet" and hands over to a
    shell. Nothing restarts a service that dies.
+9. **A terminal in the status console**, so administering the appliance stops meaning
+   PuTTY on another machine. The pieces are mostly there — `plexosd` already owns an
+   HTTP server and the ADR-0013 token gate, and busybox provides the shell — but two
+   decisions come first. The server answers request/response only, so this needs either
+   a hand-written WebSocket (handshake and framing, since nothing in the image provides
+   them) or a long-lived response stream with a second route for keystrokes. And it is
+   a root shell offered over plain HTTP on the LAN: the token stops a passer-by, not
+   somebody reading the wire, so either the console gets TLS with a fingerprint shown
+   on the attached screen, or the terminal is documented as trusted-network-only. Worth
+   an ADR before any code, because the second decision changes ADR-0013's threat model.
 
 **Hardware transcoding works.** `/api/gpu` on the reference laptop reports H.264 and
 HEVC Main and Main10 decode *and* encode, plus VP9 decode, with GuC and HuC running —
@@ -195,7 +192,11 @@ must be off.
   table while generating each filesystem image, into a copy — so `TARGET_DIR/etc/passwd`
   never gains the accounts, and anything in `post-image.sh` that reads `TARGET_DIR/etc`
   is reading the tree from before they existed. That is how the `plex` account ended up
-  in `rootfs.erofs` and absent from the `/usr` image PlexOS actually boots.
+  in `rootfs.erofs` and absent from the `/usr` image PlexOS actually boots. `post-image.sh`
+  stage 0 now runs Buildroot's own `mkusers` against `TARGET_DIR` first, and stage 1
+  refuses to build an image whose factory `/etc` is missing an account `users.table`
+  declares. The Buildroot behaviour has not changed, so anything else added here that
+  reads `TARGET_DIR/etc` has the same problem again.
 - **The image had no TLS at all, and nothing said so.** No `ssl_client` applet, no
   `curl`, no `openssl`, no TLS library — while ADR-0010 fetches Plex from
   `downloads.plex.tv`, which serves HTTPS and nothing else. Provisioning could never

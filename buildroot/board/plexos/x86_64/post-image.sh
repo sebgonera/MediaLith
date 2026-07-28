@@ -77,6 +77,12 @@ PLEXOS_EROFS_UUID="${PLEXOS_EROFS_UUID:-706c6578-6f73-0000-0000-000000000001}"
 PLEXOS_SB_KEY="${PLEXOS_SB_KEY:-}"
 PLEXOS_SB_CERT="${PLEXOS_SB_CERT:-}"
 
+# The Buildroot source tree, needed for support/scripts/mkusers (see stage 0). Buildroot
+# exports BUILD_DIR, CONFIG_DIR, O, BR2_DL_DIR and PARALLEL_JOBS to a post-image script
+# (package/Makefile.in, EXTRA_ENV) but not TOPDIR, so it is derived below. Set this only
+# when that derivation fails; it names the directory holding support/scripts/mkusers.
+PLEXOS_BUILDROOT_DIR="${PLEXOS_BUILDROOT_DIR:-}"
+
 msg()  { printf '>>> plexos: %s\n' "$*"; }
 die()  { printf >&2 '\nplexos post-image: %s\n' "$1"; [ $# -gt 1 ] && printf >&2 '  remedy: %s\n' "$2"; exit 1; }
 
@@ -134,6 +140,122 @@ preflight() {
 }
 
 # --------------------------------------------------------------------------
+# 0. The users table, which Buildroot applies too late for this image to see it
+# --------------------------------------------------------------------------
+# Buildroot does not apply BR2_ROOTFS_USERS_TABLES to TARGET_DIR. It rsyncs TARGET_DIR
+# into a per-filesystem copy and runs mkusers against *that* (fs/common.mk: the rsync at
+# the top of the image rule, then `mkusers $(ROOTFS_FULL_USERS_TABLE) $(TARGET_DIR)`
+# where TARGET_DIR has been retargeted to the copy), then deletes the copy. So
+# TARGET_DIR/etc/passwd never gains the accounts at all, and anything here that reads
+# TARGET_DIR/etc reads the tree from before the users table existed.
+#
+# That is not a detail. The factory /etc staged in stage 1 becomes the lower layer of
+# the appliance's /etc overlay, so an account missing from it is missing from the running
+# system -- while being present in Buildroot's own rootfs.erofs, which is what makes the
+# mistake so hard to see. privilege::drop_to takes numbers and works regardless, so uid
+# 900 runs Plex perfectly well until something calls getpwuid and finds no name, no home
+# and no shell.
+#
+# The fix is to run the same script Buildroot runs, against TARGET_DIR, before staging.
+# Re-deriving the passwd/group/shadow format here instead would be a second source of
+# truth for a file format that already has one.
+resolve_buildroot_dir() {
+    local candidate
+
+    if [ -n "${PLEXOS_BUILDROOT_DIR}" ]; then
+        printf '%s\n' "${PLEXOS_BUILDROOT_DIR}"
+        return 0
+    fi
+
+    # Out-of-tree build, which is how docs/DEVELOPMENT.md builds this: Buildroot writes
+    # a wrapper $(O)/Makefile whose MAKEARGS line names the tree it came from.
+    if [ -n "${O:-}" ] && [ -f "${O}/Makefile" ]; then
+        candidate="$(sed -n 's/^MAKEARGS := -C //p' "${O}/Makefile" | head -n 1)"
+        if [ -n "${candidate}" ] && [ -x "${candidate}/support/scripts/mkusers" ]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    fi
+
+    # In-tree build: O defaults to $(TOPDIR)/output and no wrapper Makefile is written.
+    candidate="$(dirname "${O:-${BINARIES_DIR}/..}")"
+    if [ -x "${candidate}/support/scripts/mkusers" ]; then
+        printf '%s\n' "${candidate}"
+        return 0
+    fi
+
+    return 1
+}
+
+apply_users_table() {
+    local topdir table
+
+    topdir="$(resolve_buildroot_dir)" || die \
+        "cannot locate the Buildroot source tree, so the users table cannot be applied" \
+        "set PLEXOS_BUILDROOT_DIR to the directory that holds support/scripts/mkusers"
+
+    # The *merged* table, not board/users.table. Buildroot concatenates the users
+    # declared by packages with the ones from BR2_ROOTFS_USERS_TABLES into this file
+    # (fs/common.mk, ROOTFS_FULL_USERS_TABLE). Reading our own table instead would
+    # silently drop every account a package asked for, which is the same class of bug
+    # as the one this stage exists to fix.
+    table="${BUILD_DIR:-}/buildroot-fs/full_users_table.txt"
+    [ -f "${table}" ] || die \
+        "no merged users table at ${table}" \
+        "BUILD_DIR must point at the Buildroot build directory; it is exported to post-image scripts, so an empty one means this ran outside a Buildroot build"
+
+    # mkusers reads BR2_TARGET_GENERIC_PASSWD_METHOD straight out of the config file.
+    [ -n "${BR2_CONFIG:-}" ] && [ -f "${BR2_CONFIG}" ] || die \
+        "BR2_CONFIG is unset or does not name a file, and mkusers reads the password method from it" \
+        "run this from a Buildroot build, which exports BR2_CONFIG"
+
+    msg "applying the users table to the target tree"
+
+    # stdout is chown commands for Buildroot's fakeroot script, not diagnostics.
+    # Discarding them is right here: the /usr image is built --all-root, and the home
+    # directory mkusers creates lives under /var, which is not in the image and is
+    # created with its ownership at runtime.
+    #
+    # BR2_CONFIG is passed in the invocation environment rather than relied on being
+    # exported. Buildroot does export it, but mkusers is a separate process, so a
+    # caller that merely set it as a shell variable would leave mkusers reading the
+    # password method out of an empty filename -- which fails as `sed: can't read :`,
+    # naming neither the variable nor the config file.
+    BR2_CONFIG="${BR2_CONFIG}" \
+        "${topdir}/support/scripts/mkusers" "${table}" "${TARGET_DIR}" >/dev/null || die \
+        "mkusers failed against ${TARGET_DIR}; it has printed the reason above" \
+        "the usual cause is an account in ${table} disagreeing with one already in ${TARGET_DIR}/etc/passwd, which a clean build clears"
+
+    msg "  $(awk -F: 'END { print NR }' "${TARGET_DIR}/etc/passwd") accounts in the target's /etc/passwd"
+}
+
+# Every account this board declares must be in the tree that reaches the appliance, with
+# the uid it was declared with. Checked against board/users.table rather than against
+# whatever apply_users_table did, so that the check still holds if the mechanism above is
+# ever replaced -- and checked on the staged factory tree, which is what actually ships.
+check_factory_accounts() {
+    local factory="${1}" username uid found
+
+    while read -r username uid _; do
+        case "${username}" in ''|'#'*|'-') continue;; esac
+        # A negative uid asks mkusers to allocate one, so there is nothing to compare
+        # against. board/users.table forbids it and says why; this just avoids
+        # reporting a mismatch that would be meaningless.
+        case "${uid}" in -*) continue;; esac
+
+        found="$(awk -F: -v u="${username}" '$1 == u { print $3 }' "${factory}/passwd")"
+
+        [ -n "${found}" ] || die \
+            "the '${username}' account is not in the factory /etc that goes into the image" \
+            "apply_users_table must run before the factory /etc is staged; Buildroot's own mkusers pass never touches TARGET_DIR"
+
+        [ "${found}" = "${uid}" ] || die \
+            "the '${username}' account has uid ${found} in the factory /etc, but users.table declares ${uid}" \
+            "an earlier build left a conflicting entry in ${TARGET_DIR}/etc/passwd; remove it, or run a clean build"
+    done < "${BOARD_DIR}/users.table"
+}
+
+# --------------------------------------------------------------------------
 # 1. The /usr image
 # --------------------------------------------------------------------------
 # Only /usr, not the whole target tree. /usr *is* the unit of update (ADR-0001), and
@@ -155,6 +277,7 @@ build_usr_image() {
     mkdir -p "${factory}"
     cp -a "${TARGET_DIR}/etc/." "${factory}/"
     msg "  $(find "${factory}" -mindepth 1 -maxdepth 1 | wc -l) entries"
+    check_factory_accounts "${factory}"
 
     msg "building /usr erofs image"
     "${HOST_DIR}/bin/mkfs.erofs" \
@@ -551,6 +674,12 @@ main() {
     preflight
     rm -rf "${WORK}"
     mkdir -p "${WORK}"
+
+    # Before build_usr_image, not merely somewhere earlier: the factory /etc it stages
+    # is a copy of TARGET_DIR/etc, so the accounts have to be there first or they are
+    # absent from the image. build_usr_image checks that they are, so swapping these
+    # two fails the build rather than shipping a system with a nameless uid.
+    apply_users_table
 
     build_usr_image
     build_verity
