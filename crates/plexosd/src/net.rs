@@ -493,11 +493,57 @@ pub fn wait_for_link(
     }
 }
 
+/// The loopback interface, which nothing else in this module will touch.
+pub const LOOPBACK: &str = "lo";
+
+/// Brings loopback up, because nothing else does and almost everything needs it.
+///
+/// `candidates` deliberately excludes loopback: it is not something to run DHCP on, and
+/// it is never the answer to "what address do I type into a browser". The consequence
+/// went unnoticed until Plex ran — it binds a listener on `127.0.0.1`, got
+/// `EADDRNOTAVAIL`, and died with a C++ exception from inside Boost.ASIO that named
+/// neither loopback nor an interface. The health gate's `plex-http` probe had the same
+/// problem and reported it as Plex not answering.
+///
+/// Bringing it up is the whole fix: the kernel adds `127.0.0.1/8` itself on `NETDEV_UP`
+/// for a device with `IFF_LOOPBACK` (`net/ipv4/devinet.c`, checked in this tree's kernel
+/// rather than remembered), so there is no address to assign here and no second step to
+/// get wrong.
+///
+/// Reported and never fatal. A machine whose loopback will not come up is broken in a
+/// way this cannot fix, and refusing to serve the console would remove the one tool for
+/// finding out why.
+pub fn bring_up_loopback(env: &impl Environment, log: &mut dyn FnMut(&str)) {
+    let Some(ip) = resolve(env, "ip") else {
+        log(&format!(
+            "cannot bring {LOOPBACK} up: `ip` is in none of {}. Anything that binds a \
+             loopback address will fail with EADDRNOTAVAIL, including Plex.",
+            PROGRAM_DIRS.join(", ")
+        ));
+        return;
+    };
+
+    match env.run(&ip, &["link", "set", LOOPBACK, "up"]) {
+        // `ip link set ... up` is silent when it works, so any output is it objecting.
+        Ok(output) if output.trim().is_empty() => log(&format!("{LOOPBACK} is up")),
+        Ok(output) => log(&format!(
+            "bringing {LOOPBACK} up: ip said {:?}. Plex binds a listener on 127.0.0.1 \
+             and will fail to start without it.",
+            output.trim()
+        )),
+        Err(error) => log(&format!(
+            "could not run {ip} to bring {LOOPBACK} up: {error}. Plex binds a listener \
+             on 127.0.0.1 and will fail to start without it."
+        )),
+    }
+}
+
+/// Runs against all of them rather than a chosen one, because choosing requires the
 /// Brings up every wired interface that is not up already, so `carrier` becomes
 /// readable.
 ///
-/// Runs against all of them rather than a chosen one, because choosing requires the
-/// carrier, and the carrier requires being up. Takes the interfaces it was given
+/// Being up is a precondition for the carrier, and the carrier requires being up. Takes
+/// the interfaces it was given
 /// rather than enumerating again, so that the caller's view and this one cannot
 /// disagree about what exists.
 ///
@@ -895,6 +941,39 @@ mod tests {
             "enp2s0",
             "only an interface with a backing device is real hardware"
         );
+    }
+
+    #[test]
+    fn loopback_is_brought_up_even_though_it_is_never_a_candidate() {
+        // The two facts have to coexist: loopback must never be chosen for DHCP, and it
+        // must still be brought up. Holding only the first is what let Plex die binding
+        // 127.0.0.1 with EADDRNOTAVAIL, from inside Boost.ASIO, with a message naming
+        // neither loopback nor an interface.
+        // Fixture::run answers from a table, so registering /sbin/ip with empty output
+        // is how "the command ran and said nothing" is expressed -- which is what `ip
+        // link set ... up` does when it works.
+        let fixture = with_ip(Fixture::new()).command("/sbin/ip", "");
+        let mut lines = Vec::new();
+        bring_up_loopback(&fixture, &mut |line| lines.push(line.to_owned()));
+
+        assert!(
+            lines.iter().any(|l| l.contains("lo is up")),
+            "loopback must be brought up: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_ip_command_says_what_will_break_rather_than_only_what_failed() {
+        // Every diagnostic names a remedy, and the remedy here is not about loopback --
+        // it is that anything binding a loopback address is about to fail in a way that
+        // will not mention loopback at all.
+        let fixture = Fixture::new();
+        let mut lines = Vec::new();
+        bring_up_loopback(&fixture, &mut |line| lines.push(line.to_owned()));
+
+        let logged = lines.join("\n");
+        assert!(logged.contains("EADDRNOTAVAIL"), "{logged}");
+        assert!(logged.contains("Plex"), "{logged}");
     }
 
     #[test]

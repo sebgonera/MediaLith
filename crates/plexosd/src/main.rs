@@ -224,6 +224,17 @@ fn main() -> ExitCode {
         Err(code) => return code,
     };
 
+    // Before anything dispatches, and for every mode. Loopback is not brought up by
+    // anything else: net::candidates excludes it, because it is neither something to run
+    // DHCP on nor an answer to "what address do I type". Nothing noticed until Plex
+    // bound a listener on 127.0.0.1 and died with EADDRNOTAVAIL -- and the health gate's
+    // plex-http probe, which also goes over loopback, reported that as Plex not
+    // answering. It is idempotent and costs one process.
+    if !matches!(mode, Mode::PlexChild) {
+        let mut log = |line: &str| println!("plexosd: {line}");
+        plexosd::net::bring_up_loopback(&plexos_gpu::env::System, &mut log);
+    }
+
     let (check_only, esp_device) = match mode {
         Mode::PlexChild => {
             // Returning rather than falling through: on success this process is replaced

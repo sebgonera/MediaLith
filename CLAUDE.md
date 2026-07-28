@@ -256,6 +256,22 @@ must be off.
   there is to own the path deliberately: enable the full package's applet and turn
   busybox's off in the fragment, so the result does not depend on which package Buildroot
   installed last.
+- **Nothing brought loopback up, and the error named neither loopback nor a network.**
+  `net::candidates` excludes `lo` deliberately — it is not something to run DHCP on, and
+  `127.0.0.1` is never the answer to "what address do I type into a browser". Nothing
+  else touched it, so `lo` stayed down. Plex binds a listener on `127.0.0.1`, got
+  `EADDRNOTAVAIL`, and died with an uncaught C++ exception from inside Boost.ASIO — a
+  message mentioning `boost/asio/detail/reactive_socket_service.hpp` and nothing else.
+  The health gate's `plex-http` probe goes over loopback too and reported it as Plex not
+  answering. Bringing the interface up is the whole fix: the kernel adds `127.0.0.1/8`
+  itself on `NETDEV_UP` for a device with `IFF_LOOPBACK` (`net/ipv4/devinet.c`), so there
+  is no address to assign and no second step.
+- **A confined child's output has to be captured, or its failure is invisible.** Plex's
+  child inherited stdout and stderr, so the confinement log and Plex's own dying words
+  reached only the attached console. Two failures in a row had to be diagnosed by
+  re-running the policy on a build host and reasoning backwards. `plexosd` now pipes both
+  streams, drains them on threads and serves the tail from `/api/provision`; the third
+  failure was read off the network in one request and identified in a minute.
 - **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error
