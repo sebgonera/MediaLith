@@ -140,6 +140,31 @@ mod tests {
     }
 
     #[test]
+    fn the_buildroot_users_table_creates_the_account_this_crate_names() {
+        // The two are edited in different files and only Buildroot reads one of them,
+        // so a mismatch surfaced as a failed image build forty minutes in -- or worse,
+        // as a Plex handed a data directory it does not own.
+        //
+        // It has already gone wrong once: the table said `-900`, which mkusers reads as
+        // "allocate one for me" rather than as the number 900, and rejects outright
+        // below -2. An allocated uid differs between builds, which is exactly the
+        // orphaned-database problem this constant exists to prevent.
+        let table = include_str!("../../../buildroot/board/plexos/x86_64/users.table");
+        let entry = table
+            .lines()
+            .find(|line| line.starts_with(&format!("{PLEX_USER} ")))
+            .expect("a plex entry in the users table");
+
+        let fields: Vec<&str> = entry.split_whitespace().collect();
+        assert_eq!(fields[1], PLEX_UID.to_string(), "uid: {entry}");
+        assert_eq!(fields[3], PLEX_GID.to_string(), "gid: {entry}");
+        assert!(
+            !fields[1].starts_with('-') && !fields[3].starts_with('-'),
+            "a negative id means 'allocate one', which is not what this pins: {entry}"
+        );
+    }
+
+    #[test]
     fn state_paths_are_nested_under_the_state_root() {
         for path in [
             STATE_VERSION_FILE,

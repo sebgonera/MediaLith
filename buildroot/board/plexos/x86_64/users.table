@@ -16,4 +16,9 @@
 # The home directory is Plex's application support directory from ADR-0009. It is
 # created here so that its ownership comes from the same declaration as the account,
 # rather than from a mkdir somewhere that could disagree.
-plex -900 plex -900 ! /var/lib/plex /bin/false - Plex Media Server
+# A literal 900, not -900. mkusers reads a negative id as "allocate one for me"
+# (-1 and -2 are the only negatives it accepts, and it rejects anything below -2),
+# which is precisely what must not happen here: an allocated uid can differ between
+# builds, and a machine reinstalled over its existing /var would find a media database
+# owned by a number it no longer uses.
+plex 900 plex 900 ! /var/lib/plex /bin/false - Plex Media Server
