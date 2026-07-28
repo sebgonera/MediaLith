@@ -306,6 +306,14 @@ must be off.
   never cleared. Two separate defects wore one symptom: the missing probe, and the gate
   running before anything started Plex. Grep for stub closures and `unimplemented` paths
   whose comment begins "not yet".
+- **`post-image.sh`'s stages run in one order and it is easy to write into a tree that
+  has already been sealed.** `os-release` was being written in stage 4, where the UKI is
+  assembled, and the `/usr` image is built in stage 1 — so the boot entry carried the
+  right version and `/usr/lib/os-release` still said `Buildroot 2026.02.3`. Harmless
+  until `plexos-update` began comparing that string against a bundle's: `2026` sorts
+  above `0`, so every update would have been refused as older, with a message blaming
+  whoever published it. Anything that must appear *in the image* has to be written before
+  stage 1, and the check is to extract the built image and look — not to read the script.
 - **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error
