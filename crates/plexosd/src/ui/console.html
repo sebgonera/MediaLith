@@ -174,6 +174,61 @@
     background: var(--card);
   }
   .empty { color: var(--muted); }
+
+  /* The Plex section: the one part of this page that does something. */
+  .plex { margin: 1.5rem 0; }
+  .plex .row { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-top: .8rem; }
+  .plex input[type=password], .plex input[type=text] {
+    flex: 1 1 22rem;
+    min-width: 0;
+    padding: .55rem .7rem;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .9rem;
+  }
+  .plex button {
+    padding: .55rem 1.1rem;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .plex button[disabled] { opacity: .55; cursor: default; }
+  .plex .hint { color: var(--muted); font-size: .9rem; margin: .4rem 0 0; }
+  .plex .visit {
+    display: inline-block;
+    margin-top: .8rem;
+    padding: .55rem 1.1rem;
+    border: 1px solid var(--ready);
+    border-radius: 8px;
+    color: var(--ready);
+    font-weight: 600;
+    text-decoration: none;
+  }
+  .progress {
+    margin-top: .9rem;
+    padding: .7rem .8rem;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--bg);
+  }
+  .progress .now { font-weight: 600; }
+  .progress .log {
+    margin: .5rem 0 0;
+    max-height: 11rem;
+    overflow-y: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .82rem;
+    color: var(--muted);
+    white-space: pre-wrap;
+  }
+  .failed { border-color: var(--unavailable); color: var(--unavailable); }
 </style>
 </head>
 <body>
@@ -184,6 +239,11 @@
     <span class="badge" id="slot" hidden></span>
     <span class="badge" id="gate" hidden></span>
   </header>
+
+  <section class="card plex" id="plex" aria-live="polite">
+    <h3>Plex Media Server</h3>
+    <p class="empty">Loading…</p>
+  </section>
 
   <main id="main" aria-live="polite">
     <p class="empty">Loading…</p>
@@ -200,7 +260,23 @@
 
 // The page is served from the appliance itself, so the API is always same-origin.
 const ENDPOINT = "/api/status";
+const PLEX_ENDPOINT = "/api/provision";
 const REFRESH_MS = 10000;
+
+// While an installation runs the page has something to say every second. The rest of the
+// time it does not, and polling that fast would be noise on a machine whose job is to
+// transcode video.
+const PLEX_IDLE_MS = 5000;
+const PLEX_BUSY_MS = 1000;
+
+// The device token, in sessionStorage rather than in a cookie: ADR-0013 chose a bearer
+// token precisely so that nothing is attached to requests automatically, and a cookie
+// would be. sessionStorage is cleared when the tab closes, so the token is not left on
+// the administrator's machine indefinitely; it is deliberately not localStorage.
+const TOKEN_KEY = "plexos-device-token";
+
+function token() { return sessionStorage.getItem(TOKEN_KEY) || ""; }
+function rememberToken(value) { sessionStorage.setItem(TOKEN_KEY, value); }
 
 const VERDICT = {
   ready:       ["Hardware transcoding is ready",     "Plex will transcode on the GPU."],
@@ -357,6 +433,128 @@ function renderError(error) {
     </div>`;
 }
 
+const PHASES = {
+  idle:        "Not installed",
+  catalogue:   "Asking Plex what it publishes",
+  downloading: "Downloading",
+  verifying:   "Checking Plex's signature",
+  building:    "Building the app image",
+  starting:    "Starting Plex",
+  done:        "Installed",
+  failed:      "Failed",
+};
+
+/** The Plex section, rendered from what /api/provision reports. */
+function renderPlex(report) {
+  const phase = report.phase || "idle";
+  const busy = ["catalogue", "downloading", "verifying", "building", "starting"].includes(phase);
+  const section = document.getElementById("plex");
+
+  // Running Plex is the payoff, so it comes first and everything else is secondary.
+  if (report.running) {
+    section.innerHTML = `
+      <h3>Plex Media Server</h3>
+      <p><strong>Running.</strong> Sign in and add your libraries from Plex itself.</p>
+      <a class="visit" href="http://${esc(location.hostname)}${esc(report.web)}">Open Plex</a>`;
+    return;
+  }
+
+  if (report.installed) {
+    section.innerHTML = `
+      <h3>Plex Media Server</h3>
+      <p><strong>Installed, but not running.</strong> Nothing restarts it yet, so a
+         reboot of the appliance is the way to bring it back.</p>`;
+    return;
+  }
+
+  const progress = busy || phase === "failed"
+    ? `<div class="progress ${phase === "failed" ? "failed" : ""}">
+         <span class="now">${esc(PHASES[phase] || phase)}${busy ? "…" : ""}</span>
+         <div>${esc(report.detail || "")}</div>
+         ${report.error ? `<div class="log">${esc(report.error)}</div>` : ""}
+         ${(report.log || []).length ? `<div class="log">${esc((report.log || []).slice(-12).join("\n"))}</div>` : ""}
+       </div>`
+    : "";
+
+  section.innerHTML = `
+    <h3>Plex Media Server</h3>
+    <p>Plex is proprietary software from Plex Inc. PlexOS does not ship it: installing
+       downloads the official package from Plex, checks its signature, and turns it into
+       an app image on this machine. Doing so means accepting Plex's terms.</p>
+    <div class="row">
+      <input type="password" id="token" placeholder="device token"
+             autocomplete="off" spellcheck="false" value="${esc(token())}">
+      <button id="install" ${busy ? "disabled" : ""}>${phase === "failed" ? "Try again" : "Install Plex"}</button>
+    </div>
+    <p class="hint">The token was printed on the screen attached to this machine the
+       first time it started. Reading this page needs nothing; installing needs the
+       token.</p>
+    ${progress}`;
+
+  document.getElementById("install").addEventListener("click", startInstall);
+  document.getElementById("token").addEventListener("input", event => rememberToken(event.target.value));
+}
+
+/** Asks the appliance to install Plex. */
+async function startInstall() {
+  const value = document.getElementById("token").value.trim();
+  if (!value) {
+    plexError("Enter the device token first. It was printed on the screen attached to this machine.");
+    return;
+  }
+  rememberToken(value);
+  document.getElementById("install").disabled = true;
+
+  try {
+    const response = await fetch(PLEX_ENDPOINT, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Authorization": "Bearer " + value },
+    });
+    if (!response.ok) {
+      // The server's own text carries the remedy; showing our own would lose it.
+      plexError(await response.text());
+      return;
+    }
+  } catch (error) {
+    plexError(error.message || String(error));
+    return;
+  }
+  plexTick();
+}
+
+function plexError(message) {
+  const section = document.getElementById("plex");
+  const existing = section.querySelector(".progress");
+  const box = existing || document.createElement("div");
+  box.className = "progress failed";
+  box.innerHTML = `<span class="now">Failed</span><div>${esc(message)}</div>`;
+  if (!existing) section.append(box);
+  const button = document.getElementById("install");
+  if (button) button.disabled = false;
+}
+
+let plexTimer = null;
+
+async function plexTick() {
+  let report;
+  try {
+    const response = await fetch(PLEX_ENDPOINT, { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    report = await response.json();
+  } catch (error) {
+    // The status section already says the daemon is unreachable; saying it twice would
+    // push the thing a person can act on off the screen.
+    plexTimer = setTimeout(plexTick, PLEX_IDLE_MS);
+    return;
+  }
+
+  renderPlex(report);
+  const busy = ["catalogue", "downloading", "verifying", "building", "starting"].includes(report.phase);
+  clearTimeout(plexTimer);
+  plexTimer = setTimeout(plexTick, busy ? PLEX_BUSY_MS : PLEX_IDLE_MS);
+}
+
 async function tick() {
   try {
     const response = await fetch(ENDPOINT, { cache: "no-store" });
@@ -369,6 +567,7 @@ async function tick() {
 
 tick();
 setInterval(tick, REFRESH_MS);
+plexTick();
 </script>
 </body>
 </html>

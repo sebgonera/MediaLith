@@ -235,6 +235,8 @@ pub enum Phase {
     Verifying,
     /// Unpacking and building the app image.
     Building,
+    /// Mounting the new image and starting Plex.
+    Starting,
     /// Installed.
     Done,
     /// Gave up, and `error` says why.
@@ -247,7 +249,7 @@ impl Phase {
     pub fn is_running(self) -> bool {
         matches!(
             self,
-            Self::Catalogue | Self::Downloading | Self::Verifying | Self::Building
+            Self::Catalogue | Self::Downloading | Self::Verifying | Self::Building | Self::Starting
         )
     }
 }
@@ -278,6 +280,30 @@ impl Default for Progress {
         }
     }
 }
+
+/// What `GET /api/provision` actually answers: the machine's state, and any run in it.
+///
+/// The progress alone is not enough for the page. After a reboot the job is idle on a
+/// machine with Plex installed and running, and a page that read only the job would
+/// offer to install it again.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Report {
+    /// The installation in progress, or the last one, or none.
+    #[serde(flatten)]
+    pub progress: Progress,
+    /// Whether an app image is mounted and holds a Plex to run.
+    pub installed: bool,
+    /// Whether this daemon has a Plex running right now.
+    pub running: bool,
+    /// Where Plex's own interface is, once there is one to visit.
+    ///
+    /// A port and a path rather than a whole URL: the page knows the host it was served
+    /// from, and this appliance does not reliably know how it was reached.
+    pub web: &'static str,
+}
+
+/// Plex's own web interface, relative to the appliance's address.
+pub const PLEX_WEB: &str = ":32400/web";
 
 /// The one provisioning job this daemon will run, and its progress.
 ///
@@ -392,8 +418,9 @@ fn push_line(log: &mut Vec<String>, line: String) {
 ///
 /// Returns immediately. The caller has already claimed the job with [`Job::begin`];
 /// doing it here would leave a window in which a second request saw an idle job.
-pub fn spawn(job: &Arc<Job>, apps: PathBuf, keyring: PathBuf) {
+pub fn spawn(job: &Arc<Job>, plex: &Arc<crate::plex::Handle>, apps: PathBuf, keyring: PathBuf) {
     let job = Arc::clone(job);
+    let plex = Arc::clone(plex);
     std::thread::spawn(move || {
         // Armed for the whole run. Without it a panic anywhere in the pipeline would
         // unwind past finish(), leaving the job in a running phase that nothing ever
@@ -402,6 +429,14 @@ pub fn spawn(job: &Arc<Job>, apps: PathBuf, keyring: PathBuf) {
         // with an ugly message.
         let mut guard = Unfinished::arm(&job);
         let outcome = run(&job, &apps, &keyring);
+
+        // Only after a successful build. Mounting and starting from an image that was
+        // never published would run whatever the previous attempt left behind.
+        if outcome.is_ok() {
+            job.step(Phase::Starting, "mounting the app image and starting Plex");
+            crate::plex::mount_and_start(&plex, &mut |line| job.note(line));
+        }
+
         guard.disarm();
         job.finish(outcome.map_err(|error| error.to_string()));
     });

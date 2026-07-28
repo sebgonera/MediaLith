@@ -21,6 +21,7 @@ USAGE:
     plexosd [--check] [--esp <device>]
     plexosd --serve [--port <n>]
     plexosd --mount-plex
+    plexosd --plex-child
 
 OPTIONS:
     --check          Report the health gate without clearing the boot counter
@@ -34,6 +35,11 @@ OPTIONS:
                      because ARCHITECTURE.md step 6 starts services and step 7 is
                      where the gate reports on them. Exits 0 when there is nothing
                      to mount: an unprovisioned machine is not a broken one.
+    --plex-child     Confine this process and become Plex: join the cgroup, apply
+                     Landlock, drop to the plex account, exec. Started by --serve
+                     rather than by hand; it exists as a flag because the
+                     confinement must apply to Plex and to nothing else, and doing
+                     it in a pre_exec closure would need unsafe (ADR-0011).
     --help           Show this message
 
 Exit status is the verdict: 0 only when the boot is healthy.
@@ -117,70 +123,137 @@ fn mount_plex_image() -> ExitCode {
     }
 }
 
-fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+/// What this invocation is for.
+///
+/// An enum rather than a set of flags because these are modes, not options: each one
+/// takes a different path through the daemon and none of them combines with another.
+/// `--serve --check` was never meaningful, and a struct of booleans made it look as
+/// though it might be.
+#[derive(Debug, PartialEq, Eq)]
+enum Mode {
+    /// Run the health gate and, unless `check_only`, clear the boot try counter.
+    Gate {
+        /// Report the verdict and leave the counter alone.
+        check_only: bool,
+        /// The ESP to write to, if not the one found by partition label.
+        esp_device: Option<String>,
+    },
+    /// Bring the network up and serve the console.
+    Serve {
+        /// Port to bind.
+        port: u16,
+    },
+    /// Verify and mount the provisioned app image.
+    MountPlex,
+    /// Confine this process and become Plex.
+    PlexChild,
+}
+
+/// Parses the arguments into a mode, or returns the status to exit with.
+///
+/// Separated from `main` so the dispatch below reads as the list of things this daemon
+/// does rather than as a list interrupted by argument handling.
+fn parse(args: &[String]) -> Result<Mode, ExitCode> {
     let mut check_only = false;
     let mut mount_plex = false;
+    let mut plex_child = false;
     let mut serve = false;
     let mut port = console::DEFAULT_PORT;
-    let mut esp_device: Option<String> = None;
+    let mut esp_device = None;
 
     let mut tokens = args.iter();
     while let Some(token) = tokens.next() {
         match token.as_str() {
             "--check" => check_only = true,
+            plexosd::plex::CHILD_FLAG => plex_child = true,
             "--mount-plex" => mount_plex = true,
             "--serve" => serve = true,
             "--port" => {
                 let Some(value) = tokens.next() else {
                     eprintln!("plexosd: --port needs a value");
-                    return ExitCode::from(64);
+                    return Err(ExitCode::from(64));
                 };
                 match value.parse() {
                     Ok(parsed) => port = parsed,
                     Err(error) => {
                         eprintln!("plexosd: --port {value:?} is not a port number: {error}");
-                        return ExitCode::from(64);
+                        return Err(ExitCode::from(64));
                     }
                 }
-            }
-            "--help" | "-h" => {
-                print!("{USAGE}");
-                return ExitCode::SUCCESS;
             }
             "--esp" => {
                 let Some(value) = tokens.next() else {
                     eprintln!("plexosd: --esp needs a value");
-                    return ExitCode::from(64);
+                    return Err(ExitCode::from(64));
                 };
                 esp_device = Some(value.clone());
+            }
+            "--help" | "-h" => {
+                print!("{USAGE}");
+                return Err(ExitCode::SUCCESS);
             }
             other => {
                 eprintln!("plexosd: unrecognised argument {other:?}\n");
                 eprint!("{USAGE}");
-                return ExitCode::from(64);
+                return Err(ExitCode::from(64));
             }
         }
     }
 
+    // Ordered by how far each one is from the ordinary boot path, so that a stray
+    // --plex-child can never be swallowed by a mode that also happens to be requested.
+    if plex_child {
+        return Ok(Mode::PlexChild);
+    }
     if mount_plex {
-        return mount_plex_image();
+        return Ok(Mode::MountPlex);
     }
-
-    // Deliberately before the gate runs, and mutually exclusive with it. --serve is
-    // the daemon that comes after the boot decision; running the gate here as well
-    // would write the health probe to /var a second time and print a verdict nobody
-    // asked this invocation for.
     if serve {
-        let mut log = |line: &str| println!("plexosd: {line}");
-        return match console::run(port, &mut log) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("plexosd: {error}");
-                ExitCode::FAILURE
-            }
-        };
+        return Ok(Mode::Serve { port });
     }
+    Ok(Mode::Gate {
+        check_only,
+        esp_device,
+    })
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mode = match parse(&args) {
+        Ok(mode) => mode,
+        Err(code) => return code,
+    };
+
+    let (check_only, esp_device) = match mode {
+        Mode::PlexChild => {
+            // Returning rather than falling through: on success this process is replaced
+            // by Plex and nothing below ever runs.
+            let mut log = |line: &str| println!("plexosd: plex: {line}");
+            let error = plexosd::plex::become_plex(&mut log)
+                .expect_err("confine_and_exec returns only on failure");
+            eprintln!("plexosd: could not start Plex: {error}");
+            return ExitCode::FAILURE;
+        }
+        Mode::MountPlex => return mount_plex_image(),
+        // Deliberately before the gate runs, and mutually exclusive with it. --serve is
+        // the daemon that comes after the boot decision; running the gate here as well
+        // would write the health probe to /var a second time and print a verdict nobody
+        // asked this invocation for.
+        Mode::Serve { port } => {
+            let mut log = |line: &str| println!("plexosd: {line}");
+            return match console::run(port, &mut log) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("plexosd: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        Mode::Gate {
+            check_only,
+            esp_device,
+        } => (check_only, esp_device),
+    };
 
     let health: Health = plexosd::health::run_all();
     println!("plexosd: boot health");
@@ -232,5 +305,69 @@ fn main() -> ExitCode {
             eprintln!("plexosd: healthy, but could not clear the boot counter: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_of(args: &[&str]) -> Result<Mode, ExitCode> {
+        let owned: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+        parse(&owned)
+    }
+
+    #[test]
+    fn no_arguments_runs_the_boot_gate() {
+        // The invocation plexos-init makes, and the only one that can mark a slot good.
+        assert_eq!(
+            parse_of(&[]).unwrap(),
+            Mode::Gate {
+                check_only: false,
+                esp_device: None
+            }
+        );
+    }
+
+    #[test]
+    fn the_child_flag_wins_over_every_other_mode() {
+        // It ends in execve and never returns, so it must never be reachable by
+        // accident -- and equally must never be swallowed by a mode requested alongside
+        // it. Ordering it first is what makes both true.
+        assert_eq!(
+            parse_of(&["--serve", plexosd::plex::CHILD_FLAG]).unwrap(),
+            Mode::PlexChild
+        );
+        assert_eq!(
+            parse_of(&[plexosd::plex::CHILD_FLAG, "--check"]).unwrap(),
+            Mode::PlexChild
+        );
+    }
+
+    #[test]
+    fn serving_takes_a_port_and_defaults_to_eighty() {
+        assert_eq!(
+            parse_of(&["--serve"]).unwrap(),
+            Mode::Serve {
+                port: console::DEFAULT_PORT
+            }
+        );
+        assert_eq!(
+            parse_of(&["--serve", "--port", "8080"]).unwrap(),
+            Mode::Serve { port: 8080 }
+        );
+    }
+
+    #[test]
+    fn an_unusable_port_is_refused_rather_than_defaulted() {
+        // Falling back to 80 would bind a port the caller did not ask for, and the
+        // mistake would surface as a console reachable at an address nobody expected.
+        assert!(parse_of(&["--serve", "--port", "not-a-number"]).is_err());
+        assert!(parse_of(&["--serve", "--port"]).is_err());
+    }
+
+    #[test]
+    fn an_unrecognised_argument_is_an_error_and_not_ignored() {
+        assert!(parse_of(&["--sevre"]).is_err());
     }
 }

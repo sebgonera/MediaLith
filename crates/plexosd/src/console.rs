@@ -57,6 +57,7 @@ pub fn respond(
     request: &Request,
     env: &impl Environment,
     job: &std::sync::Arc<crate::provision::Job>,
+    plex: &std::sync::Arc<crate::plex::Handle>,
 ) -> Response {
     match (request.method.as_str(), request.path.as_str()) {
         // Starting an installation. Returns as soon as the work is handed to a thread:
@@ -75,6 +76,7 @@ pub fn respond(
             // begin() is that the thread reports into the state the page is polling.
             crate::provision::spawn(
                 job,
+                plex,
                 std::path::PathBuf::from(plexos_types::paths::PLEX_APPS),
                 std::path::PathBuf::from(plexos_plex::verify::PLEX_KEYRING),
             );
@@ -83,10 +85,21 @@ pub fn respond(
 
         // Following one. Polled by the page every second or so, so it is deliberately
         // cheap: it reads a struct behind a mutex and serialises it.
-        ("GET" | "HEAD", "/api/provision") => match serde_json::to_string(&job.snapshot()) {
-            Ok(json) => Response::json(json),
-            Err(error) => Response::text(500, format!("could not serialise progress: {error}\n")),
-        },
+        ("GET" | "HEAD", "/api/provision") => {
+            let mount = std::path::Path::new(plexos_types::paths::PLEX_MOUNT);
+            let report = crate::provision::Report {
+                progress: job.snapshot(),
+                installed: crate::plex::is_provisioned(mount),
+                running: plex.is_running(),
+                web: crate::provision::PLEX_WEB,
+            };
+            match serde_json::to_string(&report) {
+                Ok(json) => Response::json(json),
+                Err(error) => {
+                    Response::text(500, format!("could not serialise progress: {error}\n"))
+                }
+            }
+        }
 
         (_, path) => respond_read_only(request, env, path),
     }
@@ -180,10 +193,13 @@ pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::
 
     let fingerprint = crate::auth::fingerprint(&token);
     if let Err(error) = crate::auth::write(path, &fingerprint) {
+        // Deliberately without printing the token that was generated. Showing one the
+        // device will not accept after a restart is worse than showing none: whoever
+        // wrote it down would spend the next hour blaming the token.
         log(&format!(
-            "could not store the device credential at {}: {error}. The token above is \
-             therefore not this device's and nothing may change it. Check that /var is \
-             mounted and writable.",
+            "could not store the device credential at {}: {error}. No token has been \
+             issued, and nothing may change this machine until one can be. Check that \
+             /var is mounted and writable.",
             path.display()
         ));
         return Credential::Unset;
@@ -281,15 +297,22 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     // mutating route outright (ADR-0013).
     let credential = claim(std::path::Path::new(crate::auth::CREDENTIAL_FILE), log);
 
-    // One job for the life of the daemon, shared by every connection thread. Provisioning
-    // is a property of the machine rather than of whoever asked for it: a second browser
-    // must see the run the first one started, not an idle console.
+    // One job and one Plex for the life of the daemon, shared by every connection thread.
+    // Both are properties of the machine rather than of whoever asked: a second browser
+    // must see the installation the first one started, not an idle console.
     let job = std::sync::Arc::new(crate::provision::Job::new());
+    let plex = std::sync::Arc::new(crate::plex::Handle::new());
 
+    // Before serving, so a machine that was provisioned on an earlier boot is running
+    // Plex by the time anyone loads the page. On an unprovisioned one this says so and
+    // costs nothing.
+    plex.ensure_started(std::path::Path::new(plexos_types::paths::PLEX_MOUNT), log);
+
+    let served_job = std::sync::Arc::clone(&job);
     http::serve(
         &listener,
         credential,
-        move |request| respond(request, &System, &job),
+        move |request| respond(request, &System, &served_job, &plex),
         log,
     )
 }
@@ -305,6 +328,7 @@ mod tests {
             request,
             env,
             &std::sync::Arc::new(crate::provision::Job::new()),
+            &std::sync::Arc::new(crate::plex::Handle::new()),
         )
     }
 
@@ -345,19 +369,82 @@ mod tests {
         // /usr is read-only and the appliance may have no route off the LAN. Anything
         // fetched from elsewhere renders this page unstyled in exactly the situation
         // it exists for: a machine whose network is broken.
-        for marker in [
-            "http://",
-            "https://",
-            "<script src",
-            "<link",
-            "<img",
-            "@import",
-        ] {
+        for marker in ["https://", "<script src", "<link", "<img", "@import"] {
             assert!(
                 !PAGE.contains(marker),
                 "the page must be self-contained, but it contains {marker:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_page_sends_the_token_the_way_the_adr_requires() {
+        // ADR-0013 chose a bearer token so that nothing is attached to a request
+        // automatically. A page that put it in a cookie or a query string would defeat
+        // that: the first is sent on every request whether or not it should be, and the
+        // second lands in every proxy log and browser history on the way.
+        assert!(
+            PAGE.contains("\"Authorization\": \"Bearer \" + value"),
+            "the page must present the token as an Authorization: Bearer header"
+        );
+        assert!(!PAGE.contains("document.cookie"), "and not as a cookie");
+        assert!(
+            !PAGE.contains("?token="),
+            "and not in a query string, which is logged everywhere"
+        );
+    }
+
+    #[test]
+    fn the_page_drives_the_routes_this_module_serves() {
+        // The page and the route table are edited independently; if they drift, the
+        // console renders its error state on a healthy machine and the symptom points at
+        // the daemon rather than at the mismatch.
+        assert!(PAGE.contains("\"/api/provision\""));
+        for (method, path) in [("POST", "/api/provision"), ("GET", "/api/provision")] {
+            let request = Request {
+                method: method.to_owned(),
+                path: path.to_owned(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            };
+            // Not 404: whether it is allowed is http::route's business, but the route
+            // has to exist here.
+            let job = std::sync::Arc::new(crate::provision::Job::new());
+            if method == "POST" {
+                assert!(job.begin(), "claimed so the POST does not start a download");
+            }
+            let response = respond(
+                &request,
+                &Fixture::new(),
+                &job,
+                &std::sync::Arc::new(crate::plex::Handle::new()),
+            );
+            assert_ne!(response.status, 404, "{method} {path}");
+        }
+    }
+
+    #[test]
+    fn the_only_absolute_url_on_the_page_points_at_this_machine() {
+        // The blanket "no http:// anywhere" rule this replaces was right about assets
+        // and wrong about the one link the page has to offer: Plex's own interface, on
+        // port 32400 of the appliance itself. It cannot be relative -- it is a different
+        // port -- and it cannot use location.protocol, because Plex serves plain HTTP
+        // whatever the console ends up served over.
+        //
+        // So the rule becomes sharper rather than looser: every absolute URL must be
+        // built from the host the page was served from. A CDN or a font still fails,
+        // which is what the original test existed to catch.
+        let occurrences = PAGE.match_indices("http://").count();
+        assert_eq!(occurrences, 1, "exactly one absolute URL is expected");
+
+        let (index, _) = PAGE.match_indices("http://").next().expect("one");
+        let after = &PAGE[index + "http://".len()..];
+        assert!(
+            after.starts_with("${esc(location.hostname)}"),
+            "an absolute URL must be built from this machine's own address, but the page \
+             has: {}",
+            &after[..after.len().min(60)]
+        );
     }
 
     #[test]
@@ -424,7 +511,12 @@ mod tests {
             headers: Vec::new(),
             body: Vec::new(),
         };
-        let response = respond(&request, &Fixture::new(), &job);
+        let response = respond(
+            &request,
+            &Fixture::new(),
+            &job,
+            &std::sync::Arc::new(crate::plex::Handle::new()),
+        );
         assert_eq!(response.status, 409);
         assert!(
             String::from_utf8_lossy(&response.body).contains("GET /api/provision"),

@@ -48,6 +48,7 @@ pub mod esp;
 pub mod health;
 pub mod http;
 pub mod net;
+pub mod plex;
 pub mod provision;
 pub mod status;
 
