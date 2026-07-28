@@ -49,6 +49,7 @@
 
 pub mod bundle;
 pub mod plan;
+pub mod write;
 
 pub use bundle::{Artifact, Metadata, MetadataError};
 pub use plan::{Decision, Refusal, plan};

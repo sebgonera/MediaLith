@@ -436,7 +436,10 @@ next_section_offset() {
 }
 
 build_uki() {
-    msg "assembling Unified Kernel Image"
+    local slot="${1:-a}"
+    local out="${2:-${WORK}/plexos.efi}"
+
+    msg "assembling Unified Kernel Image for slot ${slot}"
 
     # The root hash rides on the command line, inside the signed artifact. This single
     # line is what makes the UKI signature transitively cover every byte of /usr
@@ -488,8 +491,8 @@ build_uki() {
     # No connector name, so it applies to whichever output exists. A mode the panel
     # cannot do is not fatal -- DRM falls back to the preferred mode, which is today's
     # behaviour, so the worst case is no improvement rather than no picture.
-    printf 'plexos.slot=a plexos.roothash=%s i915.enable_guc=2 earlycon=efifb console=ttyS0,115200 console=tty0 video=1280x720 fbcon=font:TER16x32\n' \
-        "${ROOT_HASH}" > "${WORK}/cmdline"
+    printf 'plexos.slot=%s plexos.roothash=%s i915.enable_guc=2 earlycon=efifb console=ttyS0,115200 console=tty0 video=1280x720 fbcon=font:TER16x32\n' \
+        "${slot}" "${ROOT_HASH}" > "${WORK}/cmdline"
 
     if [ -f "${TARGET_DIR}/usr/lib/os-release" ]; then
         cp "${TARGET_DIR}/usr/lib/os-release" "${WORK}/os-release"
@@ -518,13 +521,13 @@ build_uki() {
         offset=$(( (offset + size + 4095) / 4096 * 4096 ))
     done
 
-    objcopy "${args[@]}" "${stub}" "${WORK}/plexos.efi"
+    objcopy "${args[@]}" "${stub}" "${out}"
 
     # Verify the sections actually landed. objcopy exits 0 when asked to add a section
     # to a PE file with no room reserved for it, and the result is a binary that the
     # firmware loads and the stub then cannot find its kernel in.
     for section in .osrel .cmdline .linux .initrd; do
-        objdump -h "${WORK}/plexos.efi" | grep -q " ${section}\$\| ${section} " || die \
+        objdump -h "${out}" | grep -q " ${section}\$\| ${section} " || die \
             "section ${section} is missing from the assembled UKI" \
             "the stub may lack reserved section headers; check -Defi-stub-extra-sections in package/plexos-systemd-boot"
     done
@@ -535,14 +538,14 @@ build_uki() {
             "apt install sbsigntool, or unset PLEXOS_SB_KEY to build an unsigned image"
         msg "  signing UKI"
         sbsign --key "${PLEXOS_SB_KEY}" --cert "${PLEXOS_SB_CERT}" \
-               --output "${WORK}/plexos-signed.efi" "${WORK}/plexos.efi"
-        mv "${WORK}/plexos-signed.efi" "${WORK}/plexos.efi"
+               --output "${out}.signed" "${out}"
+        mv "${out}.signed" "${out}"
     else
         msg "  UNSIGNED (set PLEXOS_SB_KEY and PLEXOS_SB_CERT to sign)"
         msg "  Secure Boot must be turned off in firmware to boot this image"
     fi
 
-    msg "  UKI is $(( $(stat -c %s "${WORK}/plexos.efi") / 1024 / 1024 )) MiB"
+    msg "  UKI for slot ${slot} is $(( $(stat -c %s "${out}") / 1024 / 1024 )) MiB"
 }
 
 # --------------------------------------------------------------------------
@@ -679,6 +682,75 @@ write_partition() {
 
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# 7. The update bundle
+# --------------------------------------------------------------------------
+# Everything an already-installed appliance needs to replace its /usr over the network,
+# so that a new build stops meaning writing a USB stick. plexos-update consumes this.
+#
+# Two UKIs, differing only in `plexos.slot=`. The appliance writes whichever slot it is
+# not running from and installs the matching entry; it cannot build one itself, because
+# that needs objcopy and objcopy is not in the image.
+#
+# update.json is deliberately shaped like ADR-0006's manifest and carries none of its
+# guarantees. Nothing signs it. When the signed manifest exists it replaces this file and
+# the layers below it do not change.
+build_bundle() {
+    local bundle="${BINARIES_DIR}/plexos-update"
+    msg "building update bundle"
+
+    rm -rf "${bundle}"
+    mkdir -p "${bundle}"
+
+    cp "${WORK}/usr.erofs" "${bundle}/usr.erofs"
+    cp "${WORK}/usr.hash"  "${bundle}/usr.hash"
+
+    # Slot A's UKI already exists -- it is the one written to the ESP. Slot B's differs
+    # by one word on the kernel command line and is built here rather than patched,
+    # because patching a PE section in place is how a UKI stops matching its own hashes.
+    cp "${WORK}/plexos.efi" "${bundle}/plexos-${PLEXOS_VERSION}-a.efi"
+    build_uki b "${bundle}/plexos-${PLEXOS_VERSION}-b.efi"
+
+    local usr_size verity_size uki_a_size uki_b_size
+    local usr_sum verity_sum uki_a_sum uki_b_sum
+    usr_size=$(stat -c %s "${bundle}/usr.erofs")
+    verity_size=$(stat -c %s "${bundle}/usr.hash")
+    uki_a_size=$(stat -c %s "${bundle}/plexos-${PLEXOS_VERSION}-a.efi")
+    uki_b_size=$(stat -c %s "${bundle}/plexos-${PLEXOS_VERSION}-b.efi")
+    usr_sum=$(sha256sum "${bundle}/usr.erofs" | cut -d' ' -f1)
+    verity_sum=$(sha256sum "${bundle}/usr.hash" | cut -d' ' -f1)
+    uki_a_sum=$(sha256sum "${bundle}/plexos-${PLEXOS_VERSION}-a.efi" | cut -d' ' -f1)
+    uki_b_sum=$(sha256sum "${bundle}/plexos-${PLEXOS_VERSION}-b.efi" | cut -d' ' -f1)
+
+    cat > "${bundle}/update.json" <<JSON
+{
+  "bundle_version": 1,
+  "version": "${PLEXOS_VERSION}",
+  "root_hash": "${ROOT_HASH}",
+  "usr":    { "name": "usr.erofs", "size": ${usr_size}, "sha256": "${usr_sum}" },
+  "verity": { "name": "usr.hash", "size": ${verity_size}, "sha256": "${verity_sum}" },
+  "uki_a":  { "name": "plexos-${PLEXOS_VERSION}-a.efi", "size": ${uki_a_size}, "sha256": "${uki_a_sum}" },
+  "uki_b":  { "name": "plexos-${PLEXOS_VERSION}-b.efi", "size": ${uki_b_size}, "sha256": "${uki_b_sum}" }
+}
+JSON
+
+    # The slot each UKI actually boots, checked rather than assumed. A bundle whose two
+    # entries carry the same plexos.slot= would write slot B and then boot slot A from
+    # it, which dm-verity refuses with a root hash mismatch -- a failure that looks like
+    # a corrupt download and is not.
+    local found
+    for slot in a b; do
+        found=$(strings "${bundle}/plexos-${PLEXOS_VERSION}-${slot}.efi" \
+                | grep -o 'plexos\.slot=[ab]' | head -1)
+        [ "${found}" = "plexos.slot=${slot}" ] || die \
+            "the UKI for slot ${slot} carries ${found:-no plexos.slot at all}" \
+            "build_uki was called with the wrong slot, or the command line is not in .cmdline"
+    done
+
+    msg "  bundle at ${bundle} ($(( (usr_size + verity_size + uki_a_size + uki_b_size) / 1024 / 1024 )) MiB)"
+    msg "  version ${PLEXOS_VERSION}, root hash ${ROOT_HASH}"
+}
+
 main() {
     preflight
     rm -rf "${WORK}"
@@ -696,6 +768,7 @@ main() {
     build_uki
     build_esp
     build_disk
+    build_bundle
 
     msg "done"
     msg "  write it with: sudo dd if=${IMAGE} of=/dev/sdX bs=4M status=progress conv=fsync"

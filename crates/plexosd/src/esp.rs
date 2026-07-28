@@ -83,6 +83,48 @@ pub fn mark_good(path: &Path, entry: &BootEntry) -> io::Result<Option<PathBuf>> 
     Ok(Some(target))
 }
 
+/// Installs a boot entry for a freshly written slot, on trial.
+///
+/// The name carries the try counter, which is the whole of ADR-0005: `+3` means three
+/// attempts remain and none has been used. `systemd-boot` decrements it by renaming
+/// before handing off, and the health gate drops the suffix once the boot proves itself.
+///
+/// # What this deliberately does not do
+///
+/// **It does not remove the entry that is currently good.** That entry is the rollback
+/// target: if the new slot fails three times its counter reaches zero, `systemd-boot`
+/// sorts it last, and the old entry is chosen again. Tidying it away would turn a
+/// recoverable bad update into an unbootable machine, which is the one failure this
+/// whole mechanism exists to prevent.
+///
+/// The new entry wins because it sorts higher, not because the old one was deleted.
+/// `plexos_update::plan` refuses a bundle whose version does not sort above the running
+/// one for exactly that reason.
+///
+/// # Errors
+/// If the entry directory cannot be created or the file cannot be written. A partial
+/// write is left behind rather than cleaned up: it carries a `+3` counter and a version
+/// that has never booted, so the bootloader will try it, fail, and fall back — whereas a
+/// cleanup path that itself failed halfway is a state nobody has reasoned about.
+pub fn install_entry(esp: &Path, source: &Path, version: &str) -> io::Result<PathBuf> {
+    let directory = esp.join(ENTRY_DIR);
+    fs::create_dir_all(&directory)?;
+
+    let name = format!("plexos-{version}+{INITIAL_TRIES}.efi");
+    let destination = directory.join(&name);
+    fs::copy(source, &destination)?;
+
+    // The ESP is FAT on removable-ish media and this file decides what boots next.
+    // Returning before it is on the medium would let a power cut between here and the
+    // reboot leave a truncated kernel with a counter that says "try me".
+    fs::File::open(&destination)?.sync_all()?;
+
+    Ok(destination)
+}
+
+/// Tries a new entry is given before the bootloader gives up on it (ADR-0005).
+pub const INITIAL_TRIES: u32 = 3;
+
 /// Mounts the ESP, runs `action`, and unmounts it again.
 ///
 /// The unmount happens whether or not `action` succeeded: an ESP left mounted
@@ -127,6 +169,43 @@ pub fn with_esp_mounted<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_entry_is_installed_on_trial_and_the_old_one_is_left_alone() {
+        // The old entry is the rollback target, not litter. Removing it would turn a
+        // recoverable bad update into an unbootable machine, which is the single failure
+        // this whole mechanism exists to prevent.
+        let esp = std::env::temp_dir().join("plexos-esp-install");
+        let _ = std::fs::remove_dir_all(&esp);
+        std::fs::create_dir_all(esp.join(ENTRY_DIR)).unwrap();
+        let good = esp.join(ENTRY_DIR).join("plexos-0.1.0.efi");
+        std::fs::write(&good, b"the entry that works").unwrap();
+
+        let source = esp.join("new.efi");
+        std::fs::write(&source, b"the new kernel").unwrap();
+
+        let installed = install_entry(&esp, &source, "0.1.0.2").unwrap();
+        assert_eq!(
+            installed.file_name().unwrap(),
+            std::ffi::OsStr::new("plexos-0.1.0.2+3.efi"),
+            "the counter is the whole of ADR-0005"
+        );
+        assert!(good.exists(), "the rollback target must survive");
+        assert_eq!(std::fs::read(&installed).unwrap(), b"the new kernel");
+
+        let _ = std::fs::remove_dir_all(&esp);
+    }
+
+    #[test]
+    fn the_installed_entry_parses_as_a_boot_entry_with_its_tries_intact() {
+        // install_entry writes the name and bootcounter reads it. If they disagreed, the
+        // gate would never find the entry to mark good, and a perfectly healthy slot
+        // would roll back.
+        let name = format!("plexos-0.1.0.2+{INITIAL_TRIES}.efi");
+        let entry = BootEntry::parse(&name).expect("the name this module writes must parse");
+        assert_eq!(entry.tries_left, Some(INITIAL_TRIES));
+        assert!(entry.is_on_trial());
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("plexosd-esp-{name}"));
