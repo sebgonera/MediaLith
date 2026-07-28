@@ -52,6 +52,7 @@ pub mod net;
 pub mod plex;
 pub mod power;
 pub mod provision;
+pub mod shares;
 pub mod status;
 pub mod update;
 

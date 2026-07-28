@@ -178,6 +178,14 @@
   /* The Plex section: the one part of this page that does something. */
   .plex { margin: 1.5rem 0; }
   .plex .row { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-top: .8rem; }
+  .plex select {
+    padding: .55rem .7rem;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--ink);
+    font: inherit;
+  }
   .plex input[type=password], .plex input[type=text] {
     flex: 1 1 22rem;
     min-width: 0;
@@ -276,6 +284,11 @@
     <p class="empty">Loading…</p>
   </main>
 
+  <section class="card plex" id="shares" aria-live="polite">
+    <h3>Media shares</h3>
+    <p class="empty">Loading…</p>
+  </section>
+
   <section class="card plex" id="update" aria-live="polite">
     <h3>System update</h3>
     <p class="empty">Loading…</p>
@@ -320,6 +333,7 @@ const TOKEN_KEY = "plexos-device-token";
 // and not a secret -- it is an address on the local network.
 const SOURCE_KEY = "plexos-update-source";
 const UPDATE_ENDPOINT = "/api/update";
+const SHARES_ENDPOINT = "/api/shares";
 
 function token() { return sessionStorage.getItem(TOKEN_KEY) || ""; }
 function rememberToken(value) { sessionStorage.setItem(TOKEN_KEY, value); }
@@ -619,6 +633,115 @@ function sectionError(id, message) {
 function plexError(message) { sectionError("plex", message); }
 
 let plexTimer = null;
+let sharesTimer = null;
+let lastSharesRendered = null;
+
+/** The media-shares section. */
+function renderShares(list) {
+  const signature = JSON.stringify(list);
+  if (signature === lastSharesRendered) return;
+  lastSharesRendered = signature;
+
+  const active = document.activeElement;
+  const typingIn = active && active.closest && active.closest("#shares") ? active.id : null;
+  const caret = typingIn ? active.selectionStart : 0;
+
+  const rows = (list || []).map(s => `
+    <tr>
+      <td class="mono">${esc(s.name)}</td>
+      <td>${esc(s.kind)}</td>
+      <td class="mono">${esc(s.source)}</td>
+      <td>${s.mounted ? "mounted" : "not mounted"}</td>
+      <td><button class="share-drop" data-name="${esc(s.name)}">Remove</button></td>
+    </tr>`).join("");
+
+  document.getElementById("shares").innerHTML = `
+    <h3>Media shares</h3>
+    <p class="hint">Plex needs somewhere to find your films. A share is mounted
+       <strong>read-only</strong> under /var/media and cannot be executed from — nothing
+       on a library should ever run here. Plex is confined by a policy built when it
+       starts, so after adding a share it has to be restarted before it can see it.</p>
+    ${rows ? `<div class="scroll"><table>
+        <thead><tr><th>Name</th><th>Kind</th><th>Source</th><th>State</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table></div>` : `<p class="empty">No shares yet.</p>`}
+    <div class="row">
+      <select id="share-kind">
+        <option value="nfs">NFS</option>
+        <option value="smb">SMB</option>
+      </select>
+      <input type="text" id="share-name" placeholder="name, e.g. nas" autocomplete="off">
+    </div>
+    <div class="row">
+      <input type="text" id="share-source" placeholder="192.168.2.165:/mnt/NAS  or  //192.168.2.165/media" autocomplete="off">
+    </div>
+    <div class="row">
+      <input type="text" id="share-user" placeholder="SMB username (leave empty for NFS)" autocomplete="off">
+      <input type="password" id="share-pass" placeholder="SMB password" autocomplete="off">
+    </div>
+    <div class="row"><button id="share-add">Add and mount</button></div>`;
+
+  document.getElementById("share-add").addEventListener("click", addShare);
+  document.querySelectorAll(".share-drop").forEach(b =>
+    b.addEventListener("click", () => shareAction("remove", b.dataset.name)));
+
+  if (typingIn) {
+    const field = document.getElementById(typingIn);
+    if (field) { field.focus(); field.setSelectionRange(caret, caret); }
+  }
+}
+
+async function shareRequest(body) {
+  const value = token();
+  if (!value) {
+    sectionError("shares", "The device token is needed to mount or remove a share. Enter it in the Device token box at the top of this page.");
+    return null;
+  }
+  try {
+    const response = await fetch(SHARES_ENDPOINT, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const text = await response.text();
+    if (!response.ok) { sectionError("shares", text); return null; }
+    lastSharesRendered = null;
+    sharesTick();
+    return text;
+  } catch (error) {
+    sectionError("shares", error.message || String(error));
+    return null;
+  }
+}
+
+function addShare() {
+  const body = {
+    action: "add",
+    kind: document.getElementById("share-kind").value,
+    name: (document.getElementById("share-name").value || "").trim(),
+    source: (document.getElementById("share-source").value || "").trim(),
+  };
+  const user = (document.getElementById("share-user").value || "").trim();
+  const pass = document.getElementById("share-pass").value || "";
+  if (user) body.username = user;
+  if (pass) body.password = pass;
+  shareRequest(body);
+}
+
+function shareAction(action, name) {
+  if (action === "remove" && !confirm("Remove " + name + "?")) return;
+  shareRequest({ action, name });
+}
+
+async function sharesTick() {
+  try {
+    const response = await fetch(SHARES_ENDPOINT, { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    renderShares(await response.json());
+  } catch (error) { /* the status card already says the daemon is unreachable */ }
+  clearTimeout(sharesTimer);
+  sharesTimer = setTimeout(sharesTick, PLEX_IDLE_MS);
+}
 let updateTimer = null;
 let lastUpdateRendered = null;
 
@@ -824,6 +947,7 @@ tick();
 setInterval(tick, REFRESH_MS);
 plexTick();
 updateTick();
+sharesTick();
 </script>
 </body>
 </html>

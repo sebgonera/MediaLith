@@ -103,6 +103,15 @@ pub fn respond(
             Err(error) => Response::text(500, format!("could not serialise progress: {error}\n")),
         },
 
+        // Network shares: the library lives on a NAS, and without one there is nothing
+        // to play.
+        ("GET" | "HEAD", "/api/shares") => match serde_json::to_string(&crate::shares::states()) {
+            Ok(json) => Response::json(json),
+            Err(error) => Response::text(500, format!("could not serialise shares: {error}\n")),
+        },
+
+        ("POST", "/api/shares") => crate::shares::handle(&request.body),
+
         // Stopping the machine. The response goes out before anything happens, because
         // reboot(2) does not return -- see crate::power for why that ordering matters.
         ("POST", "/api/power") => match crate::power::action_in(&request.body) {
@@ -185,8 +194,8 @@ fn respond_read_only(request: &Request, env: &impl Environment, path: &str) -> R
             404,
             format!(
                 "no such page: {other}\n\nThis console serves / , /api/status, /api/gpu, \
-                 /healthz, /api/provision, /api/update and /api/power. The three that \
-                 change anything take POST and the device token.\n"
+                 /healthz, /api/provision, /api/update, /api/shares and /api/power. \
+                 Everything that changes something takes POST and the device token.\n"
             ),
         ),
     }
@@ -358,6 +367,11 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     let plex = std::sync::Arc::new(crate::plex::Handle::new());
     let update = std::sync::Arc::new(crate::update::Job::new());
 
+    // Before Plex, not after. The Landlock policy is built when Plex starts, from the
+    // paths that exist then; mounting a library afterwards may leave it unreachable, and
+    // that is a question this project has already been caught guessing at.
+    crate::shares::mount_all(log);
+
     // Before serving, so a machine that was provisioned on an earlier boot is running
     // Plex by the time anyone loads the page. On an unprovisioned one this says so and
     // costs nothing.
@@ -522,6 +536,22 @@ mod tests {
             );
             assert_eq!(response.status, 400, "{body:?}");
         }
+    }
+
+    #[test]
+    fn the_page_can_add_a_media_share() {
+        // Without one there is nothing to play, and the appliance's own /var is far too
+        // small to be anybody's library.
+        assert!(PAGE.contains("\"/api/shares\""));
+        assert!(PAGE.contains("Add and mount"));
+        assert!(
+            PAGE.contains("read-only"),
+            "the page must say a library is never written to"
+        );
+        assert!(
+            PAGE.contains("has to be restarted before it can see it"),
+            "and must say why adding a share is not enough on its own"
+        );
     }
 
     #[test]

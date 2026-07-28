@@ -60,6 +60,12 @@ const MEMINFO: &str = "/proc/meminfo";
 /// `cgroup::apply` says which bound is missing, and running Plex unbounded beats not
 /// running it.
 pub fn prepare(log: &mut dyn FnMut(&str)) -> io::Result<PathBuf> {
+    // Created even when empty. Landlock's policy is built from the paths that exist when
+    // Plex starts, and become_plex only grants the media root if it is there -- so an
+    // appliance whose /var/media appeared later would have a Plex that cannot see its own
+    // library, with nothing saying why.
+    std::fs::create_dir_all(paths::MEDIA)?;
+
     for directory in [paths::PLEX_DATA, paths::PLEX_TRANSCODE_DIR] {
         let path = Path::new(directory);
         std::fs::create_dir_all(path)?;

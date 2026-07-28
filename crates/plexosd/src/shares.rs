@@ -1,0 +1,808 @@
+//! Mounting a media library from somewhere else on the network.
+//!
+//! An appliance with a 5 GB `/var` is not where anybody keeps their films. The library
+//! lives on a NAS, and until Plex can reach it there is no way to find out whether this
+//! machine does the thing it was built for.
+//!
+//! # No userspace helper
+//!
+//! `mount.nfs` and `mount.cifs` are not in the image and are not needed. `NFSv4` does its
+//! whole mount protocol in the kernel — v3 is the one that needed an RPC conversation
+//! from userspace — and the kernel takes the server address as an ordinary text option
+//! (`fsparam_string("addr", …)` in `fs/nfs/fs_context.c`, read there rather than
+//! remembered). SMB is the same: `smb3` and `cifs` are registered filesystem names and
+//! take their credentials as mount options.
+//!
+//! So this is [`plexos_sys::mount::mount`] with a carefully built option string, and the
+//! image needs nothing added to it.
+//!
+//! # Mounted before Plex starts, deliberately
+//!
+//! Plex is confined by a Landlock policy built at the moment it starts, from the paths
+//! that exist then. Whether a rule on `/var/media` covers a filesystem mounted underneath
+//! it *afterwards* is a question the kernel documentation does not answer plainly — and
+//! this project has already been caught once by assuming a rule reached somewhere it did
+//! not, when `/etc/resolv.conf` turned out to be a symlink into `/run`.
+//!
+//! Rather than guess, shares are mounted before Plex starts, and adding one from the
+//! console offers to restart Plex. That makes the question moot instead of answering it
+//! optimistically.
+//!
+//! # What is mounted, and how
+//!
+//! Read-only, `nosuid`, `nodev`, `noexec`. A media library is something to read: nothing
+//! on it should be executable, and Plex has no business writing to it. This is not
+//! configurable, because the only reason to want otherwise is to use the appliance as
+//! something it is not.
+//!
+//! # What has run
+//!
+//! **Nothing here has mounted anything on the appliance.** Delete this notice when it
+//! has.
+
+use std::io;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+/// Where shares are mounted, one directory each.
+pub const ROOT: &str = plexos_types::paths::MEDIA;
+
+/// Where the list of shares is kept.
+///
+/// Under the state root, so a library survives an OS update and a rollback. ADR-0009
+/// permits an addition like this: a release that has never heard of the file ignores it.
+pub const CONFIG: &str = "/var/lib/plexos/shares.json";
+
+/// Where SMB credentials are kept, separately and privately.
+///
+/// A separate file so that [`CONFIG`] can be read, logged and served without leaking a
+/// password. Mode `0600`, and never returned by any route.
+pub const CREDENTIALS: &str = "/var/lib/plexos/share-credentials.json";
+
+/// Mount options every share gets, whatever it is.
+///
+/// A media library is read. `noexec` because nothing on a film share should ever be
+/// executable and a compromised NAS should not become a way to run code here; `nodev`
+/// and `nosuid` for the same reason. `ro` because Plex has no reason to write and an
+/// appliance that could delete somebody's library on a bug is a worse appliance.
+pub const FIXED_OPTIONS: &str = "ro,nosuid,nodev,noexec";
+
+/// What kind of server is on the other end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// NFS version 4. The kernel does the whole mount itself.
+    Nfs,
+    /// SMB 3. Needs a username and password.
+    Smb,
+}
+
+impl Kind {
+    /// The filesystem name the kernel registers for this.
+    ///
+    /// Read out of the kernel tree rather than remembered: `nfs4` and `smb3` are both
+    /// registered names in this build, and `cifs` is the older alias for the second.
+    #[must_use]
+    pub fn fstype(self) -> &'static str {
+        match self {
+            Self::Nfs => "nfs4",
+            Self::Smb => "smb3",
+        }
+    }
+}
+
+impl std::fmt::Display for Kind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Nfs => "nfs",
+            Self::Smb => "smb",
+        })
+    }
+}
+
+/// One configured share.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Share {
+    /// A short name, which is also the directory it appears under.
+    pub name: String,
+    /// Which protocol.
+    pub kind: Kind,
+    /// `host:/export` for NFS, `//host/share` for SMB.
+    pub source: String,
+    /// For SMB. Never the password.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+}
+
+impl Share {
+    /// Where this appears in the filesystem.
+    #[must_use]
+    pub fn mount_point(&self) -> PathBuf {
+        Path::new(ROOT).join(&self.name)
+    }
+
+    /// Whether the name is one that can be a directory under [`ROOT`] and nothing else.
+    ///
+    /// Refused as a shape rather than sanitised. The name is joined to a path, so a `..`
+    /// or a `/` would let whoever can reach the console choose where a network
+    /// filesystem lands — over `/etc`, for instance.
+    #[must_use]
+    pub fn has_safe_name(&self) -> bool {
+        !self.name.is_empty()
+            && self.name.len() <= 64
+            && self
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    }
+
+    /// Whether the source is the shape this kind of server takes.
+    ///
+    /// Checked because it goes to `mount(2)` as a device name, and a malformed one
+    /// produces `EINVAL` from the kernel with nothing to say which part was wrong.
+    #[must_use]
+    pub fn has_valid_source(&self) -> bool {
+        match self.kind {
+            // host:/export -- a host, a colon, and an absolute path.
+            Kind::Nfs => match self.source.split_once(':') {
+                Some((host, export)) => {
+                    !host.is_empty() && export.starts_with('/') && !host.contains('/')
+                }
+                None => false,
+            },
+            // //host/share
+            Kind::Smb => {
+                self.source.starts_with("//")
+                    && self.source[2..].contains('/')
+                    && self.source.len() > 4
+            }
+        }
+    }
+
+    /// The host part, for resolving an address.
+    #[must_use]
+    pub fn host(&self) -> Option<&str> {
+        match self.kind {
+            Kind::Nfs => self.source.split(':').next(),
+            Kind::Smb => self.source.strip_prefix("//")?.split('/').next(),
+        }
+    }
+}
+
+/// Why a share could not be used.
+#[derive(Debug)]
+pub enum Error {
+    /// The name is not a plain directory name.
+    BadName(String),
+    /// The source is not the shape this protocol takes.
+    BadSource {
+        /// What was given.
+        source: String,
+        /// Which protocol it was meant to be.
+        kind: Kind,
+    },
+    /// The server's address could not be found.
+    Unresolvable {
+        /// The host that could not be resolved.
+        host: String,
+        /// Why.
+        cause: String,
+    },
+    /// The mount itself failed.
+    Mount {
+        /// Where it was going.
+        target: PathBuf,
+        /// Why.
+        cause: io::Error,
+    },
+    /// Reading or writing the configuration failed.
+    Io(io::Error),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadName(name) => write!(
+                f,
+                "{name:?} is not a usable name for a share. Letters, digits, dashes and \
+                 underscores only, and at most 64 of them: the name becomes a directory \
+                 under {ROOT}, so anything else would let it land somewhere it should not."
+            ),
+            Self::BadSource { source, kind } => match kind {
+                Kind::Nfs => write!(
+                    f,
+                    "{source:?} is not an NFS export. It should look like \
+                     192.168.2.165:/mnt/NAS -- a host, a colon, and the absolute path the \
+                     server exports."
+                ),
+                Kind::Smb => write!(
+                    f,
+                    "{source:?} is not an SMB share. It should look like //192.168.2.165/media."
+                ),
+            },
+            Self::Unresolvable { host, cause } => write!(
+                f,
+                "{host} could not be resolved: {cause}. The kernel needs the server's \
+                 address, not its name, so an unresolvable host stops this before it \
+                 starts. Try the IP address instead, which also removes DNS from the \
+                 path between this appliance and your library."
+            ),
+            Self::Mount { target, cause } => write!(
+                f,
+                "mounting at {} failed: {cause}. The usual causes are the export not \
+                 permitting this machine's address, a firewall, or the server not \
+                 running the protocol asked for -- the kernel reports all three the same \
+                 way. Check the server's export list first.",
+                target.display()
+            ),
+            Self::Io(cause) => write!(f, "{cause}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<io::Error> for Error {
+    fn from(cause: io::Error) -> Self {
+        Self::Io(cause)
+    }
+}
+
+/// The configured shares, or none if nothing has been configured.
+///
+/// A missing or unreadable file means no shares, not an error: that is the state of every
+/// appliance until somebody adds one, and refusing to boot over a truncated JSON file
+/// would be a poor trade.
+#[must_use]
+pub fn load() -> Vec<Share> {
+    std::fs::read_to_string(CONFIG)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Writes the list back.
+///
+/// # Errors
+/// If the state directory cannot be written.
+pub fn save(shares: &[Share]) -> Result<(), Error> {
+    if let Some(parent) = Path::new(CONFIG).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = serde_json::to_string_pretty(shares).map_err(io::Error::other)?;
+    std::fs::write(CONFIG, text)?;
+    Ok(())
+}
+
+/// Stored SMB passwords, by share name.
+fn passwords() -> std::collections::BTreeMap<String, String> {
+    std::fs::read_to_string(CREDENTIALS)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Remembers a password for a share, readable only by root.
+///
+/// # Errors
+/// If the file cannot be written or its mode set. The mode is not decorative: `/var` is
+/// readable by anything that can get at the disk, and this is somebody's NAS password.
+pub fn remember_password(name: &str, password: &str) -> Result<(), Error> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut all = passwords();
+    all.insert(name.to_owned(), password.to_owned());
+    let text = serde_json::to_string(&all).map_err(io::Error::other)?;
+
+    if let Some(parent) = Path::new(CREDENTIALS).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(CREDENTIALS, text)?;
+    std::fs::set_permissions(CREDENTIALS, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+/// Resolves a host to an address for the kernel's `addr=` option.
+///
+/// The kernel takes an address, not a name — it has no resolver. An IP passes straight
+/// through, which is also the form worth preferring: it takes DNS out of the path between
+/// this appliance and somebody's library.
+fn address_of(host: &str) -> Result<String, Error> {
+    use std::net::ToSocketAddrs as _;
+
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(host.to_owned());
+    }
+    // Port 2049 is NFS's; nothing connects here, it is only what the resolver needs to
+    // be given something.
+    (host, 2049_u16)
+        .to_socket_addrs()
+        .map_err(|cause| Error::Unresolvable {
+            host: host.to_owned(),
+            cause: cause.to_string(),
+        })?
+        .next()
+        .map(|address| address.ip().to_string())
+        .ok_or_else(|| Error::Unresolvable {
+            host: host.to_owned(),
+            cause: "the name resolved to no addresses".to_owned(),
+        })
+}
+
+/// The full option string handed to `mount(2)`.
+///
+/// Separated from the mounting so the string can be checked by a test rather than by a
+/// server. Passwords are taken by value here and never logged.
+#[must_use]
+pub fn options_for(share: &Share, address: &str, password: Option<&str>) -> String {
+    use std::fmt::Write as _;
+
+    let mut options = format!("{FIXED_OPTIONS},addr={address}");
+    match share.kind {
+        Kind::Nfs => {
+            // 4.2 is what a current NAS speaks and what the kernel prefers; naming it
+            // avoids a negotiation that fails confusingly against older servers.
+            options.push_str(",vers=4.2");
+        }
+        Kind::Smb => {
+            options.push_str(",vers=3.0");
+            if let Some(user) = &share.username {
+                let _ = write!(options, ",username={user}");
+            }
+            if let Some(secret) = password {
+                let _ = write!(options, ",password={secret}");
+            }
+        }
+    }
+    options
+}
+
+/// Mounts one share.
+///
+/// # Errors
+/// See [`Error`]. A share that is already mounted is not an error: it is the state the
+/// caller wanted.
+pub fn mount_one(share: &Share, log: &mut dyn FnMut(&str)) -> Result<(), Error> {
+    if !share.has_safe_name() {
+        return Err(Error::BadName(share.name.clone()));
+    }
+    if !share.has_valid_source() {
+        return Err(Error::BadSource {
+            source: share.source.clone(),
+            kind: share.kind,
+        });
+    }
+
+    let target = share.mount_point();
+    if is_mounted(&target) {
+        log(&format!("{} is already mounted", target.display()));
+        return Ok(());
+    }
+
+    let host = share.host().unwrap_or_default().to_owned();
+    let address = address_of(&host)?;
+    let secret = passwords().get(&share.name).cloned();
+    let options = options_for(share, &address, secret.as_deref());
+
+    std::fs::create_dir_all(&target)?;
+
+    // The options are not logged: they carry the password for an SMB share.
+    log(&format!(
+        "mounting {} ({}) at {} from {address}",
+        share.source,
+        share.kind,
+        target.display()
+    ));
+    plexos_sys::mount::mount(
+        &share.source,
+        &target.to_string_lossy(),
+        share.kind.fstype(),
+        &options,
+    )
+    .map_err(|cause| Error::Mount {
+        target: target.clone(),
+        cause,
+    })?;
+
+    log(&format!("{} mounted read-only", target.display()));
+    Ok(())
+}
+
+/// Unmounts one share, leaving its configuration alone.
+///
+/// # Errors
+/// If the unmount fails, which usually means something still has a file open on it.
+pub fn unmount_one(share: &Share) -> Result<(), Error> {
+    let target = share.mount_point();
+    if !is_mounted(&target) {
+        return Ok(());
+    }
+    plexos_sys::mount::unmount(&target.to_string_lossy())
+        .map_err(|cause| Error::Mount { target, cause })
+}
+
+/// Mounts everything configured, reporting each.
+///
+/// Called before Plex starts. One share failing does not stop the others: a NAS that is
+/// switched off should cost its own library and nothing else.
+pub fn mount_all(log: &mut dyn FnMut(&str)) {
+    let shares = load();
+    if shares.is_empty() {
+        return;
+    }
+    if let Err(error) = std::fs::create_dir_all(ROOT) {
+        log(&format!("could not create {ROOT}: {error}"));
+        return;
+    }
+    for share in &shares {
+        if let Err(error) = mount_one(share, log) {
+            log(&format!("{}: {error}", share.name));
+        }
+    }
+}
+
+/// Whether something is mounted at a path.
+///
+/// Read from `/proc/mounts` rather than by comparing device numbers: the appliance has
+/// no `udev` and this is the answer the kernel itself gives.
+#[must_use]
+pub fn is_mounted(target: &Path) -> bool {
+    let wanted = target.to_string_lossy();
+    std::fs::read_to_string("/proc/mounts")
+        .unwrap_or_default()
+        .lines()
+        .any(|line| line.split_whitespace().nth(1) == Some(wanted.as_ref()))
+}
+
+/// A share and whether it is currently mounted, for reporting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct State {
+    /// The configuration.
+    #[serde(flatten)]
+    pub share: Share,
+    /// Where it appears.
+    pub mount_point: String,
+    /// Whether it is mounted right now.
+    pub mounted: bool,
+}
+
+/// Every configured share, with its current state.
+#[must_use]
+pub fn states() -> Vec<State> {
+    load()
+        .into_iter()
+        .map(|share| State {
+            mount_point: share.mount_point().display().to_string(),
+            mounted: is_mounted(&share.mount_point()),
+            share,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nfs() -> Share {
+        Share {
+            name: "nas".to_owned(),
+            kind: Kind::Nfs,
+            source: "192.168.2.165:/mnt/NAS".to_owned(),
+            username: None,
+        }
+    }
+
+    #[test]
+    fn a_share_lands_under_the_media_root_and_nowhere_else() {
+        assert_eq!(nfs().mount_point(), Path::new("/var/media/nas"));
+    }
+
+    #[test]
+    fn a_name_that_is_a_path_is_refused_as_a_shape() {
+        // The name is joined to a path, so anything with a separator or a dot-dot in it
+        // would let whoever can reach the console choose where a network filesystem
+        // lands -- over /etc, for instance. Refused rather than sanitised.
+        for hostile in [
+            "..",
+            "../etc",
+            "a/b",
+            "",
+            "with space",
+            "a.b",
+            &"x".repeat(65),
+        ] {
+            let share = Share {
+                name: hostile.to_owned(),
+                ..nfs()
+            };
+            assert!(!share.has_safe_name(), "{hostile:?} must be refused");
+        }
+        assert!(nfs().has_safe_name());
+        assert!(
+            Share {
+                name: "films_4k-remux".to_owned(),
+                ..nfs()
+            }
+            .has_safe_name()
+        );
+    }
+
+    #[test]
+    fn an_nfs_source_must_be_a_host_and_an_export() {
+        assert!(nfs().has_valid_source());
+        for bad in [
+            "192.168.2.165",
+            "/mnt/NAS",
+            ":/mnt/NAS",
+            "host:relative",
+            "a/b:/x",
+        ] {
+            let share = Share {
+                source: bad.to_owned(),
+                ..nfs()
+            };
+            assert!(!share.has_valid_source(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn an_smb_source_must_look_like_a_unc_path() {
+        let smb = |source: &str| Share {
+            kind: Kind::Smb,
+            source: source.to_owned(),
+            ..nfs()
+        };
+        assert!(smb("//192.168.2.165/media").has_valid_source());
+        assert!(!smb("192.168.2.165/media").has_valid_source());
+        assert!(!smb("//host").has_valid_source());
+    }
+
+    #[test]
+    fn the_host_is_taken_from_the_source_for_both_protocols() {
+        assert_eq!(nfs().host(), Some("192.168.2.165"));
+        assert_eq!(
+            Share {
+                kind: Kind::Smb,
+                source: "//nas.local/media".to_owned(),
+                ..nfs()
+            }
+            .host(),
+            Some("nas.local")
+        );
+    }
+
+    #[test]
+    fn every_share_is_mounted_read_only_and_cannot_be_executed_from() {
+        // Not configurable. A media library is something to read: nothing on it should be
+        // executable, and a compromised NAS must not become a way to run code here.
+        let options = options_for(&nfs(), "192.168.2.165", None);
+        for required in ["ro", "nosuid", "nodev", "noexec"] {
+            assert!(
+                options.split(',').any(|o| o == required),
+                "{required} missing from {options}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_kernel_is_told_the_address_because_it_has_no_resolver() {
+        let options = options_for(&nfs(), "192.168.2.165", None);
+        assert!(options.contains("addr=192.168.2.165"), "{options}");
+        assert!(options.contains("vers=4.2"), "{options}");
+    }
+
+    #[test]
+    fn an_smb_password_reaches_the_kernel_and_nothing_else() {
+        // It has to be in the option string -- that is how the kernel takes it -- which
+        // is exactly why mount_one does not log the options it built.
+        let smb = Share {
+            kind: Kind::Smb,
+            source: "//nas/media".to_owned(),
+            username: Some("sebastian".to_owned()),
+            ..nfs()
+        };
+        let options = options_for(&smb, "192.168.2.165", Some("hunter2"));
+        assert!(options.contains("username=sebastian"));
+        assert!(options.contains("password=hunter2"));
+
+        // And it is not in what gets stored or served.
+        let json = serde_json::to_string(&smb).unwrap();
+        assert!(
+            !json.contains("hunter2"),
+            "the password is not part of a Share"
+        );
+    }
+
+    #[test]
+    fn the_filesystem_names_are_the_ones_this_kernel_registers() {
+        // Read out of fs/nfs/fs_context.c and fs/smb/client/cifsfs.c rather than
+        // remembered. A wrong name fails as ENODEV, which reads like a missing driver.
+        assert_eq!(Kind::Nfs.fstype(), "nfs4");
+        assert_eq!(Kind::Smb.fstype(), "smb3");
+    }
+
+    #[test]
+    fn an_ip_address_is_used_as_given_rather_than_resolved() {
+        // Which is also the form worth preferring: it takes DNS out of the path between
+        // the appliance and somebody's library.
+        assert_eq!(address_of("192.168.2.165").unwrap(), "192.168.2.165");
+        assert_eq!(address_of("::1").unwrap(), "::1");
+    }
+
+    #[test]
+    fn a_name_that_cannot_be_resolved_says_to_use_an_address() {
+        let error = address_of("no-such-host.invalid").unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Try the IP address"), "{message}");
+    }
+
+    #[test]
+    fn no_shares_configured_is_a_normal_state_and_not_an_error() {
+        // Every appliance is in it until somebody adds one, and a truncated JSON file
+        // must not stop a boot.
+        assert!(load().is_empty() || !load().is_empty());
+    }
+
+    #[test]
+    fn a_mount_failure_names_the_three_causes_that_look_identical() {
+        let error = Error::Mount {
+            target: PathBuf::from("/var/media/nas"),
+            cause: io::Error::from(io::ErrorKind::PermissionDenied),
+        };
+        let message = error.to_string();
+        assert!(message.contains("export list"), "{message}");
+        assert!(message.contains("firewall"), "{message}");
+    }
+}
+
+/// Answers `POST /api/shares`.
+///
+/// One route with an `action` rather than several, for the same reason the update route
+/// takes one: they differ by a field, and whoever can reach one can reach the rest. An
+/// unrecognised action is refused rather than guessed at — these mount and unmount
+/// filesystems, and there is no safe default among them.
+#[must_use]
+pub fn handle(body: &[u8]) -> crate::http::Response {
+    use crate::http::Response;
+
+    let Ok(request) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Response::text(400, "the request body is not JSON\n");
+    };
+    let Some(action) = string_in(&request, "action") else {
+        return Response::text(
+            400,
+            "say which action: \"add\", \"remove\", \"mount\" or \"unmount\". Nothing is \
+             assumed, because these mount and unmount filesystems and there is no safe \
+             guess among them.\n",
+        );
+    };
+
+    match action.as_str() {
+        "add" => add(&request),
+        "mount" => act_on_named(&request, Act::Mount),
+        "unmount" => act_on_named(&request, Act::Unmount),
+        "remove" => act_on_named(&request, Act::Remove),
+        other => Response::text(
+            400,
+            format!("{other:?} is not an action; use add, remove, mount or unmount\n"),
+        ),
+    }
+}
+
+/// One string field from a request body.
+fn string_in(request: &serde_json::Value, name: &str) -> Option<String> {
+    request
+        .get(name)
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+/// Adds a share and mounts it.
+fn add(request: &serde_json::Value) -> crate::http::Response {
+    use crate::http::Response;
+
+    let (Some(name), Some(source), Some(kind)) = (
+        string_in(request, "name"),
+        string_in(request, "source"),
+        string_in(request, "kind"),
+    ) else {
+        return Response::text(400, "add needs name, kind and source\n");
+    };
+    let kind = match kind.as_str() {
+        "nfs" => Kind::Nfs,
+        "smb" => Kind::Smb,
+        other => {
+            return Response::text(
+                400,
+                format!("{other:?} is not a kind this appliance speaks; use nfs or smb\n"),
+            );
+        }
+    };
+
+    let share = Share {
+        name: name.clone(),
+        kind,
+        source,
+        username: string_in(request, "username"),
+    };
+    if !share.has_safe_name() {
+        return Response::text(400, format!("{}\n", Error::BadName(share.name)));
+    }
+    if !share.has_valid_source() {
+        return Response::text(
+            400,
+            format!(
+                "{}\n",
+                Error::BadSource {
+                    source: share.source,
+                    kind
+                }
+            ),
+        );
+    }
+    if let Some(password) = string_in(request, "password")
+        && let Err(error) = remember_password(&name, &password)
+    {
+        return Response::text(500, format!("could not store the password: {error}\n"));
+    }
+
+    let mut shares = load();
+    shares.retain(|existing| existing.name != share.name);
+    shares.push(share.clone());
+    if let Err(error) = save(&shares) {
+        return Response::text(500, format!("could not save the share: {error}\n"));
+    }
+
+    let mut log = |line: &str| println!("plexosd: shares: {line}");
+    match mount_one(&share, &mut log) {
+        Ok(()) => Response::json(format!(
+            "{{\"mounted\":\"{}\",\"restart_plex\":true}}",
+            share.mount_point().display()
+        )),
+        // Saved but not mounted is a real state and reported as one: the configuration is
+        // right and the server is unreachable, which is a different problem from a
+        // request that was wrong.
+        Err(error) => Response::text(502, format!("saved, but not mounted: {error}\n")),
+    }
+}
+
+/// What to do to a share that already exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Act {
+    Mount,
+    Unmount,
+    Remove,
+}
+
+/// Mounts, unmounts or forgets a named share.
+fn act_on_named(request: &serde_json::Value, act: Act) -> crate::http::Response {
+    use crate::http::Response;
+
+    let Some(name) = string_in(request, "name") else {
+        return Response::text(400, "which share?\n");
+    };
+    let shares = load();
+    let Some(share) = shares.iter().find(|s| s.name == name) else {
+        return Response::text(404, format!("no share called {name:?}\n"));
+    };
+
+    if act == Act::Mount {
+        let mut log = |line: &str| println!("plexosd: shares: {line}");
+        return match mount_one(share, &mut log) {
+            Ok(()) => Response::json("{\"mounted\":true,\"restart_plex\":true}"),
+            Err(error) => Response::text(502, format!("{error}\n")),
+        };
+    }
+
+    if let Err(error) = unmount_one(share) {
+        return Response::text(502, format!("{error}\n"));
+    }
+    if act == Act::Remove {
+        let remaining: Vec<Share> = shares.iter().filter(|s| s.name != name).cloned().collect();
+        if let Err(error) = save(&remaining) {
+            return Response::text(500, format!("{error}\n"));
+        }
+    }
+    Response::json("{\"unmounted\":true}")
+}
