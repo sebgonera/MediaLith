@@ -238,6 +238,18 @@ must be off.
   own tests, so `memory.max` would simply not have existed in Plex's cgroup: `apply`
   logs that it could not write the limit, and Plex runs unbounded. Two functions with no
   caller is the same shape as the `auth` defect — worth grepping for.
+- **A program in the image is not a program that can do the job, and the build host
+  proves nothing.** Twice in a row, in the same shape. `busybox tar` is present and was
+  built without `FEATURE_SEAMLESS_XZ`, so it cannot read either member of a Debian
+  package — while the build host has GNU tar. The target's `mkfs.erofs` was configured
+  `--disable-lz4`, so it cannot compress an app image — while `post-image.sh` builds
+  `/usr` with `lz4hc` all day through `host-erofs-utils`, which is a *separate build of
+  the same package*. Both failed minutes into provisioning, after an 83 MB download and
+  a signature verification, with a message that appeared to be about Plex's package.
+  `Tools::find` resolves programs up front because reporting a missing one after the
+  download is poor; `execute::check_compressor` now goes further and asks whether the
+  program can do the thing, before anything is fetched. When adding a package for the
+  target, check its sub-options — the default is usually the smallest build.
 - **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error

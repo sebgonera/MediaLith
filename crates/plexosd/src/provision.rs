@@ -495,6 +495,12 @@ pub fn run(job: &Job, apps: &Path, keyring: &Path) -> Result<String, Box<dyn std
         )
     })?;
 
+    // Before the download, not after it. Resolving the programs proves they exist;
+    // this asks whether the one with a build-time option can do the job. Twice now a
+    // tool has been present and incapable, and both times it surfaced minutes in, as an
+    // error that appeared to be about Plex's package.
+    execute::check_compressor(&tools)?;
+
     std::fs::create_dir_all(apps)?;
 
     let catalogue = fetch_text(&curl, CATALOGUE_URL, CATALOGUE_TIMEOUT_SECS)?;

@@ -66,6 +66,52 @@ impl Failure {
     }
 }
 
+/// Checks that the `mkfs.erofs` in this image can produce the compression an app image
+/// uses, before anything is downloaded.
+///
+/// This exists because the same mistake has now been made twice, in the same shape: a
+/// program is present in the image and cannot do the job, while the build host's copy of
+/// it can. `busybox tar` could not read `.xz`; the target's `mkfs.erofs` was configured
+/// `--disable-lz4` while `post-image.sh` built `/usr` with `lz4hc` through
+/// `host-erofs-utils`. Both surfaced minutes into provisioning, after an 83 MB download
+/// and a signature verification, as an error about the payload.
+///
+/// [`Tools::find`](crate::tools::Tools::find) resolves programs up front for the same
+/// reason; this goes one step further and asks whether the program can do the thing.
+/// `--help` lists the compressors the binary was built with, so the check costs one
+/// process and writes nothing.
+///
+/// # Errors
+/// [`Failure`] when the compressor is absent, naming it as an image fault — because that
+/// is what it is, and the alternative message blames a package that has not been fetched
+/// yet.
+pub fn check_compressor(tools: &Tools) -> Result<(), Failure> {
+    let output = Command::new(&tools.mkfs_erofs)
+        .arg("--help")
+        .output()
+        .map_err(|e| Failure::new("asking mkfs.erofs what it supports", e))?;
+
+    // Both streams: erofs-utils writes its usage to stderr, and a version that changed
+    // its mind about that would silently defeat the check.
+    let mut listing = String::from_utf8_lossy(&output.stdout).into_owned();
+    listing.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    if listing.lines().any(|line| line.trim() == EROFS_COMPRESSION) {
+        return Ok(());
+    }
+
+    Err(Failure {
+        step: "checking what mkfs.erofs can compress".to_owned(),
+        cause: format!(
+            "{} was built without the {EROFS_COMPRESSION} compressor, so no app image \
+             can be produced. This is an image fault and nothing to do with Plex: set \
+             BR2_PACKAGE_EROFS_UTILS_LZ4=y and rebuild. The host's mkfs.erofs is a \
+             separate build and having it work there proves nothing about here.",
+            tools.mkfs_erofs.display()
+        ),
+    })
+}
+
 /// Runs one step.
 ///
 /// # Errors
@@ -376,6 +422,60 @@ mod tests {
         let defconfig = include_str!("../../../buildroot/configs/plexos_x86_64_defconfig");
         assert!(defconfig.contains("BR2_TARGET_ROOTFS_EROFS_LZ4HC=y"));
         assert_eq!(EROFS_COMPRESSION, "lz4hc");
+    }
+
+    #[test]
+    fn a_mkfs_without_the_compressor_is_refused_before_anything_is_downloaded() {
+        use std::path::PathBuf;
+
+        // The check reads a listing rather than creating an image, so it can be tested
+        // against a stand-in that prints what the real one prints. The stand-in is a
+        // shell script, which is the only part of this that is not the real thing --
+        // the parsing being exercised is the parsing that ships.
+        let dir = std::env::temp_dir().join("plexos-mkfs-capability");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let write_stub = |name: &str, body: &str| -> PathBuf {
+            use std::os::unix::fs::PermissionsExt as _;
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+
+        // What the target's mkfs.erofs printed when it had been built --disable-lz4.
+        let without = write_stub(
+            "mkfs-without",
+            "#!/bin/sh\nprintf ' -zX[,level=Y]  X=compressor\\n'\n",
+        );
+        // And what one built with lz4 prints.
+        let with = write_stub(
+            "mkfs-with",
+            "#!/bin/sh\nprintf ' -zX  supported compressors are:\\n   lz4\\n   lz4hc\\n'\n",
+        );
+
+        let tools_with = |mkfs: PathBuf| Tools {
+            tar: PathBuf::from("/bin/tar"),
+            mkfs_erofs: mkfs,
+            sha256sum: PathBuf::from("/bin/sha256sum"),
+            sha1sum: PathBuf::from("/bin/sha1sum"),
+            losetup: PathBuf::from("/sbin/losetup"),
+        };
+
+        let failure = check_compressor(&tools_with(without)).unwrap_err();
+        let message = failure.to_string();
+        assert!(message.contains("image fault"), "{message}");
+        assert!(
+            message.contains("BR2_PACKAGE_EROFS_UTILS_LZ4"),
+            "and names the option to set: {message}"
+        );
+        assert!(
+            message.contains("nothing to do with Plex"),
+            "an image fault and a bad package need opposite responses: {message}"
+        );
+
+        assert!(check_compressor(&tools_with(with)).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -124,6 +124,13 @@ BR2_PACKAGE_XFSPROGS=y
 # the only choice available — CONFIG_SQUASHFS is not set in the kernel fragment and
 # CONFIG_EROFS_FS is, so erofs is what an app image can be, not what we prefer.
 BR2_PACKAGE_EROFS_UTILS=y
+# The target's mkfs.erofs is a different build from the host's, and only the host's had
+# a compressor. Without this it is configured --disable-lz4, so provisioning downloads
+# 83 MB, verifies Plex's signature, unpacks the payload and then fails with "Cannot find
+# a valid compressor lz4hc" -- while post-image.sh builds /usr with lz4hc perfectly well,
+# because that uses host-erofs-utils. lz4hc needs no separate option: erofs-utils detects
+# LZ4_compress_HC_destSize in liblz4 and enables it alongside plain lz4.
+BR2_PACKAGE_EROFS_UTILS_LZ4=y
 
 # ---------------------------------------------------------------------------
 # Plex provisioning (ADR-0010)
