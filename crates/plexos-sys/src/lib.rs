@@ -46,6 +46,7 @@
 
 pub mod device;
 pub mod dm;
+pub mod landlock;
 pub mod mount;
 pub mod process;
 pub mod verity;
