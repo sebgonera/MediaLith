@@ -111,9 +111,13 @@ Next, in order:
 3. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
    asked for and both are deferred: an 83 MB upload has to stream to disk, and
    `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
-4. **`plexos-update`** — nothing implements the update flow, so rollback has never been
-   exercised end to end. It is the riskiest untested path in the project, because a bug
-   there bricks a device rather than degrading it.
+4. **Prove a rollback by causing one.** The update flow exists and works, and the
+   *counter* half of ADR-0005 has been exercised: an entry went in at `+3`, systemd-boot
+   decremented it to `+2-1`, and the health gate renamed it good. What has never happened
+   is the failure path — an image that does not boot, three times, falling back to the
+   slot that worked. That is the branch a bug in bricks a device rather than degrading
+   it, and it is now testable cheaply: publish a bundle with a deliberately broken `/usr`,
+   install it, and watch the machine come back on the other slot.
 5. **A supervisor.** `plexos-init` still prints "no supervisor yet" and hands over to a
    shell. Nothing restarts a service that dies — and `plexosd::plex` says so rather than
    pretending: a Plex that exits stays exited, and a newly provisioned version does not
