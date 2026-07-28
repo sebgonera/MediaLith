@@ -38,6 +38,7 @@ pub mod cgroup;
 pub mod execute;
 pub mod manifest;
 pub mod mount;
+pub mod run;
 pub mod store;
 pub mod tools;
 pub mod verify;
