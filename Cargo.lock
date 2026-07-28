@@ -156,6 +156,7 @@ dependencies = [
  "plexos-plex",
  "plexos-sys",
  "plexos-types",
+ "plexos-update",
  "serde",
  "serde_json",
  "sha2",

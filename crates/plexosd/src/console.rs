@@ -58,6 +58,7 @@ pub fn respond(
     env: &impl Environment,
     job: &std::sync::Arc<crate::provision::Job>,
     plex: &std::sync::Arc<crate::plex::Handle>,
+    update: &std::sync::Arc<crate::update::Job>,
 ) -> Response {
     match (request.method.as_str(), request.path.as_str()) {
         // Starting an installation. Returns as soon as the work is handed to a thread:
@@ -82,6 +83,25 @@ pub fn respond(
             );
             Response::json("{\"started\":true}")
         }
+
+        // Checking for, and installing, a new /usr. Same shape as provisioning and for
+        // the same reason: the work is minutes and a request cannot be held open for it.
+        ("POST", "/api/update") => {
+            if !update.begin() {
+                return Response::text(
+                    409,
+                    "An update is already running. Watch it at GET /api/update.\n",
+                );
+            }
+            let install = crate::update::wants_install(&request.body);
+            crate::update::spawn(update, crate::update::source_in(&request.body), install);
+            Response::json(format!("{{\"install\":{install}}}"))
+        }
+
+        ("GET" | "HEAD", "/api/update") => match serde_json::to_string(&update.snapshot()) {
+            Ok(json) => Response::json(json),
+            Err(error) => Response::text(500, format!("could not serialise progress: {error}\n")),
+        },
 
         // Stopping the machine. The response goes out before anything happens, because
         // reboot(2) does not return -- see crate::power for why that ordering matters.
@@ -165,8 +185,8 @@ fn respond_read_only(request: &Request, env: &impl Environment, path: &str) -> R
             404,
             format!(
                 "no such page: {other}\n\nThis console serves / , /api/status, /api/gpu, \
-                 /healthz and /api/provision (GET to follow an installation, POST with \
-                 the device token to start one). POST /api/power stops the machine.\n"
+                 /healthz, /api/provision, /api/update and /api/power. The three that \
+                 change anything take POST and the device token.\n"
             ),
         ),
     }
@@ -336,6 +356,7 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     // must see the installation the first one started, not an idle console.
     let job = std::sync::Arc::new(crate::provision::Job::new());
     let plex = std::sync::Arc::new(crate::plex::Handle::new());
+    let update = std::sync::Arc::new(crate::update::Job::new());
 
     // Before serving, so a machine that was provisioned on an earlier boot is running
     // Plex by the time anyone loads the page. On an unprovisioned one this says so and
@@ -364,7 +385,7 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     http::serve(
         &listener,
         credential,
-        move |request| respond(request, &System, &served_job, &plex),
+        move |request| respond(request, &System, &served_job, &plex, &update),
         log,
     )
 }
@@ -381,6 +402,7 @@ mod tests {
             env,
             &std::sync::Arc::new(crate::provision::Job::new()),
             &std::sync::Arc::new(crate::plex::Handle::new()),
+            &std::sync::Arc::new(crate::update::Job::new()),
         )
     }
 
@@ -464,9 +486,28 @@ mod tests {
                 &Fixture::new(),
                 &std::sync::Arc::new(crate::provision::Job::new()),
                 &std::sync::Arc::new(crate::plex::Handle::new()),
+                &std::sync::Arc::new(crate::update::Job::new()),
             );
             assert_eq!(response.status, 400, "{body:?}");
         }
+    }
+
+    #[test]
+    fn the_page_can_check_for_and_install_a_system_update() {
+        assert!(
+            PAGE.contains("\"/api/update\""),
+            "pointed at the route this serves"
+        );
+        assert!(PAGE.contains("Download and install"));
+        assert!(
+            PAGE.contains("Nothing signs this bundle"),
+            "the page must say what it does not know, because the reader cannot"
+        );
+        assert!(
+            PAGE.contains("comes back to this one by itself"),
+            "and must say what happens when an update is bad, which is the question \
+             anybody hesitating over that button is actually asking"
+        );
     }
 
     #[test]
@@ -529,6 +570,7 @@ mod tests {
                 &Fixture::new(),
                 &job,
                 &std::sync::Arc::new(crate::plex::Handle::new()),
+                &std::sync::Arc::new(crate::update::Job::new()),
             );
             assert_ne!(response.status, 404, "{method} {path}");
         }
@@ -633,6 +675,7 @@ mod tests {
             &Fixture::new(),
             &job,
             &std::sync::Arc::new(crate::plex::Handle::new()),
+            &std::sync::Arc::new(crate::update::Job::new()),
         );
         assert_eq!(response.status, 409);
         assert!(

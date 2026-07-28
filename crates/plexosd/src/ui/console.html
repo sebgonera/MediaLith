@@ -264,6 +264,11 @@
     <p class="empty">Loading…</p>
   </main>
 
+  <section class="card plex" id="update" aria-live="polite">
+    <h3>System update</h3>
+    <p class="empty">Loading…</p>
+  </section>
+
   <section class="card power" id="power">
     <h3>Power</h3>
     <p class="hint" id="power-note">Stopping this way closes Plex's database and flushes
@@ -299,6 +304,10 @@ const PLEX_BUSY_MS = 1000;
 // would be. sessionStorage is cleared when the tab closes, so the token is not left on
 // the administrator's machine indefinitely; it is deliberately not localStorage.
 const TOKEN_KEY = "plexos-device-token";
+// Where update bundles come from. Remembered per tab so it does not have to be retyped,
+// and not a secret -- it is an address on the local network.
+const SOURCE_KEY = "plexos-update-source";
+const UPDATE_ENDPOINT = "/api/update";
 
 function token() { return sessionStorage.getItem(TOKEN_KEY) || ""; }
 function rememberToken(value) { sessionStorage.setItem(TOKEN_KEY, value); }
@@ -597,6 +606,124 @@ function plexError(message) {
 }
 
 let plexTimer = null;
+let updateTimer = null;
+let lastUpdateRendered = null;
+
+const UPDATE_PHASES = {
+  idle:        "Idle",
+  checking:    "Reading the bundle",
+  downloading: "Downloading",
+  writing:     "Writing the other slot",
+  activating:  "Installing the boot entry",
+  ready:       "Written — restart to use it",
+  failed:      "Failed",
+};
+
+/** The system-update section. */
+function renderUpdate(report) {
+  const phase = report.phase || "idle";
+  const busy = ["checking", "downloading", "writing", "activating"].includes(phase);
+  const signature = JSON.stringify([
+    phase, report.detail, report.error, report.running, report.slot,
+    report.available, report.staged, (report.log || []).length,
+  ]);
+  if (signature === lastUpdateRendered) return;
+  lastUpdateRendered = signature;
+
+  const active = document.activeElement;
+  const typing = active && active.id === "update-source";
+  const caret = typing ? active.selectionStart : 0;
+
+  const progress = (busy || phase === "failed" || phase === "ready")
+    ? `<div class="progress ${phase === "failed" ? "failed" : ""}">
+         <span class="now">${esc(UPDATE_PHASES[phase] || phase)}${busy ? "…" : ""}</span>
+         <div>${esc(report.detail || "")}</div>
+         ${report.error ? `<div class="log">${esc(report.error)}</div>` : ""}
+         ${(report.log || []).length ? `<div class="log">${esc((report.log || []).slice(-10).join("\n"))}</div>` : ""}
+       </div>`
+    : "";
+
+  document.getElementById("update").innerHTML = `
+    <h3>System update</h3>
+    <dl>
+      <dt>Running</dt><dd class="mono">${esc(report.running)} (slot ${esc(report.slot)})</dd>
+      ${report.available ? `<dt>Offered</dt><dd class="mono">${esc(report.available)}</dd>` : ""}
+      ${report.staged ? `<dt>Written</dt><dd class="mono">${esc(report.staged)} — restart to use it</dd>` : ""}
+    </dl>
+    <p class="hint">The update is written to the slot this machine is <em>not</em> running
+       from, and the entry that works now is left alone. If the new one fails to boot three
+       times the bootloader comes back to this one by itself.
+       ${report.trusted ? "" : "<strong>Nothing signs this bundle</strong> — whoever answers at the address below chooses what this appliance runs. For a bench, not for anything else."}</p>
+    <div class="row">
+      <input type="text" id="update-source" placeholder="paste the address publish-update.sh prints"
+             autocomplete="off" spellcheck="false" value="${esc(sessionStorage.getItem(SOURCE_KEY) || "")}">
+    </div>
+    <div class="row">
+      <button id="update-check" ${busy ? "disabled" : ""}>Check</button>
+      <button id="update-install" ${busy ? "disabled" : ""}>Download and install</button>
+    </div>
+    ${progress}`;
+
+  document.getElementById("update-check").addEventListener("click", () => startUpdate(false));
+  document.getElementById("update-install").addEventListener("click", () => startUpdate(true));
+  document.getElementById("update-source").addEventListener("input",
+    event => sessionStorage.setItem(SOURCE_KEY, event.target.value));
+
+  if (typing) {
+    const field = document.getElementById("update-source");
+    if (field) { field.focus(); field.setSelectionRange(caret, caret); }
+  }
+}
+
+async function startUpdate(install) {
+  const value = (sessionStorage.getItem(TOKEN_KEY) || "").trim();
+  if (!value) {
+    plexError("The device token is needed to check for or install an update. Enter it in the Plex section above.");
+    return;
+  }
+  if (install && !confirm("Download and write a new system to the other slot?")) return;
+
+  const body = { install };
+  const source = (document.getElementById("update-source").value || "").trim();
+  if (source) body.source = source;
+
+  try {
+    const response = await fetch(UPDATE_ENDPOINT, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const note = document.getElementById("update");
+      const box = document.createElement("div");
+      box.className = "progress failed";
+      box.innerHTML = `<span class="now">Refused</span><div>${esc(await response.text())}</div>`;
+      note.append(box);
+      lastUpdateRendered = null;
+      return;
+    }
+  } catch (error) {
+    return;
+  }
+  updateTick();
+}
+
+async function updateTick() {
+  let report;
+  try {
+    const response = await fetch(UPDATE_ENDPOINT, { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    report = await response.json();
+  } catch (error) {
+    updateTimer = setTimeout(updateTick, PLEX_IDLE_MS);
+    return;
+  }
+  renderUpdate(report);
+  const busy = ["checking", "downloading", "writing", "activating"].includes(report.phase);
+  clearTimeout(updateTimer);
+  updateTimer = setTimeout(updateTick, busy ? PLEX_BUSY_MS : PLEX_IDLE_MS);
+}
 
 async function plexTick() {
   let report;
@@ -674,6 +801,7 @@ document.getElementById("restart").addEventListener("click", () => power("restar
 tick();
 setInterval(tick, REFRESH_MS);
 plexTick();
+updateTick();
 </script>
 </body>
 </html>

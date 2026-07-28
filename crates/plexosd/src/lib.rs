@@ -53,6 +53,7 @@ pub mod plex;
 pub mod power;
 pub mod provision;
 pub mod status;
+pub mod update;
 
 pub use bootcounter::BootEntry;
 pub use health::{Check, Health, Status};
