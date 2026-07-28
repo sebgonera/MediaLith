@@ -406,6 +406,26 @@ mod tests {
     }
 
     #[test]
+    fn the_page_does_not_redraw_the_field_somebody_is_typing_into() {
+        // Reported from the appliance: polling replaced the Plex section wholesale every
+        // few seconds, and the token field went with it, so the caret jumped out roughly
+        // once per word. The token is sixteen characters read off another screen, which
+        // makes that close to unusable.
+        //
+        // Asserted on the page's text because there is no JavaScript engine here. It is a
+        // weak test and it is the one available; the property it guards is that a redraw
+        // is conditional at all.
+        assert!(
+            PAGE.contains("if (signature === lastRendered) return;"),
+            "the Plex section must not be rebuilt when nothing has changed"
+        );
+        assert!(
+            PAGE.contains("setSelectionRange"),
+            "and when it is rebuilt, the caret must be put back"
+        );
+    }
+
+    #[test]
     fn the_page_drives_the_routes_this_module_serves() {
         // The page and the route table are edited independently; if they drift, the
         // console renders its error state on a healthy machine and the symptom points at

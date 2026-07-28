@@ -1,0 +1,23 @@
+# busybox options PlexOS needs and Buildroot's default configuration turns off.
+#
+# Applied on top of package/busybox/busybox.config via
+# BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES. Every option here must be checked against
+# the generated .config after a build: kconfig drops options with unmet dependencies
+# without erroring, and this project has already lost a toolchain to that.
+
+# Without this, `tar` cannot read a .xz archive at all -- not with -J, not by sniffing
+# the stream. That is the whole of ADR-0010's provisioning path: a Debian package is an
+# ar archive of control.tar.xz and data.tar.xz, and plexos-plex shells out to tar for
+# both. Provisioning got as far as verifying Plex's GPG signature and matching every
+# member against the signed manifest before failing to read the version out of
+# control.tar.xz, on an appliance whose kernel has CONFIG_XZ_DEC compiled in.
+#
+# busybox defaults this to y and has no dependencies on it; Buildroot's own busybox.config
+# is what turns it off. Nothing else in the image provides a tar, so this is the fix
+# rather than one of several.
+#
+# xz only, deliberately. A .gz member would not be found in the first place --
+# plexos_plex looks for members named control.tar.xz and data.tar.xz -- so enabling
+# FEATURE_SEAMLESS_GZ would buy nothing and would look like support that is not there.
+# ADR-0010 treats a change in Plex's packaging as an event to notice, not to absorb.
+CONFIG_FEATURE_SEAMLESS_XZ=y

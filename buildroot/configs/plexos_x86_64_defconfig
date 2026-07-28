@@ -185,6 +185,11 @@ BR2_PACKAGE_HOST_CRYPTSETUP=y
 # machine would find a media database it does not own.
 BR2_ROOTFS_USERS_TABLES="$(BR2_EXTERNAL_PLEXOS_PATH)/board/plexos/x86_64/users.table"
 
+# busybox's tar is the only tar in the image, and Buildroot's default busybox
+# configuration cannot read .xz -- which is both members of every Debian package
+# ADR-0010 installs. See the fragment for what it costs and why it is xz alone.
+BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_PLEXOS_PATH)/board/plexos/x86_64/busybox.fragment"
+
 BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_PLEXOS_PATH)/board/plexos/x86_64/post-image.sh"
 
 # ---------------------------------------------------------------------------

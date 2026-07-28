@@ -781,11 +781,37 @@ fn version_of(
     let _ = std::fs::remove_file(&path);
 
     let output = output?;
+
+    // Checked before the contents are read. Without this a tar that could not run at all
+    // is reported as "the package's control file has no Version field", which blames
+    // Plex for something the image did -- and that is exactly what happened: busybox's
+    // tar could not decompress .xz, so stdout was empty and the message sent the reader
+    // looking at a package whose signature had just been verified.
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "{} could not read control.tar.xz: {}. This is an image fault rather than a \
+             problem with the package -- its signature has already been verified. The \
+             usual cause is a tar that cannot decompress .xz.",
+            tools.tar.display(),
+            stderr.trim()
+        )
+        .into());
+    }
+
     let text = String::from_utf8_lossy(&output.stdout);
     let line = text
         .lines()
         .find_map(|line| line.strip_prefix("Version:"))
-        .ok_or("the package's control file has no Version field")?;
+        .ok_or_else(|| {
+            format!(
+                "{} ran but produced no Version field from control.tar.xz. It wrote {} \
+                 bytes. If that is zero, the archive was not decompressed rather than \
+                 read and found wanting.",
+                tools.tar.display(),
+                output.stdout.len()
+            )
+        })?;
 
     store::Version::parse(line.trim())
         .ok_or_else(|| format!("cannot read {:?} as a version", line.trim()).into())

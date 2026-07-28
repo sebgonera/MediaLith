@@ -444,8 +444,40 @@ const PHASES = {
   failed:      "Failed",
 };
 
+// What the Plex section last rendered. The section is replaced wholesale, which throws
+// away the token field along with everything else -- and the field is the one element on
+// this page somebody is in the middle of typing into. Polling every few seconds then
+// took the focus away mid-token, roughly once per word, which made the field almost
+// unusable. So: render only when something a reader would notice has actually changed.
+let lastRendered = null;
+
 /** The Plex section, rendered from what /api/provision reports. */
 function renderPlex(report) {
+  const signature = JSON.stringify([
+    report.phase, report.detail, report.error, report.installed, report.running,
+    (report.log || []).length,
+  ]);
+  if (signature === lastRendered) return;
+  lastRendered = signature;
+
+  // Belt and braces: when the section *does* have to be rebuilt during an install, put
+  // the caret back where it was rather than at the start of the field.
+  const active = document.activeElement;
+  const typing = active && active.id === "token";
+  const caret = typing ? active.selectionStart : 0;
+
+  renderPlexInto(report);
+
+  if (typing) {
+    const field = document.getElementById("token");
+    if (field) {
+      field.focus();
+      field.setSelectionRange(caret, caret);
+    }
+  }
+}
+
+function renderPlexInto(report) {
   const phase = report.phase || "idle";
   const busy = ["catalogue", "downloading", "verifying", "building", "starting"].includes(phase);
   const section = document.getElementById("plex");
@@ -526,6 +558,9 @@ async function startInstall() {
 }
 
 function plexError(message) {
+  // The next poll must be allowed to redraw over this, so the cached signature cannot
+  // still describe what is on screen.
+  lastRendered = null;
   const section = document.getElementById("plex");
   const existing = section.querySelector(".progress");
   const box = existing || document.createElement("div");
