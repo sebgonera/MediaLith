@@ -178,6 +178,7 @@ mod tests {
             method: "GET".to_owned(),
             path: path.to_owned(),
             headers: Vec::new(),
+            body: Vec::new(),
         }
     }
 

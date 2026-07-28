@@ -142,6 +142,22 @@ BR2_PACKAGE_EROFS_UTILS=y
 BR2_PACKAGE_GNUPG2=y
 BR2_PACKAGE_GNUPG2_GPGV=y
 
+# TLS, and the fact that none of this was here is worth recording. The image had no
+# ssl_client applet, no curl, no openssl and no TLS library of any kind, while
+# ADR-0010 has the appliance fetch Plex from downloads.plex.tv -- which serves HTTPS
+# and nothing else. Provisioning could not have worked, and the symptom would have
+# been a download failing on a machine whose network was demonstrably fine.
+#
+# ca-certificates is not optional either: without a trust store curl cannot verify
+# Plex's certificate, and the alternative -- passing --insecure -- would make the
+# transport prove nothing. The signature check (ADR-0010) is what establishes the
+# artefact is Plex's; TLS is what stops someone watching which version is being
+# fetched and feeding a different endpoint's answer.
+BR2_PACKAGE_OPENSSL=y
+BR2_PACKAGE_LIBCURL=y
+BR2_PACKAGE_LIBCURL_CURL=y
+BR2_PACKAGE_CA_CERTIFICATES=y
+
 # Plex's public key, pinned into the verified /usr rather than fetched beside the
 # artefact it is supposed to vouch for. See package/plexos-plex-keyring.
 BR2_PACKAGE_PLEXOS_PLEX_KEYRING=y

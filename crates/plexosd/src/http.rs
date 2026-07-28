@@ -34,6 +34,14 @@ use std::time::Duration;
 /// appliance runs out of memory. Real browser requests are a few hundred bytes.
 pub const MAX_HEAD: usize = 8 * 1024;
 
+/// Largest request body accepted.
+///
+/// 64 KiB, which is generous for the JSON these routes take and small enough that a
+/// hostile `Content-Length` cannot be a memory limit. Uploading an app image will not
+/// come through here: 83 MB has to be streamed to disk, and a route that does that
+/// reads the socket itself rather than being handed a `Vec`.
+pub const MAX_BODY: usize = 64 * 1024;
+
 /// How long a client may take to send its request, or to accept the response.
 ///
 /// Without this a single half-open connection holds a thread forever.
@@ -48,6 +56,13 @@ pub struct Request {
     pub path: String,
     /// Header fields, in the order sent.
     pub headers: Vec<(String, String)>,
+    /// The request body, if one was sent and small enough to hold.
+    ///
+    /// Bounded by [`MAX_BODY`]. This console's mutating routes take a few hundred
+    /// bytes of parameters; anything claiming megabytes is refused rather than
+    /// buffered, because a buffer sized by a header is a memory limit set by whoever
+    /// connected.
+    pub body: Vec<u8>,
 }
 
 impl Request {
@@ -232,7 +247,36 @@ pub fn parse_request(head: &str) -> Result<Request, ParseError> {
         method: method.to_owned(),
         path: path.to_owned(),
         headers,
+        body: Vec::new(),
     })
+}
+
+/// Reads a bounded request body, given the head's `Content-Length`.
+///
+/// Absent or zero means no body. A length beyond [`MAX_BODY`] is refused before a byte
+/// is read, so the allocation is never the one the client asked for.
+fn read_body(
+    stream: &mut impl BufRead,
+    request: &Request,
+) -> io::Result<Result<Vec<u8>, ParseError>> {
+    let Some(declared) = request.header("Content-Length") else {
+        return Ok(Ok(Vec::new()));
+    };
+    let Ok(length) = declared.trim().parse::<usize>() else {
+        return Ok(Err(ParseError::Malformed));
+    };
+    if length == 0 {
+        return Ok(Ok(Vec::new()));
+    }
+    if length > MAX_BODY {
+        return Ok(Err(ParseError::TooLarge));
+    }
+
+    let mut body = vec![0_u8; length];
+    // read_exact, so a client that promises more than it sends is an error rather than
+    // a handler receiving a half-filled buffer of zeroes it cannot tell from data.
+    stream.read_exact(&mut body)?;
+    Ok(Ok(body))
 }
 
 /// Reads the request head from a stream, stopping at the blank line.
@@ -275,9 +319,15 @@ fn handle(
         Err(error) => (error.response(), true),
         Ok(head) => match parse_request(&head) {
             Err(error) => (error.response(), true),
-            Ok(request) => {
+            Ok(mut request) => {
                 let with_body = request.wants_body();
-                (route(&request, credential, handler), with_body)
+                match read_body(&mut reader, &request)? {
+                    Err(error) => (error.response(), with_body),
+                    Ok(body) => {
+                        request.body = body;
+                        (route(&request, credential, handler), with_body)
+                    }
+                }
             }
         },
     };
@@ -389,6 +439,7 @@ mod tests {
             method: "GET".to_owned(),
             path: path.to_owned(),
             headers: Vec::new(),
+            body: Vec::new(),
         }
     }
 
@@ -427,6 +478,7 @@ mod tests {
                 method: method.to_owned(),
                 path: "/api/provision".to_owned(),
                 headers: Vec::new(),
+                body: Vec::new(),
             };
             assert_eq!(
                 route(&anonymous, &claimed, &handler).status,
@@ -457,6 +509,7 @@ mod tests {
             method: "POST".to_owned(),
             path: "/api/provision".to_owned(),
             headers: vec![("Authorization".to_owned(), format!("Bearer {TOKEN}"))],
+            body: Vec::new(),
         };
         let response = route(&request, &crate::auth::Credential::Unset, &handler);
         assert_eq!(response.status, 503);
@@ -474,6 +527,7 @@ mod tests {
             method: "POST".to_owned(),
             path: "/api/provision".to_owned(),
             headers: vec![("Authorization".to_owned(), format!("Bearer {TOKEN}"))],
+            body: Vec::new(),
         };
         assert_eq!(route(&request, &claimed, &handler).status, 200);
     }
@@ -493,6 +547,7 @@ mod tests {
                     method: method.to_owned(),
                     path: "/api/status".to_owned(),
                     headers: Vec::new(),
+                    body: Vec::new(),
                 };
                 assert_eq!(route(&request, &credential, &handler).status, 200);
             }
@@ -508,8 +563,51 @@ mod tests {
             method: "QUERY".to_owned(),
             path: "/".to_owned(),
             headers: Vec::new(),
+            body: Vec::new(),
         };
         assert!(request.is_mutating());
+    }
+
+    #[test]
+    fn a_body_within_the_bound_reaches_the_handler() {
+        let head = "POST /api/provision HTTP/1.1\r\nContent-Length: 5\r\n\r\n";
+        let request = parse_request(head).unwrap();
+        let mut stream = BufReader::new(&b"hello"[..]);
+        let body = read_body(&mut stream, &request).unwrap().unwrap();
+        assert_eq!(body, b"hello");
+    }
+
+    #[test]
+    fn a_body_larger_than_the_bound_is_refused_before_it_is_allocated() {
+        // The allocation must never be the one the client asked for: a Content-Length
+        // of a gigabyte would otherwise be a memory limit set by whoever connected.
+        let head = format!(
+            "POST /x HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY + 1
+        );
+        let request = parse_request(&head).unwrap();
+        let mut stream = BufReader::new(&b""[..]);
+        assert_eq!(
+            read_body(&mut stream, &request).unwrap(),
+            Err(ParseError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn a_short_body_is_an_error_rather_than_zeroes() {
+        // A client promising ten bytes and sending three. Handing the handler a
+        // half-filled buffer would give it padding it cannot tell from data.
+        let head = "POST /x HTTP/1.1\r\nContent-Length: 10\r\n\r\n";
+        let request = parse_request(head).unwrap();
+        let mut stream = BufReader::new(&b"abc"[..]);
+        assert!(read_body(&mut stream, &request).is_err());
+    }
+
+    #[test]
+    fn no_content_length_means_no_body_rather_than_a_hang() {
+        let request = parse_request("GET / HTTP/1.1\r\n\r\n").unwrap();
+        let mut stream = BufReader::new(&b""[..]);
+        assert_eq!(read_body(&mut stream, &request).unwrap(), Ok(Vec::new()));
     }
 
     #[test]
@@ -520,6 +618,7 @@ mod tests {
             method: "POST".to_owned(),
             path: "/".to_owned(),
             headers: vec![("authorization".to_owned(), "Bearer x".to_owned())],
+            body: Vec::new(),
         };
         assert_eq!(request.header("Authorization"), Some("Bearer x"));
         assert_eq!(request.header("AUTHORIZATION"), Some("Bearer x"));
@@ -532,6 +631,7 @@ mod tests {
             method: "HEAD".to_owned(),
             path: "/".to_owned(),
             headers: Vec::new(),
+            body: Vec::new(),
         };
         let response = route(&request, &crate::auth::Credential::Unset, &handler);
         assert_eq!(response.status, 200);
