@@ -39,6 +39,7 @@ Everything else is cheap to revise. Prefer revising it.
 | Component | State |
 | --- | --- |
 | `crates/plexos-types` | Done. Formats and the layout emitter, 41 tests. |
+| `crates/plexos-update` | The bundle format, which slot an update goes to, and writing a partition and reading it back. 21 tests. **Has updated the reference laptop twice, alternating slots.** Nothing signs a bundle; ADR-0005's rollback is what makes that survivable. |
 | `crates/plexos-gpu` | Done, 41 tests, and it has now answered the question it was written for. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
 | `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, and `reboot(2)`. 71 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
 | `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate, spawns the status console, and then starts a shell. 50 tests. |
@@ -66,6 +67,16 @@ assembled root, which broke udhcpc's lease script. The lesson worth keeping is t
 every one of them passed a full test suite, because every test described a machine
 where the thing being waited for had already happened.
 
+**Updates work over the network, and rollback has finally been exercised.** The
+appliance was updated twice from a browser's request with no USB stick: slot A to B and
+back, each time fetching a bundle from the build host, writing the inactive slot, reading
+it back, installing a boot entry on trial and restarting into it. The last boot produced
+the thing this project had never seen — `plexos-0.1.0.202607281844+2-1.efi` renamed to
+`plexos-0.1.0.202607281844.efi`, which is systemd-boot decrementing the try counter and
+the health gate then declaring the slot permanent. ADR-0005 has completed a cycle.
+Nothing signs a bundle yet; what makes that survivable is that a bad one costs three
+reboots and lands back on the system that worked.
+
 **A person can now install Plex from a browser, and it works.** On the reference
 laptop: the appliance claims itself and prints a sixteen-character token on the attached
 screen, the console page takes that token, `POST /api/provision` downloads Plex from
@@ -86,12 +97,11 @@ What is still unproven is a transcode.
 
 Next, in order:
 
-1. **Network image updates**, so a new build does not mean writing a USB stick. Design
-   settled and the crux verified: systemd-boot orders entries with no tries left to the
-   end, so ADR-0005's rollback is what makes an unsigned dev-mode updater safe enough to
-   build. Layers are slot write, verity tree, UKI, boot counter — written once — with the
-   image source starting unsigned over the LAN and becoming ADR-0006's signed manifest
-   later.
+1. **Sign the bundle (ADR-0006).** The updater works and trusts whoever answers at the
+   address it was given, which is a bench arrangement and says so on the page. The layers
+   underneath — slot choice, writing, verification, boot entry — do not change when
+   signatures arrive; only what vouches for the bytes does. This is now the widest gap
+   between what the appliance does and what it should be allowed to do.
 2. **Network diagnostics in the console.** Three diagnoses so far have needed somebody to
    read a shell on the attached screen. `resolv.conf`, the default route and a name
    lookup belong on the page.
@@ -314,6 +324,19 @@ must be off.
   above `0`, so every update would have been refused as older, with a message blaming
   whoever published it. Anything that must appear *in the image* has to be written before
   stage 1, and the check is to extract the built image and look — not to read the script.
+- **`make all` does not rebuild a package whose sources changed.** Buildroot rsyncs a
+  package's tree into `output/build/<pkg>/` once and does not re-sync one it has already
+  built, so a plain `make all` ships the *previous* binary under a new version stamp. Two
+  update bundles went out that way and the appliance updated successfully into a system
+  functionally identical to the one it was running: version and slot changed, the fixes
+  did not. `make <pkg>-rebuild` forces the re-sync. Check by grepping
+  `output/build/<pkg>/` for something the change added, not by reading the script.
+- **A control that is correct in the state it was written in can be wrong in the state it
+  leads to.** Twice, in one shape. The `plex-http` probe was `|| false` and correct while
+  Plex could not exist. The device-token field lived inside the Plex install card and was
+  correct until Plex was installed — after which that card renders as a single link, the
+  field is gone, and every button needing a token silently refuses. Ask what a piece of
+  interface looks like in the state its own success produces.
 - **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error

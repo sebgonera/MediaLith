@@ -20,8 +20,8 @@
 //!
 //! # What has run
 //!
-//! **No appliance has been updated by this.** Delete this notice when one has, and has
-//! booted the result.
+//! **This has updated an appliance twice**, alternating slots, with no USB stick
+//! involved. What it does not yet do is check a signature, and that has not changed.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

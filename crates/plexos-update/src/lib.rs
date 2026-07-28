@@ -42,8 +42,10 @@
 //!
 //! # What has run
 //!
-//! **Nothing here has updated an appliance.** Delete this notice when one has been
-//! updated and has booted the result.
+//! **This has updated an appliance, twice, and it booted the result both times.** Slot A
+//! to B and back again, over the LAN, from a browser's request: written, read back, entry
+//! installed on trial, restarted, and the boot then marked good — `+2-1` renamed to no
+//! counter at all, which is ADR-0005 completing a cycle for the first time.
 
 #![forbid(unsafe_code)]
 

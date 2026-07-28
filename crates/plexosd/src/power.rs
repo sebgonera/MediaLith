@@ -27,7 +27,8 @@
 //!
 //! # What has run
 //!
-//! **No machine has been stopped by this.** Delete this notice when one has.
+//! **This has restarted an appliance**, twice, as the last step of a network update.
+//! Powering off has still never been done.
 
 use std::sync::Arc;
 

@@ -22,9 +22,9 @@
 //!
 //! # What has run
 //!
-//! **None of this has been executed.** `reboot(2)` is not a call to try casually on the
-//! machine you are working on. Delete this notice when a machine has been turned off by
-//! it.
+//! **`RB_AUTOBOOT` has run on the appliance**, twice, ending a network update, and the
+//! sequence before it — stopping Plex, `sync`, remounting `/var` read-only — ran with it.
+//! `RB_POWER_OFF` has never been used.
 
 use std::io;
 use std::path::Path;
