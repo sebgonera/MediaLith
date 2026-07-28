@@ -494,12 +494,18 @@ build_uki() {
     printf 'plexos.slot=%s plexos.roothash=%s i915.enable_guc=2 earlycon=efifb console=ttyS0,115200 console=tty0 video=1280x720 fbcon=font:TER16x32\n' \
         "${slot}" "${ROOT_HASH}" > "${WORK}/cmdline"
 
-    if [ -f "${TARGET_DIR}/usr/lib/os-release" ]; then
-        cp "${TARGET_DIR}/usr/lib/os-release" "${WORK}/os-release"
-    else
-        printf 'NAME="PlexOS"\nID=plexos\nVERSION_ID=%s\nPRETTY_NAME="PlexOS %s"\n' \
-            "${PLEXOS_VERSION}" "${PLEXOS_VERSION}" > "${WORK}/os-release"
-    fi
+    # Written here rather than copied from Buildroot's. Buildroot stamps its own release
+    # into VERSION_ID -- the appliance was reporting "2026.02.3", which is Buildroot's
+    # version and not this system's. That was cosmetic until updates arrived and became
+    # load-bearing: plexos-update compares the running VERSION_ID against the bundle's,
+    # and a machine that cannot say which PlexOS it runs cannot be told it has an older
+    # one. SORT_KEY is what systemd-boot groups entries by before comparing versions.
+    printf 'NAME="PlexOS"\nID=plexos\nVERSION_ID=%s\nPRETTY_NAME="PlexOS %s"\nSORT_KEY=plexos\n' \
+        "${PLEXOS_VERSION}" "${PLEXOS_VERSION}" > "${WORK}/os-release"
+
+    # And the same into the image, so /etc/os-release and the boot entry agree. Two
+    # answers to "what version is this" is one too many.
+    install -D -m 0644 "${WORK}/os-release" "${TARGET_DIR}/usr/lib/os-release"
 
     local stub="${BINARIES_DIR}/linuxx64.efi.stub"
     local offset
