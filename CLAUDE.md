@@ -42,7 +42,7 @@ Everything else is cheap to revise. Prefer revising it.
 | `crates/plexos-gpu` | Done, 41 tests, and it has now answered the question it was written for. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
 | `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, and `reboot(2)`. 71 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
 | `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate, spawns the status console, and then starts a shell. 50 tests. |
-| `crates/plexosd` | Health gate, boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. 141 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
+| `crates/plexosd` | Health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. 147 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
 | `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 97 tests. Provisioning now runs end to end **on the appliance**, driven from a browser: download, signature, manifest, build, publish, mount, confine, start. |
 | `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. |
 | `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 42 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree. |
@@ -86,36 +86,28 @@ What is still unproven is a transcode.
 
 Next, in order:
 
-1. **The health gate asks about Plex before anything starts it.** `plexos-init` runs
-   `plexosd --mount-plex`, then the gate, then `plexosd --serve` — and `--serve` is what
-   starts Plex. While the machine was unprovisioned the `plex-http` check answered
-   `NotApplicable` and nothing showed; now that Plex is installed the check is applicable
-   and always fails, so the boot counter is never cleared and ADR-0005 has stopped
-   meaning what it says. ARCHITECTURE.md §2 puts Plex in step 6 and the gate in step 7;
-   the code has Plex in step 8. Not a brick — an exhausted entry is only sorted last,
-   checked in systemd-boot's source — but it must be fixed before a second slot exists.
-2. **Network image updates**, so a new build does not mean writing a USB stick. Design
+1. **Network image updates**, so a new build does not mean writing a USB stick. Design
    settled and the crux verified: systemd-boot orders entries with no tries left to the
    end, so ADR-0005's rollback is what makes an unsigned dev-mode updater safe enough to
    build. Layers are slot write, verity tree, UKI, boot counter — written once — with the
    image source starting unsigned over the LAN and becoming ADR-0006's signed manifest
    later.
-3. **Network diagnostics in the console.** Three diagnoses so far have needed somebody to
+2. **Network diagnostics in the console.** Three diagnoses so far have needed somebody to
    read a shell on the attached screen. `resolv.conf`, the default route and a name
    lookup belong on the page.
-4. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
+3. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
    asked for and both are deferred: an 83 MB upload has to stream to disk, and
    `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
-5. **Run Plex through a real transcode**, which is the last thing standing between
+4. **Run Plex through a real transcode**, which is the last thing standing between
    "QuickSync works" and "this appliance does its job".
-6. **`plexos-update`** — nothing implements the update flow, so rollback has never been
+5. **`plexos-update`** — nothing implements the update flow, so rollback has never been
    exercised end to end. It is the riskiest untested path in the project, because a bug
    there bricks a device rather than degrading it.
-7. **A supervisor.** `plexos-init` still prints "no supervisor yet" and hands over to a
+6. **A supervisor.** `plexos-init` still prints "no supervisor yet" and hands over to a
    shell. Nothing restarts a service that dies — and `plexosd::plex` says so rather than
    pretending: a Plex that exits stays exited, and a newly provisioned version does not
    replace a running one without a reboot.
-8. **A terminal in the status console**, so administering the appliance stops meaning
+7. **A terminal in the status console**, so administering the appliance stops meaning
    PuTTY on another machine. The pieces are mostly there — `plexosd` already owns an
    HTTP server and the ADR-0013 token gate, and busybox provides the shell — but two
    decisions come first. The server answers request/response only, so this needs either
@@ -306,6 +298,14 @@ must be off.
   being claimed. Grant the *directory* rather than the file: `udhcpc` rewrites
   `resolv.conf` on every renewal, and a rule tied to the old inode would stop covering
   the new one, giving DNS that works until the first lease renewal.
+- **A placeholder that was correct once becomes a lie later.** The boot gate's
+  `plex-http` check was wired to `&|| false` — a literal "no probe" — with a comment
+  saying Plex was not in the image yet. That was true and harmless for months. The moment
+  Plex was installed the check became applicable and reported "installed but not
+  answering" about a server that was answering fine, on every boot, so the try counter was
+  never cleared. Two separate defects wore one symptom: the missing probe, and the gate
+  running before anything started Plex. Grep for stub closures and `unimplemented` paths
+  whose comment begins "not yet".
 - **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error

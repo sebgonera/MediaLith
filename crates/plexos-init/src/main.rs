@@ -143,25 +143,13 @@ fn supervise_system() -> ExitCode {
     }
 
     // ARCHITECTURE.md §2 step 7. Run before the shell, and its result is reported
-    // rather than acted on: a failed gate must leave the try counter standing so the
-    // slot rolls back, which is precisely what plexosd does by not clearing it.
-    //
-    // Deliberately not fatal here. Dropping to a shell on an unhealthy boot is what
-    // makes the failure diagnosable; killing PID 1 instead would panic the kernel and
-    // throw away the console output explaining why.
-    match std::process::Command::new(PLEXOSD).status() {
-        Ok(status) if status.success() => log.line("health gate passed; boot marked good"),
-        Ok(_) => log.line(
-            "health gate FAILED — the boot counter stands, and this slot will roll \
-             back after three attempts (ADR-0005)",
-        ),
-        Err(error) => log.line(&format!(
-            "could not run {PLEXOSD}: {error}. The boot cannot be marked good, so this \
-             slot will roll back."
-        )),
-    }
+    // The health gate is deliberately NOT run here any more. ARCHITECTURE.md puts
+    // services in step 6 and the gate in step 7, and Plex is a service: running the gate
+    // before `plexosd --serve` -- which is what starts Plex -- meant `plex-http` could
+    // never pass on a provisioned machine, so the try counter was never cleared and the
+    // slot never became permanent. `plexosd --serve` now runs the gate itself, on a
+    // thread, once Plex is answering. A bare `plexosd` remains available as a diagnostic.
 
-    // Only now, with the verdict already recorded, may anything touch the network.
     // health.rs forbids the gate from depending on it: Ethernet arrives over USB,
     // which enumerates seconds after PCI, and a gate that waited for an address would
     // roll back a perfectly good update because a dongle was slow. Spawned rather

@@ -98,6 +98,84 @@ fn give_to_plex(path: &Path) -> io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(OWNED_MODE))
 }
 
+/// Where Plex listens, on the interface the health gate is allowed to use.
+///
+/// Loopback, and only loopback. `health`'s documentation forbids any check from
+/// depending on the network: Ethernet arrives over USB and enumerates seconds after PCI,
+/// so a gate that waited for an address would roll back good updates.
+pub const LOOPBACK_ADDRESS: &str = "127.0.0.1:32400";
+
+/// How long a single probe waits before deciding Plex is not there.
+///
+/// Short: this runs against a process on the same machine, so anything slower than this
+/// is Plex being unwell rather than the network being slow.
+pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether Plex is answering HTTP on loopback right now.
+///
+/// A hand-written request rather than an HTTP client, for the same reason `http` is
+/// hand-written: this asks one question of one server on the same machine, and it must
+/// work when nothing else does.
+///
+/// `/identity` is the endpoint asked for because Plex answers it before it has a library,
+/// before it is claimed, and without a token. Anything narrower would report a working
+/// server as broken on its first boot.
+#[must_use]
+pub fn is_answering() -> bool {
+    use std::io::{Read as _, Write as _};
+
+    let Ok(address) = LOOPBACK_ADDRESS.parse() else {
+        return false;
+    };
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&address, PROBE_TIMEOUT) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
+
+    if stream
+        .write_all(b"GET /identity HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+
+    // Only the status line is needed, and reading the whole body of a server that is
+    // misbehaving is how a probe becomes a hang.
+    let mut head = [0_u8; 64];
+    let Ok(read) = stream.read(&mut head) else {
+        return false;
+    };
+    String::from_utf8_lossy(&head[..read]).contains(" 200 ")
+}
+
+/// Waits for Plex to start answering, up to `timeout`.
+///
+/// Returns whether it did. Plex takes seconds to open its listener — it reads a database
+/// and scans its own plugins first — so a gate that probed once immediately after
+/// starting it would report a healthy machine as broken every time.
+pub fn wait_until_answering(timeout: std::time::Duration, log: &mut dyn FnMut(&str)) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut announced = false;
+
+    loop {
+        if is_answering() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        if !announced {
+            log(&format!(
+                "waiting up to {}s for Plex to answer on {LOOPBACK_ADDRESS}",
+                timeout.as_secs()
+            ));
+            announced = true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
 /// Whether the app image is mounted, which is what makes Plex startable at all.
 ///
 /// Checks for the binary rather than for the mount point: an empty directory at
@@ -165,6 +243,14 @@ impl Handle {
                 )),
                 Err(error) => log(&format!("could not tell whether Plex is running: {error}")),
             }
+        }
+
+        // Asked of Plex rather than of this process: an earlier invocation may have
+        // started it, and starting a second would give two servers fighting over one
+        // database.
+        if is_answering() {
+            log("Plex is already answering on loopback; not starting another");
+            return;
         }
 
         if !is_provisioned(mount) {
@@ -279,15 +365,16 @@ impl Handle {
         });
     }
 
-    /// Whether a child is alive right now.
+    /// Whether Plex is up.
+    ///
+    /// Answers the question by asking Plex, not by asking whether this process holds a
+    /// live child. The two differ in both directions and the difference matters: a child
+    /// can be alive and wedged, and a Plex started by an earlier `plexosd` invocation is
+    /// running perfectly well while this one owns nothing.
     #[must_use]
     pub fn is_running(&self) -> bool {
-        let mut held = self
-            .child
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held.as_mut()
-            .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+        let _ = self;
+        is_answering()
     }
 }
 

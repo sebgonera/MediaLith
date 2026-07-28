@@ -45,6 +45,7 @@ pub mod auth;
 pub mod bootcounter;
 pub mod console;
 pub mod esp;
+pub mod gate;
 pub mod health;
 pub mod http;
 pub mod net;

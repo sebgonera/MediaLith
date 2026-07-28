@@ -114,9 +114,11 @@ pub fn run_all() -> Health {
         checks: vec![
             check_var_writable(Path::new(paths::VAR)),
             check_usr_verified(&mounts),
-            // Plex is not in the image yet. check_plex reports NotApplicable rather
-            // than passing, so an absent Plex cannot be mistaken for a working one.
-            check_plex(Path::new(paths::PLEX_APPS), &|| false),
+            // The probe was `|| false` for as long as Plex could not exist, which was
+            // correct then and became a permanent false failure the moment one was
+            // installed: the console reported "installed but not answering" about a
+            // server that was answering perfectly well. It asks Plex now.
+            check_plex(Path::new(paths::PLEX_APPS), &crate::plex::is_answering),
         ],
     }
 }

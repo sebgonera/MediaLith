@@ -11,8 +11,6 @@
 use std::process::ExitCode;
 
 use plexosd::console;
-use plexosd::esp;
-use plexosd::health::Health;
 
 const USAGE: &str = "\
 plexosd — PlexOS management daemon
@@ -44,61 +42,6 @@ OPTIONS:
 
 Exit status is the verdict: 0 only when the boot is healthy.
 ";
-
-/// The ESP's GPT label, from the frozen layout. Resolved through sysfs rather than
-/// through `/dev/disk/by-partlabel/`, because that directory is made by `udev` and
-/// this system has none — the same absence `plexos-init` deals with at boot.
-const ESP_LABEL: &str = plexos_types::partition::LABEL_ESP;
-
-fn clear_counter(device: &str) -> Result<String, String> {
-    let mut outcome = String::new();
-
-    let result = esp::with_esp_mounted(device, &mut |esp_path| {
-        let entries = esp::entries(esp_path)?;
-        let on_trial: Vec<_> = entries.iter().filter(|(_, e)| e.is_on_trial()).collect();
-
-        match on_trial.as_slice() {
-            [] => {
-                "no entry on trial; this slot is already permanent".clone_into(&mut outcome);
-                Ok(())
-            }
-            [(path, entry)] => {
-                match esp::mark_good(path, entry)? {
-                    Some(renamed) => {
-                        outcome = format!(
-                            "{} -> {}",
-                            entry,
-                            renamed.file_name().unwrap_or_default().to_string_lossy()
-                        );
-                    }
-                    None => outcome = format!("{entry} was already good"),
-                }
-                Ok(())
-            }
-            many => {
-                // Renaming the wrong one would mark a slot permanent that was never
-                // booted. Leaving the counter alone costs at most a rollback.
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "{} entries are on trial and there is no way to tell which one \
-                         booted; leaving the counter alone. Entries: {}",
-                        many.len(),
-                        many.iter()
-                            .map(|(_, e)| e.to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                ))
-            }
-        }
-    });
-
-    match result {
-        Ok(()) => Ok(outcome),
-        Err(error) => Err(error.to_string()),
-    }
-}
 
 /// Verifies and mounts the provisioned Plex app image.
 ///
@@ -266,56 +209,36 @@ fn main() -> ExitCode {
         } => (check_only, esp_device),
     };
 
-    let health: Health = plexosd::health::run_all();
-    println!("plexosd: boot health");
-    for check in &health.checks {
-        println!("  {check}");
-    }
-
-    if !health.is_healthy() {
-        eprintln!(
-            "plexosd: boot is NOT healthy; leaving the try counter alone so this slot \
-             rolls back (ADR-0005)"
-        );
-        for failure in health.failures() {
-            eprintln!("  {}: {}", failure.name, failure.detail);
+    let mut log = |line: &str| println!("plexosd: {line}");
+    let verdict = if check_only {
+        // --check reports and touches nothing, so the ESP is never resolved and the
+        // counter never written.
+        let health = plexosd::health::run_all();
+        log("boot health");
+        for check in &health.checks {
+            log(&format!("  {check}"));
         }
-        return ExitCode::FAILURE;
-    }
-
-    if check_only {
-        println!("plexosd: healthy (--check, counter untouched)");
-        return ExitCode::SUCCESS;
-    }
-
-    // Resolved late: --check never needs it, and an unhealthy boot must not fail for
-    // want of an ESP it was never going to write to.
-    let device = match esp_device {
-        Some(explicit) => explicit,
-        None => match plexos_sys::device::by_partlabel(ESP_LABEL) {
-            Ok(found) => found,
-            Err(error) => {
-                eprintln!(
-                    "plexosd: healthy, but the ESP could not be found: {error}\n  \
-                     the boot counter cannot be cleared, so this slot will roll back"
-                );
-                return ExitCode::FAILURE;
-            }
-        },
+        if health.is_healthy() {
+            log("healthy (--check, counter untouched)");
+            return ExitCode::SUCCESS;
+        }
+        plexosd::gate::Verdict::Unhealthy(
+            health
+                .failures()
+                .iter()
+                .map(|c| format!("{}: {}", c.name, c.detail))
+                .collect(),
+        )
+    } else {
+        plexosd::gate::run(esp_device.as_deref(), &mut log)
     };
 
-    match clear_counter(&device) {
-        Ok(outcome) => {
-            println!("plexosd: healthy; {outcome}");
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            // The boot is good but could not be recorded as such. Not fatal to this
-            // boot, and deliberately loud: left unfixed it rolls the machine back to
-            // the previous slot in three reboots, long after the cause.
-            eprintln!("plexosd: healthy, but could not clear the boot counter: {error}");
-            ExitCode::FAILURE
-        }
+    if verdict.is_healthy() {
+        println!("plexosd: {verdict}");
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("plexosd: {verdict}");
+        ExitCode::FAILURE
     }
 }
 
