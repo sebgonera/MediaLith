@@ -117,7 +117,21 @@ pub fn is_provisioned(mount: &Path) -> bool {
 #[derive(Debug, Default)]
 pub struct Handle {
     child: Mutex<Option<std::process::Child>>,
+    /// What the confined child said, bounded.
+    ///
+    /// An `Arc` because the draining threads outlive the call that started them. Without
+    /// this the child's output went only to the console attached to the machine, which
+    /// is the one place this project has spent months trying not to need: Plex started
+    /// and died on the appliance and the reason was on a screen nobody could read over
+    /// the network, so the diagnosis had to be reconstructed by experiment instead.
+    log: std::sync::Arc<Mutex<Vec<String>>>,
 }
+
+/// Lines kept from the confined child.
+///
+/// Enough to hold the confinement sequence and Plex's own first complaints, bounded
+/// because this lives for the life of the daemon.
+pub const MAX_LOG_LINES: usize = 200;
 
 impl Handle {
     /// A handle that has started nothing.
@@ -162,8 +176,18 @@ impl Handle {
         }
 
         match start(log) {
-            Ok(child) => {
+            Ok(mut child) => {
                 log(&format!("Plex started as pid {}", child.id()));
+
+                // Drained on threads so the child cannot block on a full pipe, and so
+                // whatever it says is readable over the network rather than only on the
+                // screen attached to the machine.
+                if let Some(out) = child.stdout.take() {
+                    Self::drain(out, std::sync::Arc::clone(&self.log));
+                }
+                if let Some(err) = child.stderr.take() {
+                    Self::drain(err, std::sync::Arc::clone(&self.log));
+                }
                 *held = Some(child);
             }
             Err(error) => log(&format!("could not start Plex: {error}")),
@@ -223,6 +247,37 @@ impl Handle {
         ));
     }
 
+    /// What the confined child has said so far.
+    #[must_use]
+    pub fn log(&self) -> Vec<String> {
+        self.log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Reads one of the child's streams into [`Self::log`] until it closes.
+    fn drain(stream: impl std::io::Read + Send + 'static, log: std::sync::Arc<Mutex<Vec<String>>>) {
+        std::thread::spawn(move || {
+            use std::io::BufRead as _;
+            for line in std::io::BufReader::new(stream)
+                .lines()
+                .map_while(Result::ok)
+            {
+                // Still printed: the console attached to the machine is the only thing
+                // that works when the network does not.
+                println!("plexosd: plex: {line}");
+                let mut held = log
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if held.len() >= MAX_LOG_LINES {
+                    held.remove(0);
+                }
+                held.push(line);
+            }
+        });
+    }
+
     /// Whether a child is alive right now.
     #[must_use]
     pub fn is_running(&self) -> bool {
@@ -278,6 +333,11 @@ pub fn start(log: &mut dyn FnMut(&str)) -> io::Result<std::process::Child> {
     let executable = std::env::current_exe()?;
     std::process::Command::new(executable)
         .arg(CHILD_FLAG)
+        // Piped rather than inherited, so the confinement log and Plex's own first
+        // complaints can be read over the network. Handle::ensure_started drains both;
+        // leaving them piped and unread would eventually block the child on a full pipe.
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
 }
 

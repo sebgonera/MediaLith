@@ -120,6 +120,51 @@ pub fn grants(mount: &Path, media: &[PathBuf]) -> Vec<Grant> {
     use plexos_sys::landlock::access;
 
     let mut grants = vec![
+        // The base system, read and execute. This is not a relaxation of ADR-0007 bolted
+        // on afterwards; it is what the ADR's four paths turned out to be missing. A
+        // ruleset that handles every filesystem operation denies everything it does not
+        // grant, including the dynamic loader opening libc -- so with the original list
+        // Plex could not be executed at all, and did not survive its own execve. That
+        // was measured rather than reasoned about: applying this policy and then running
+        // /bin/echo fails with EACCES, and /proc/self/status is unreadable.
+        //
+        // Granting it costs little. /usr is a read-only dm-verity mount, so read and
+        // execute there is exactly what every process on this machine already has and
+        // nothing Plex could change. What matters is what is still *not* granted, below.
+        Grant {
+            path: PathBuf::from(paths::USR),
+            access: access::READ_EXECUTE,
+            required: true,
+        },
+        // Configuration: resolv.conf for DNS, localtime for timestamps, and passwd --
+        // without which getpwuid(900) fails and Plex cannot learn its own account.
+        Grant {
+            path: PathBuf::from("/etc"),
+            access: access::READ_ONLY,
+            required: true,
+        },
+        // Plex reads /proc/self, /proc/cpuinfo and /proc/meminfo to size its own work.
+        Grant {
+            path: PathBuf::from("/proc"),
+            access: access::READ_ONLY,
+            required: true,
+        },
+        // /dev/null and /dev/urandom, which any non-trivial process opens. Write is
+        // included because /dev/null is written to; this is a devtmpfs with the standard
+        // node set and nothing on it is persistent state.
+        Grant {
+            path: PathBuf::from("/dev"),
+            access: access::READ_FILE | access::WRITE_FILE | access::READ_DIR,
+            required: true,
+        },
+        // Hardware discovery. Not required: a machine whose sysfs is unreadable is
+        // broken in ways that are not Plex's problem, and the transcoder falls back to
+        // software rather than failing.
+        Grant {
+            path: PathBuf::from("/sys"),
+            access: access::READ_ONLY,
+            required: false,
+        },
         // The app image. Read and execute, never write: it is a read-only erofs mount
         // and saying so here means a future writable one does not silently become
         // writable to Plex.
@@ -307,6 +352,76 @@ mod tests {
         let image = grants.iter().find(|g| g.path == mount()).unwrap();
         assert_ne!(image.access & access::EXECUTE, 0);
         assert_eq!(image.access & access::WRITE_FILE, 0);
+    }
+
+    #[test]
+    fn the_policy_can_actually_execute_a_dynamically_linked_program() {
+        // The property the original four-path policy lacked, and the reason Plex started
+        // and died in the same instant on the appliance. A ruleset that handles every
+        // filesystem operation denies what it does not grant, so without /usr the
+        // dynamic loader cannot open libc and execve fails before Plex runs a line.
+        //
+        // Asserted structurally here; proved by execution in examples/landlock-demo and,
+        // when it was broken, by applying this exact set and watching /bin/echo fail with
+        // EACCES.
+        let grants = grants(&mount(), &[]);
+        let find = |p: &str| {
+            grants
+                .iter()
+                .find(|g| g.path == Path::new(p))
+                .unwrap_or_else(|| panic!("{p} must be granted or nothing can run"))
+        };
+
+        let usr = find(paths::USR);
+        assert_ne!(usr.access & access::EXECUTE, 0, "libc must be executable");
+        assert_ne!(usr.access & access::READ_FILE, 0);
+        assert!(usr.required, "nothing runs without it");
+
+        // getpwuid(900) reads /etc/passwd; without it Plex cannot learn its own account.
+        assert_ne!(find("/etc").access & access::READ_FILE, 0);
+        assert_ne!(find("/proc").access & access::READ_FILE, 0);
+        // /dev/null is opened by almost everything, and written to.
+        assert_ne!(find("/dev").access & access::WRITE_FILE, 0);
+    }
+
+    #[test]
+    fn the_base_system_is_readable_and_never_writable() {
+        // What granting /usr, /etc, /proc and /sys must not cost: Plex may read the
+        // system it runs on and may not change any of it.
+        for path in [paths::USR, "/etc", "/proc", "/sys"] {
+            let grant = grants(&mount(), &[])
+                .into_iter()
+                .find(|g| g.path == Path::new(path))
+                .expect("granted");
+            assert_eq!(
+                grant.access & (access::WRITE_FILE | access::MAKE_REG | access::REMOVE_FILE),
+                0,
+                "{path} must not be writable by Plex"
+            );
+        }
+    }
+
+    #[test]
+    fn plexoss_own_state_is_not_reachable_from_plex() {
+        // The device token lives in /var/lib/plexos, and the media database in
+        // /var/lib/plex. Granting the second must never grant the first: a compromised
+        // Plex that could read the token could install whatever it liked over the
+        // console. Nothing here may name /var itself, and the granted paths must sit
+        // strictly below it.
+        let state = Path::new(plexos_types::paths::PLEXOS_STATE);
+        for grant in grants(&mount(), &[]) {
+            assert_ne!(
+                grant.path,
+                Path::new(paths::VAR),
+                "granting /var grants the token"
+            );
+            assert!(
+                !state.starts_with(&grant.path) || grant.path == Path::new("/"),
+                "{} would make {} reachable",
+                grant.path.display(),
+                state.display()
+            );
+        }
     }
 
     #[test]

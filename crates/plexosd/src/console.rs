@@ -113,6 +113,7 @@ pub fn respond(
                 progress: job.snapshot(),
                 installed: crate::plex::is_provisioned(mount),
                 running: plex.is_running(),
+                plex_log: plex.log(),
                 web: crate::provision::PLEX_WEB,
             };
             match serde_json::to_string(&report) {

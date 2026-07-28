@@ -295,6 +295,12 @@ pub struct Report {
     pub installed: bool,
     /// Whether this daemon has a Plex running right now.
     pub running: bool,
+    /// What the confined Plex child has said, if one was started.
+    ///
+    /// Bounded and possibly empty. It is here rather than in a route of its own because
+    /// the page already polls this one, and "Plex will not start" is a question about
+    /// provisioning as far as anybody reading the page is concerned.
+    pub plex_log: Vec<String>,
     /// Where Plex's own interface is, once there is one to visit.
     ///
     /// A port and a path rather than a whole URL: the page knows the host it was served
