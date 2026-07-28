@@ -333,14 +333,27 @@ pub fn attach_loop(
         .map_err(|e| Failure::new("running losetup", e))?;
 
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+
+        // The remedy has to match the error. "All the loop devices are in use" is good
+        // advice for a busy machine and actively misleading for a losetup that does not
+        // understand the flag it was given -- which is what busybox's losetup does, and
+        // it sent one diagnosis down entirely the wrong path.
+        let remedy = if detail.contains("unrecognized option") || detail.contains("Usage: losetup")
+        {
+            "This losetup does not understand --show, so it cannot report which device \
+             it attached. That is busybox's applet rather than util-linux's, and it is \
+             an image fault: set BR2_PACKAGE_UTIL_LINUX_LOSETUP=y and turn busybox's \
+             CONFIG_LOSETUP off so exactly one program owns the path."
+        } else {
+            "All eight of the kernel's pre-created loop devices may be in use — \
+             `losetup -a` lists them."
+        };
+
         return Err(Failure::new(
             "attaching the app image to a loop device",
-            format!(
-                "losetup exited {}: {}. All eight of the kernel's pre-created loop \
-                 devices may be in use — `losetup -a` lists them.",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
+            format!("losetup exited {}: {detail}. {remedy}", output.status),
         ));
     }
 
@@ -422,6 +435,42 @@ mod tests {
         let defconfig = include_str!("../../../buildroot/configs/plexos_x86_64_defconfig");
         assert!(defconfig.contains("BR2_TARGET_ROOTFS_EROFS_LZ4HC=y"));
         assert_eq!(EROFS_COMPRESSION, "lz4hc");
+    }
+
+    #[test]
+    fn a_losetup_that_does_not_understand_the_flag_is_not_blamed_on_busy_loop_devices() {
+        // Reported from the appliance: busybox's losetup has no --show, and the message
+        // said all eight loop devices might be in use. That is good advice for a busy
+        // machine and sends the reader nowhere useful here.
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::path::PathBuf;
+
+        let dir = std::env::temp_dir().join("plexos-losetup-remedy");
+        std::fs::create_dir_all(&dir).unwrap();
+        let stub = dir.join("losetup");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\nprintf \"losetup: unrecognized option '--show'\\n\" >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let tools = crate::tools::MountTools {
+            losetup: stub,
+            sha256sum: PathBuf::from("/bin/sha256sum"),
+        };
+        let message = attach_loop(&tools, Path::new("/nonexistent.img"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            message.contains("BR2_PACKAGE_UTIL_LINUX_LOSETUP"),
+            "the remedy must name the option that fixes it: {message}"
+        );
+        assert!(
+            !message.contains("in use"),
+            "and must not suggest the loop devices are busy: {message}"
+        );
     }
 
     #[test]

@@ -123,6 +123,14 @@ BR2_PACKAGE_XFSPROGS=y
 # device at first boot, which means the device builds the app image itself. It is also
 # the only choice available — CONFIG_SQUASHFS is not set in the kernel fragment and
 # CONFIG_EROFS_FS is, so erofs is what an app image can be, not what we prefer.
+# busybox's losetup is a different program from util-linux's, not a smaller build of
+# it: it has no --show, so it cannot report which device it attached, and mounting the
+# Plex app image needs exactly that. util-linux is already in the image (erofs-utils
+# selects it), so this is one applet rather than a package. The busybox fragment turns
+# its own losetup off, so precisely one program owns /sbin/losetup and the result does
+# not depend on which package Buildroot happens to install last.
+BR2_PACKAGE_UTIL_LINUX_LOSETUP=y
+
 BR2_PACKAGE_EROFS_UTILS=y
 # The target's mkfs.erofs is a different build from the host's, and only the host's had
 # a compressor. Without this it is configured --disable-lz4, so provisioning downloads

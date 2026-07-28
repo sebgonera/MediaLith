@@ -21,3 +21,9 @@
 # FEATURE_SEAMLESS_GZ would buy nothing and would look like support that is not there.
 # ADR-0010 treats a change in Plex's packaging as an event to notice, not to absorb.
 CONFIG_FEATURE_SEAMLESS_XZ=y
+
+# busybox's losetup has no --show, so it cannot say which device it attached, and
+# plexos_plex::execute::attach_loop needs the answer to mount the app image. util-linux's
+# losetup does have it and is already in the image. Turning busybox's off means exactly
+# one program is /sbin/losetup, rather than whichever package Buildroot installed last.
+# CONFIG_LOSETUP is not set

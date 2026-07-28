@@ -250,6 +250,12 @@ must be off.
   download is poor; `execute::check_compressor` now goes further and asks whether the
   program can do the thing, before anything is fetched. When adding a package for the
   target, check its sub-options — the default is usually the smallest build.
+  Third instance, and a different flavour: busybox's `losetup` is not a smaller build of
+  util-linux's, it is a *different program*, and it has no `--show` — so it cannot report
+  which device it attached, which is the one thing mounting an app image needs. The fix
+  there is to own the path deliberately: enable the full package's applet and turn
+  busybox's off in the fragment, so the result does not depend on which package Buildroot
+  installed last.
 - **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error
