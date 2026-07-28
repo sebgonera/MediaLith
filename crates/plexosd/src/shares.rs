@@ -586,6 +586,59 @@ pub fn mount_all(log: &mut dyn FnMut(&str)) {
     }
 }
 
+/// Recent kernel messages mentioning a word, newest last.
+///
+/// The kernel explains a refused mount — `nfs_invalf` writes the reason, naming the
+/// option it disliked — and that explanation goes to the kernel ring buffer and nowhere
+/// else. Three diagnoses in this project have stalled on a message that existed and
+/// could not be read over the network; this reads it.
+///
+/// `/dev/kmsg` hands back the whole buffer from the oldest record when opened, and
+/// returns `EAGAIN` at the end rather than blocking, so a non-blocking open drains it.
+#[must_use]
+pub fn kernel_says(about: &str) -> Vec<String> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc_o_nonblock())
+        .open("/dev/kmsg")
+    else {
+        return Vec::new();
+    };
+
+    let mut found = Vec::new();
+    let mut record = [0_u8; 8192];
+    // Bounded: the buffer can hold thousands of records and only the recent ones matter.
+    for _ in 0..4096 {
+        match file.read(&mut record) {
+            // Zero is the end of the buffer and an error is EAGAIN at the end of it;
+            // both mean there is nothing more to read.
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let line = String::from_utf8_lossy(&record[..n]);
+                // "6,123,456789,-;the message" -- the text is after the first ';'.
+                if let Some((_, text)) = line.split_once(';')
+                    && text.contains(about)
+                {
+                    found.push(text.trim_end().to_owned());
+                }
+            }
+        }
+    }
+    found.into_iter().rev().take(8).rev().collect()
+}
+
+/// `O_NONBLOCK`, without reaching for a crate to say 2048.
+///
+/// `plexos-sys` exists so that other crates need no `unsafe`; this needs no syscall at
+/// all, only a constant, and importing a whole binding layer for one integer would be
+/// the more surprising choice.
+const fn libc_o_nonblock() -> i32 {
+    0o4000
+}
+
 /// Whether something is mounted at a path.
 ///
 /// Read from `/proc/mounts` rather than by comparing device numbers: the appliance has
