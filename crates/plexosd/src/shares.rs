@@ -79,14 +79,20 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// The filesystem name the kernel registers for this.
+    /// The filesystem name to *mount* with.
     ///
-    /// Read out of the kernel tree rather than remembered: `nfs4` and `smb3` are both
-    /// registered names in this build, and `cifs` is the older alias for the second.
+    /// `nfs`, not `nfs4`, and the difference is not cosmetic. Both are registered, and
+    /// `/proc/mounts` shows `nfs4` for a version-4 mount however it was asked for — which
+    /// is what misled me: I copied the name out of a working mount's output instead of
+    /// out of the command that made it. `mount.nfs` uses `-t nfs` with `vers=`, and
+    /// `nfs4` is the older entry point whose monolithic parser expects the legacy binary
+    /// structure before it will look at text options.
+    ///
+    /// The version is chosen by `vers=` in the options either way.
     #[must_use]
     pub fn fstype(self) -> &'static str {
         match self {
-            Self::Nfs => "nfs4",
+            Self::Nfs => "nfs",
             Self::Smb => "smb3",
         }
     }
@@ -897,9 +903,11 @@ mod tests {
 
     #[test]
     fn the_filesystem_names_are_the_ones_this_kernel_registers() {
-        // Read out of fs/nfs/fs_context.c and fs/smb/client/cifsfs.c rather than
-        // remembered. A wrong name fails as ENODEV, which reads like a missing driver.
-        assert_eq!(Kind::Nfs.fstype(), "nfs4");
+        // nfs rather than nfs4: /proc/mounts reports nfs4 for any version-4 mount, so
+        // reading the name out of a working mount's *output* rather than out of the
+        // command that made it is how this was wrong for four build cycles. mount.nfs
+        // uses -t nfs with vers=.
+        assert_eq!(Kind::Nfs.fstype(), "nfs");
         assert_eq!(Kind::Smb.fstype(), "smb3");
     }
 
