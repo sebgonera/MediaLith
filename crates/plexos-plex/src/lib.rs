@@ -34,6 +34,7 @@
 
 pub mod ar;
 pub mod build;
+pub mod cgroup;
 pub mod execute;
 pub mod manifest;
 pub mod mount;

@@ -8,6 +8,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# For the frozen Plex uid, so the drop target and the account the image creates
+# cannot disagree.
+plexos-types = { path = "../plexos-types" }
 # Declarations only. The symbols are in the libc that std already links, so on a
 # +crt-static build this adds nothing that was not there before.
 libc = "0.2"

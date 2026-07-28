@@ -1,0 +1,19 @@
+# PlexOS accounts.
+#
+# Format: username uid group gid password home shell groups comment
+#
+# The uid and gid are not free choices. They own every file Plex writes under
+# /var/lib/plex and /var/cache/plex-transcode, and /var outlives an OS update and
+# survives a rollback -- so changing them orphans a media database rather than
+# renaming anything. plexos_types::paths::PLEX_UID carries the same numbers and a test
+# pins them; if these two ever disagree, Plex is handed a data directory it does not
+# own and fails at startup with a permissions error that names neither file.
+#
+# No password and no shell: this account exists to run one confined process (ADR-0007),
+# and nothing should ever log in as it. `!` locks the password; /bin/false makes a
+# successful login useless even if something else grants one.
+#
+# The home directory is Plex's application support directory from ADR-0009. It is
+# created here so that its ownership comes from the same declaration as the account,
+# rather than from a mkdir somewhere that could disagree.
+plex -900 plex -900 ! /var/lib/plex /bin/false - Plex Media Server

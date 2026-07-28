@@ -63,6 +63,24 @@ pub const PLEX_TRANSCODE_DIR: &str = "/var/cache/plex-transcode";
 /// Default mount point for library storage.
 pub const MEDIA: &str = "/var/media";
 
+/// The unprivileged user Plex Media Server runs as (ADR-0007).
+///
+/// **Frozen, and more thoroughly than a path.** This number owns every file Plex
+/// writes under [`PLEX_DATA`] and [`PLEX_TRANSCODE_DIR`], both of which survive an OS
+/// update and an OS rollback. Changing it does not rename anything: it orphans a media
+/// database that the new Plex cannot read and the old one no longer owns, on a
+/// filesystem that ADR-0009 says a migration may only add to.
+///
+/// Below 1000 because it is a system account with no login, and 900 rather than a
+/// lower number to stay clear of the ranges Buildroot's own packages allocate from.
+pub const PLEX_UID: u32 = 900;
+
+/// The group Plex runs as. Same reasoning as [`PLEX_UID`], same freeze.
+pub const PLEX_GID: u32 = 900;
+
+/// Its name in `/etc/passwd`, which the Buildroot users table must agree with.
+pub const PLEX_USER: &str = "plex";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +123,20 @@ mod tests {
             PLEX_TRANSCODE_DIR.starts_with("/var/cache/"),
             "transcode scratch must be under /var/cache so it is never backed up"
         );
+    }
+
+    #[test]
+    fn the_plex_account_is_a_system_account_and_stays_put() {
+        // This uid owns files on /var, which outlives the OS image and survives a
+        // rollback. Changing it orphans a media database rather than renaming anything,
+        // so it is pinned here the way a partition GUID is: the test exists to make the
+        // change deliberate, not to check arithmetic.
+        assert_eq!(PLEX_UID, 900);
+        assert_eq!(PLEX_GID, 900);
+        assert_eq!(PLEX_USER, "plex");
+        let uid = PLEX_UID;
+        assert!(uid < 1000, "a system account, with no login");
+        assert_ne!(uid, 0, "the entire point is that it is not root");
     }
 
     #[test]

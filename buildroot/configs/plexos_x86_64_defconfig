@@ -160,6 +160,15 @@ BR2_PACKAGE_HOST_CRYPTSETUP=y
 # host mkfs.erofs comes in via BR2_TARGET_ROOTFS_EROFS, which depends on
 # host-erofs-utils (fs/erofs/erofs.mk). Not repeated here.
 
+# ---------------------------------------------------------------------------
+# Accounts
+# ---------------------------------------------------------------------------
+# The unprivileged user Plex runs as (ADR-0007). Declared here rather than created at
+# runtime so the uid is a property of the image: a uid invented on first boot would
+# differ between a fresh install and a reinstall over the same /var, and the second
+# machine would find a media database it does not own.
+BR2_ROOTFS_USERS_TABLES="$(BR2_EXTERNAL_PLEXOS_PATH)/board/plexos/x86_64/users.table"
+
 BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_PLEXOS_PATH)/board/plexos/x86_64/post-image.sh"
 
 # ---------------------------------------------------------------------------
