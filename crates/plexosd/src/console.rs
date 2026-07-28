@@ -452,6 +452,38 @@ mod tests {
     }
 
     #[test]
+    fn the_token_field_outlives_the_flow_that_first_needed_it() {
+        // It began inside the Plex install card, which renders as a single link once Plex
+        // is running -- so on a working appliance there was nowhere to type the token,
+        // and every button that needs one silently refused. Reported as "I click Check
+        // and nothing happens".
+        assert!(
+            PAGE.contains("id=\"token-card\""),
+            "the token needs a place of its own, not a corner of a flow that finishes"
+        );
+        let card = PAGE.find("id=\"token-card\"").expect("the card");
+        let plex = PAGE.find("id=\"plex\"").expect("the Plex card");
+        assert!(
+            card < plex,
+            "and it has to come before the things that need it"
+        );
+    }
+
+    #[test]
+    fn a_failure_is_shown_in_the_section_whose_button_was_pressed() {
+        // Writing every error into the Plex card put messages three sections away from
+        // the button that caused them.
+        assert!(
+            PAGE.contains("sectionError(\"update\""),
+            "update errors go to update"
+        );
+        assert!(
+            PAGE.contains("sectionError(\"plex\""),
+            "and Plex errors to Plex"
+        );
+    }
+
+    #[test]
     fn the_page_sends_the_token_the_way_the_adr_requires() {
         // ADR-0013 chose a bearer token so that nothing is attached to a request
         // automatically. A page that put it in a cookie or a query string would defeat

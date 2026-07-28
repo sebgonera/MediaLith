@@ -255,6 +255,18 @@
     <span class="badge" id="gate" hidden></span>
   </header>
 
+  <section class="card plex" id="token-card">
+    <h3>Device token</h3>
+    <p class="hint">Printed on the screen attached to this machine the first time it
+       started — sixteen characters in four groups. Case does not matter and the dashes
+       are optional. Reading this page needs nothing; every button that changes something
+       needs this.</p>
+    <div class="row">
+      <input type="text" id="token" placeholder="4K7Q-M2XR-9T8B-HVWP"
+             autocomplete="off" spellcheck="false" autocapitalize="characters">
+    </div>
+  </section>
+
   <section class="card plex" id="plex" aria-live="polite">
     <h3>Plex Media Server</h3>
     <p class="empty">Loading…</p>
@@ -548,29 +560,20 @@ function renderPlexInto(report) {
        downloads the official package from Plex, checks its signature, and turns it into
        an app image on this machine. Doing so means accepting Plex's terms.</p>
     <div class="row">
-      <input type="text" id="token" placeholder="4K7Q-M2XR-9T8B-HVWP"
-             autocomplete="off" spellcheck="false" autocapitalize="characters"
-             value="${esc(token())}">
       <button id="install" ${busy ? "disabled" : ""}>${phase === "failed" ? "Try again" : "Install Plex"}</button>
     </div>
-    <p class="hint">The token was printed on the screen attached to this machine the
-       first time it started — sixteen characters in four groups. Case does not matter
-       and the dashes are optional. Reading this page needs nothing; installing needs
-       the token.</p>
     ${progress}`;
 
   document.getElementById("install").addEventListener("click", startInstall);
-  document.getElementById("token").addEventListener("input", event => rememberToken(event.target.value));
 }
 
 /** Asks the appliance to install Plex. */
 async function startInstall() {
-  const value = document.getElementById("token").value.trim();
+  const value = token();
   if (!value) {
-    plexError("Enter the device token first. It was printed on the screen attached to this machine.");
+    sectionError("plex", "Enter the device token above first. It was printed on the screen attached to this machine when it started.");
     return;
   }
-  rememberToken(value);
   document.getElementById("install").disabled = true;
 
   try {
@@ -591,11 +594,19 @@ async function startInstall() {
   plexTick();
 }
 
-function plexError(message) {
-  // The next poll must be allowed to redraw over this, so the cached signature cannot
+/** Shows a failure inside the section whose button was pressed.
+ *
+ * Which section matters more than it sounds. The first version of this always wrote into
+ * the Plex card, so pressing Check under System update produced a message three sections
+ * away -- and, once Plex was running, in a card that renders as a single link. It read as
+ * the button doing nothing at all.
+ */
+function sectionError(id, message) {
+  // The next poll must be allowed to redraw over this, so the cached signatures cannot
   // still describe what is on screen.
   lastRendered = null;
-  const section = document.getElementById("plex");
+  lastUpdateRendered = null;
+  const section = document.getElementById(id);
   const existing = section.querySelector(".progress");
   const box = existing || document.createElement("div");
   box.className = "progress failed";
@@ -604,6 +615,8 @@ function plexError(message) {
   const button = document.getElementById("install");
   if (button) button.disabled = false;
 }
+
+function plexError(message) { sectionError("plex", message); }
 
 let plexTimer = null;
 let updateTimer = null;
@@ -677,9 +690,9 @@ function renderUpdate(report) {
 }
 
 async function startUpdate(install) {
-  const value = (sessionStorage.getItem(TOKEN_KEY) || "").trim();
+  const value = token();
   if (!value) {
-    plexError("The device token is needed to check for or install an update. Enter it in the Plex section above.");
+    sectionError("update", "The device token is needed to check for or install an update. Enter it in the Device token box at the top of this page.");
     return;
   }
   if (install && !confirm("Download and write a new system to the other slot?")) return;
@@ -757,11 +770,11 @@ async function tick() {
 
 /** Stops or restarts the appliance, once. */
 async function power(action, label) {
-  const value = (sessionStorage.getItem(TOKEN_KEY) || "").trim();
+  const value = token();
   const note = document.getElementById("power-note");
   if (!value) {
     note.textContent = "The device token is needed to " + label.toLowerCase() +
-      ". Enter it in the Plex section above; it is the same token.";
+      ". Enter it in the Device token box at the top of this page.";
     return;
   }
   if (!confirm(label + " this machine now?")) return;
@@ -798,6 +811,14 @@ async function power(action, label) {
 
 document.getElementById("shutdown").addEventListener("click", () => power("off", "Shut down"));
 document.getElementById("restart").addEventListener("click", () => power("restart", "Restart"));
+
+// The token field is static markup, so it is wired once rather than on every redraw --
+// which is also why it no longer loses what is being typed into it.
+{
+  const field = document.getElementById("token");
+  field.value = token();
+  field.addEventListener("input", event => rememberToken(event.target.value.trim()));
+}
 
 tick();
 setInterval(tick, REFRESH_MS);
