@@ -211,10 +211,18 @@ pub fn boot_plan(args: &BootArgs, state: StateAction) -> Vec<BootStep> {
     let mut steps = Vec::new();
 
     // Pseudo-filesystems first: everything below needs /dev and /proc.
+    //
+    // cgroup2 is in the list because nothing else mounts it, and its absence does not
+    // look like a missing mount: ADR-0007 bounds Plex with cgroup v2, and
+    // plexos_plex::cgroup::apply fails to create its directory, so Plex does not start
+    // at all. It comes after sysfs because /sys/fs/cgroup is a directory *in* sysfs and
+    // does not exist before it. It is carried into the new root by the MS_MOVE of /sys
+    // below, which relocates the whole subtree beneath a mount rather than only its top.
     for (fstype, target, options) in [
         ("devtmpfs", "/dev", "nosuid,mode=0755"),
         ("proc", "/proc", "nosuid,nodev,noexec"),
         ("sysfs", "/sys", "nosuid,nodev,noexec"),
+        ("cgroup2", "/sys/fs/cgroup", "nosuid,nodev,noexec"),
         ("tmpfs", "/run", "nosuid,nodev,mode=0755"),
     ] {
         steps.push(BootStep::MountPseudo {
@@ -473,6 +481,28 @@ mod tests {
         for required in ["/bin", "/sbin", "/lib", "/lib64"] {
             assert!(links.contains(&required), "{required} link missing");
         }
+    }
+
+    #[test]
+    fn the_plan_mounts_cgroup_v2_because_nothing_else_does() {
+        // Its absence does not look like a missing mount. ADR-0007 bounds Plex with
+        // cgroup v2, so plexos_plex::cgroup::apply cannot create its directory and Plex
+        // does not start at all -- on a machine whose kernel has every controller.
+        let steps = plan_for(Slot::A);
+        let cgroup = steps.iter().position(|step| {
+            matches!(step, BootStep::MountPseudo { fstype, target, .. }
+                if *fstype == "cgroup2" && target == "/sys/fs/cgroup")
+        });
+        let sysfs = steps.iter().position(
+            |step| matches!(step, BootStep::MountPseudo { fstype, .. } if *fstype == "sysfs"),
+        );
+
+        let cgroup = cgroup.unwrap_or_else(|| panic!("the plan must mount cgroup2: {steps:?}"));
+        let sysfs = sysfs.expect("the plan must mount sysfs");
+        assert!(
+            sysfs < cgroup,
+            "/sys/fs/cgroup is a directory in sysfs and does not exist before it"
+        );
     }
 
     #[test]

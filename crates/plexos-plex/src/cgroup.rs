@@ -155,6 +155,8 @@ pub fn apply(root: &Path, total_memory: u64, log: &mut dyn FnMut(&str)) -> io::R
         )
     })?;
 
+    delegate(root, log);
+
     for limit in limits_for(total_memory) {
         let path = group.join(&limit.file);
         if let Err(error) = std::fs::write(&path, &limit.value) {
@@ -166,6 +168,43 @@ pub fn apply(root: &Path, total_memory: u64, log: &mut dyn FnMut(&str)) -> io::R
     }
 
     Ok(group)
+}
+
+/// Hands the controllers down to child cgroups, so the limits have files to be written
+/// to.
+///
+/// This is the step that makes [`delegation`] and [`missing_controllers`] mean something.
+/// Without it a controller enabled in the root is *not* available in a child: cgroup v2
+/// requires the parent to name it in `cgroup.subtree_control` first. The symptom is not
+/// an error anywhere near the cause — `memory.max` simply does not exist, `apply` logs
+/// that it could not be written, and Plex runs unbounded on a machine whose kernel
+/// supports every bound asked for.
+///
+/// Reported and never fatal, for the reason [`apply`] gives: an unbounded Plex is worse
+/// than a bounded one and far better than none.
+fn delegate(root: &Path, log: &mut dyn FnMut(&str)) {
+    let available = std::fs::read_to_string(root.join("cgroup.controllers")).unwrap_or_default();
+
+    let missing = missing_controllers(&available);
+    if !missing.is_empty() {
+        log(&format!(
+            "the kernel offers no {} controller at {}, so that bound cannot exist. \
+             Check CONFIG_MEMCG, CONFIG_CGROUP_PIDS and CONFIG_CGROUP_SCHED in the \
+             kernel configuration; this is an image fault, not a runtime one.",
+            missing.join(", "),
+            root.display()
+        ));
+    }
+
+    let subtree = root.join("cgroup.subtree_control");
+    if let Err(error) = std::fs::write(&subtree, delegation()) {
+        log(&format!(
+            "could not delegate controllers by writing {:?} to {}: {error}. The limits \
+             below will have no files to be written to, and Plex runs unbounded.",
+            delegation(),
+            subtree.display()
+        ));
+    }
 }
 
 /// Moves a process into the cgroup.
@@ -194,6 +233,82 @@ pub fn join(group: &Path, pid: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cgroup root as the kernel presents one, in a directory a test can write to.
+    fn mock_root(name: &str, controllers: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("cgroup.controllers"), controllers).unwrap();
+        std::fs::write(root.join("cgroup.subtree_control"), "").unwrap();
+        root
+    }
+
+    #[test]
+    fn applying_limits_delegates_the_controllers_first() {
+        // The step that was missing. cgroup v2 does not make a controller available in a
+        // child merely because the root has it: the parent must name it in
+        // cgroup.subtree_control. Without this, memory.max does not exist in the child,
+        // apply() logs that it could not write it, and Plex runs unbounded on a machine
+        // whose kernel supports every bound asked for.
+        let root = mock_root("plexos-cgroup-delegate", "cpuset cpu io memory pids");
+        let mut lines = Vec::new();
+        let group = apply(&root, 8 * 1024 * 1024 * 1024, &mut |line| {
+            lines.push(line.to_owned());
+        })
+        .unwrap();
+
+        let written = std::fs::read_to_string(root.join("cgroup.subtree_control")).unwrap();
+        for controller in REQUIRED_CONTROLLERS {
+            assert!(
+                written.contains(&format!("+{controller}")),
+                "{controller} was never delegated: {written:?}"
+            );
+        }
+        assert!(group.ends_with(PLEX_CGROUP));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_kernel_without_a_controller_is_named_an_image_fault() {
+        // A missing controller and a failed delegation take opposite responses: one is
+        // a kernel configuration to change and rebuild, the other is something wrong at
+        // runtime. Reporting them the same way sends someone to the wrong place.
+        let root = mock_root("plexos-cgroup-no-memory", "cpuset cpu io");
+        let mut lines = Vec::new();
+        apply(&root, 8 * 1024 * 1024 * 1024, &mut |line| {
+            lines.push(line.to_owned());
+        })
+        .unwrap();
+
+        let logged = lines.join("\n");
+        assert!(logged.contains("memory"), "{logged}");
+        assert!(
+            logged.contains("CONFIG_MEMCG"),
+            "and names the remedy: {logged}"
+        );
+        assert!(logged.contains("image fault"), "{logged}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delegation_that_cannot_be_written_is_reported_and_not_fatal() {
+        // An unbounded Plex is worse than a bounded one and far better than none.
+        let root = mock_root("plexos-cgroup-readonly", "memory pids cpu");
+        std::fs::remove_file(root.join("cgroup.subtree_control")).unwrap();
+        std::fs::create_dir(root.join("cgroup.subtree_control")).unwrap();
+
+        let mut lines = Vec::new();
+        let outcome = apply(&root, 8 * 1024 * 1024 * 1024, &mut |line| {
+            lines.push(line.to_owned());
+        });
+        assert!(outcome.is_ok(), "the cgroup is still created");
+        assert!(
+            lines.join("\n").contains("runs unbounded"),
+            "and says what the consequence is: {lines:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     const GIB: u64 = 1024 * 1024 * 1024;
 

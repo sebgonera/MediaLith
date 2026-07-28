@@ -225,6 +225,19 @@ must be off.
   machine and an untouched one report the same hash. `/api/status` reports the whole
   command line for this reason: it is the only field that distinguishes them, and
   without it "the fix did not work" and "the image was not flashed" look the same.
+- **Nothing mounted cgroup v2, and the symptom would have been "Plex will not start".**
+  `plan.rs` assembles the root from nothing, so the only filesystems that exist are the
+  ones it mounts — and `/sys/fs/cgroup` was not among them. ADR-0007 bounds Plex with
+  cgroup v2, so `cgroup::apply` could not create its directory, `plex::prepare` failed,
+  and the child that becomes Plex was never spawned. On a machine whose kernel has every
+  controller compiled in. Found by reading the plan against the trap two entries above,
+  not by booting.
+- **A controller enabled in the cgroup root is not available to a child.** cgroup v2
+  requires the parent to name it in `cgroup.subtree_control` first. `cgroup::delegation`
+  and `cgroup::missing_controllers` existed for exactly this and had no caller but their
+  own tests, so `memory.max` would simply not have existed in Plex's cgroup: `apply`
+  logs that it could not write the limit, and Plex runs unbounded. Two functions with no
+  caller is the same shape as the `auth` defect — worth grepping for.
 - **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error
