@@ -48,6 +48,7 @@ pub mod device;
 pub mod dm;
 pub mod landlock;
 pub mod mount;
+pub mod power;
 pub mod privilege;
 pub mod process;
 pub mod verity;

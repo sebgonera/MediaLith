@@ -170,6 +170,59 @@ impl Handle {
         }
     }
 
+    /// Asks Plex to exit, and waits for it.
+    ///
+    /// `SIGTERM` and then patience, rather than `SIGKILL`: Plex keeps its library in
+    /// `SQLite`, and killing it mid-write is the specific damage the shutdown sequence
+    /// exists to avoid. Returns once it has gone or the grace period has run out, and
+    /// says which — an appliance that reports a clean stop it did not achieve is worse
+    /// than one that admits Plex ignored it.
+    pub fn stop(&self, grace: std::time::Duration, log: &mut dyn FnMut(&str)) {
+        let mut held = self
+            .child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let Some(child) = held.as_mut() else {
+            log("no Plex was started from here, so there is nothing to stop");
+            return;
+        };
+
+        match plexos_sys::power::terminate(child.id()) {
+            Ok(()) => log(&format!("asked Plex (pid {}) to exit", child.id())),
+            Err(error) => {
+                log(&format!(
+                    "could not signal Plex (pid {}): {error}. It has probably exited \
+                     already; continuing.",
+                    child.id()
+                ));
+                return;
+            }
+        }
+
+        let deadline = std::time::Instant::now() + grace;
+        while std::time::Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    log(&format!("Plex exited with {status}"));
+                    *held = None;
+                    return;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                Err(error) => {
+                    log(&format!("could not wait for Plex: {error}"));
+                    return;
+                }
+            }
+        }
+
+        log(&format!(
+            "Plex has not exited after {}s. Going ahead: its data is on a journalling \
+             filesystem and the alternative is refusing to turn the machine off.",
+            grace.as_secs()
+        ));
+    }
+
     /// Whether a child is alive right now.
     #[must_use]
     pub fn is_running(&self) -> bool {

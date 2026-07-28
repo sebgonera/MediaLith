@@ -229,6 +229,21 @@
     white-space: pre-wrap;
   }
   .failed { border-color: var(--unavailable); color: var(--unavailable); }
+
+  /* Power. Deliberately quiet: it is needed rarely and its mistake is expensive. */
+  .power { margin: 1.5rem 0; }
+  .power .row { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .6rem; }
+  .power button {
+    padding: .5rem 1rem;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--ink);
+    font: inherit;
+    cursor: pointer;
+  }
+  .power button:hover { border-color: var(--unavailable); color: var(--unavailable); }
+  .power button[disabled] { opacity: .55; cursor: default; }
 </style>
 </head>
 <body>
@@ -248,6 +263,16 @@
   <main id="main" aria-live="polite">
     <p class="empty">Loading…</p>
   </main>
+
+  <section class="card power" id="power">
+    <h3>Power</h3>
+    <p class="hint" id="power-note">Stopping this way closes Plex's database and flushes
+       the disk first. Holding the power button does neither.</p>
+    <div class="row">
+      <button id="shutdown">Shut down</button>
+      <button id="restart">Restart</button>
+    </div>
+  </section>
 
   <footer>
     <span id="uptime"></span>
@@ -601,6 +626,50 @@ async function tick() {
     renderError(error.message || error);
   }
 }
+
+/** Stops or restarts the appliance, once. */
+async function power(action, label) {
+  const value = (sessionStorage.getItem(TOKEN_KEY) || "").trim();
+  const note = document.getElementById("power-note");
+  if (!value) {
+    note.textContent = "The device token is needed to " + label.toLowerCase() +
+      ". Enter it in the Plex section above; it is the same token.";
+    return;
+  }
+  if (!confirm(label + " this machine now?")) return;
+
+  // Both are disabled for good: whatever happens next, this page is about to stop being
+  // connected to anything, and a second press would go nowhere.
+  document.getElementById("shutdown").disabled = true;
+  document.getElementById("restart").disabled = true;
+
+  try {
+    const response = await fetch("/api/power", {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    if (!response.ok) {
+      note.textContent = await response.text();
+      document.getElementById("shutdown").disabled = false;
+      document.getElementById("restart").disabled = false;
+      return;
+    }
+  } catch (error) {
+    // The machine going away mid-request looks exactly like this, so it is not reported
+    // as a failure -- saying "could not shut down" to somebody watching the fans stop
+    // would be worse than saying nothing.
+    note.textContent = label + " requested. This page will stop responding.";
+    return;
+  }
+  note.textContent = action === "off"
+    ? "Shutting down. Wait for the machine to go quiet before cutting power."
+    : "Restarting. This page will come back on its own once the console is up.";
+}
+
+document.getElementById("shutdown").addEventListener("click", () => power("off", "Shut down"));
+document.getElementById("restart").addEventListener("click", () => power("restart", "Restart"));
 
 tick();
 setInterval(tick, REFRESH_MS);

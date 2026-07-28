@@ -83,6 +83,28 @@ pub fn respond(
             Response::json("{\"started\":true}")
         }
 
+        // Stopping the machine. The response goes out before anything happens, because
+        // reboot(2) does not return -- see crate::power for why that ordering matters.
+        ("POST", "/api/power") => match crate::power::action_in(&request.body) {
+            Some(action) => {
+                crate::power::schedule(action, plex);
+                Response::json(format!(
+                    "{{\"action\":\"{}\"}}",
+                    match action {
+                        plexos_sys::power::Action::Off => "off",
+                        plexos_sys::power::Action::Restart => "restart",
+                    }
+                ))
+            }
+            None => Response::text(
+                400,
+                "Send {\"action\":\"off\"} or {\"action\":\"restart\"}. Nothing is \
+                 assumed when the action is missing or unrecognised: guessing wrong \
+                 either leaves a machine running that was meant to be silent, or takes \
+                 down one somebody wanted back.\n",
+            ),
+        },
+
         // Following one. Polled by the page every second or so, so it is deliberately
         // cheap: it reads a struct behind a mutex and serialises it.
         ("GET" | "HEAD", "/api/provision") => {
@@ -143,7 +165,7 @@ fn respond_read_only(request: &Request, env: &impl Environment, path: &str) -> R
             format!(
                 "no such page: {other}\n\nThis console serves / , /api/status, /api/gpu, \
                  /healthz and /api/provision (GET to follow an installation, POST with \
-                 the device token to start one).\n"
+                 the device token to start one). POST /api/power stops the machine.\n"
             ),
         ),
     }
@@ -402,6 +424,45 @@ mod tests {
         assert!(
             !PAGE.contains("?token="),
             "and not in a query string, which is logged everywhere"
+        );
+    }
+
+    #[test]
+    fn stopping_the_machine_refuses_a_request_that_does_not_say_which_way() {
+        // No safe default: guessing restart when somebody meant off leaves a machine
+        // running that was meant to be silent, and guessing the other way takes down a
+        // server somebody wanted back. Note this never reaches schedule(), so no test
+        // here can turn the build host off.
+        for body in [&b"{}"[..], b"", br#"{"action":"halt"}"#] {
+            let request = Request {
+                method: "POST".to_owned(),
+                path: "/api/power".to_owned(),
+                headers: Vec::new(),
+                body: body.to_vec(),
+            };
+            let response = respond(
+                &request,
+                &Fixture::new(),
+                &std::sync::Arc::new(crate::provision::Job::new()),
+                &std::sync::Arc::new(crate::plex::Handle::new()),
+            );
+            assert_eq!(response.status, 400, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn the_page_offers_a_way_to_stop_that_is_not_the_power_button() {
+        // The machine has no keyboard worth using and no shell anybody is expected to
+        // reach. Holding the power button for five seconds cuts power mid-write.
+        assert!(PAGE.contains("Shut down"), "the page must offer a shutdown");
+        assert!(PAGE.contains("Restart"), "and a restart");
+        assert!(
+            PAGE.contains("\"/api/power\""),
+            "pointed at the route this module serves"
+        );
+        assert!(
+            PAGE.contains("confirm("),
+            "behind a confirmation, because the mistake is expensive"
         );
     }
 
