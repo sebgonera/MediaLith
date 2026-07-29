@@ -196,10 +196,37 @@ pub fn grants(mount: &Path, media: &[PathBuf]) -> Vec<Grant> {
             access: access::READ_EXECUTE,
             required: true,
         },
-        // Its own data. The media database lives here.
+        // Its own data. The media database lives here -- and so do the codecs Plex
+        // downloads for itself, which is why this grants EXECUTE as well.
+        //
+        // That was not obvious and it cost a working film. Plex does not ship every audio
+        // encoder: EAC3, TrueHD and DTS go through EasyAudioEncoder, which Plex fetches at
+        // runtime into `Codecs/` under this directory and then runs as a separate process.
+        // With READ_WRITE alone the binary downloads fine, is mode 0755, runs perfectly
+        // from a shell -- and never starts under the policy. What the user sees is
+        // "EasyAudioEncoder failed", and what the log says is "EAE not running, or wrong
+        // folder?", which points at a folder that is right.
+        //
+        // Third instance of one shape, after `/usr` and `/run`: a deny-by-default policy
+        // missing something nobody had listed, discovered only when a file that needed it
+        // was finally played.
+        //
+        // # What this costs, stated plainly
+        //
+        // Write and execute on the same directory means Plex can run anything it can
+        // write there. The narrower grant -- execute only on `Codecs/` -- was considered
+        // and rejected twice over: Landlock rules need the path to exist when the ruleset
+        // is built, so a machine that has not downloaded a codec yet would silently get no
+        // rule and fail exactly as before until a restart; and creating that directory
+        // ourselves would mean PlexOS writing into a layout ADR-0010 says belongs to Plex.
+        //
+        // What the confinement is *for* is unchanged: nothing outside these grants is
+        // reachable, so `/etc`, `/root`, the ESP, the update path and every other slot
+        // remain closed. This widens what Plex may do inside its own data directory, which
+        // is a place Plex already controls completely.
         Grant {
             path: PathBuf::from(paths::PLEX_DATA),
-            access: access::READ_WRITE,
+            access: access::READ_WRITE | access::EXECUTE,
             required: true,
         },
         // Transcode scratch.
@@ -307,6 +334,30 @@ mod tests {
             .iter()
             .find(|(name, _)| name == key)
             .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn plex_may_execute_the_codecs_it_downloads_into_its_own_data_directory() {
+        // Plex does not ship every audio encoder. EAC3, TrueHD and DTS go through
+        // EasyAudioEncoder, which it fetches at runtime into Codecs/ under PLEX_DATA and
+        // then runs. Granted read and write but not execute, the download succeeds, the
+        // file is 0755, it runs from a shell -- and never starts under the policy. The
+        // symptom is "EasyAudioEncoder failed" and a log line blaming the folder.
+        let grants = grants(&mount(), &[]);
+        let data = grants
+            .iter()
+            .find(|g| g.path == std::path::Path::new(paths::PLEX_DATA))
+            .expect("Plex's data directory is always granted");
+
+        assert!(
+            data.access & access::EXECUTE != 0,
+            "a codec Plex downloads here has to be runnable, or the format needing it \
+             fails with an error that points at the wrong thing"
+        );
+        assert!(
+            data.access & access::WRITE_FILE != 0,
+            "and it still has to be able to download it"
+        );
     }
 
     #[test]
@@ -467,19 +518,44 @@ mod tests {
     }
 
     #[test]
-    fn nothing_writable_is_also_executable() {
+    fn nothing_writable_is_also_executable_except_where_plex_keeps_its_codecs() {
         // The property worth having: a directory Plex can write to is a directory an
-        // exploit can drop a binary into, and one it can also execute from is a
-        // complete escape. Media is read-only, scratch and data are not executable.
+        // exploit can drop a binary into, and one it can also execute from is a complete
+        // escape. Media is read-only; the transcode scratch and the app image keep it.
+        //
+        // PLEX_DATA is the one exception, and it is deliberate rather than an oversight
+        // that outgrew a test. Plex does not ship EAC3, TrueHD or DTS encoders: it
+        // downloads EasyAudioEncoder into Codecs/ under that directory at runtime and
+        // runs it. Denying execute there does not prevent the download, it prevents
+        // playback of those formats, with an error that names the encoder and a log line
+        // blaming a folder that is correct.
+        //
+        // The exception is named here so that a future grant cannot acquire write and
+        // execute quietly. Anything else in this list gaining both fails this test.
+        let exception = std::path::Path::new(paths::PLEX_DATA);
+        let mut found_the_exception = false;
+
         for grant in grants(&mount(), &[PathBuf::from("/var/media/films")]) {
             let writable = grant.access & access::WRITE_FILE != 0;
             let executable = grant.access & access::EXECUTE != 0;
+
+            if grant.path == exception {
+                found_the_exception = true;
+                continue;
+            }
+
             assert!(
                 !(writable && executable),
                 "{} is both writable and executable",
                 grant.path.display()
             );
         }
+
+        assert!(
+            found_the_exception,
+            "the exception must still be in the grant list, or this test is exempting \
+             something that is not there and checking nothing"
+        );
     }
 
     #[test]

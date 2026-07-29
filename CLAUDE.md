@@ -405,6 +405,16 @@ does not work. Images are unsigned, so Secure Boot must be off.
   for that reason, and the sharpest case is the timezone: with no zoneinfo in the image,
   pointing `/etc/localtime` at a missing file *succeeds* and every program then falls back
   to UTC in silence.
+- **Plex downloads its own encoders, and a sandbox that cannot run them fails somewhere
+  else entirely.** EAC3, TrueHD and DTS do not go through ffmpeg here: Plex fetches
+  EasyAudioEncoder at runtime into `Codecs/` under `/var/lib/plex` and runs it as a
+  separate process. Granted read and write but not execute, the download succeeds, the
+  file is 0755, it runs perfectly from a shell — and never starts under Landlock. The
+  screen says "EasyAudioEncoder failed", the log says "EAE not running, or wrong folder?"
+  and names a folder that is correct, and the film that played yesterday was one whose
+  audio happened not to need it. Third instance of the same shape after `/usr` and
+  `/run`: a deny-by-default policy missing something nobody listed, found only when
+  something finally asked for it.
 - **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error
