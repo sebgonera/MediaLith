@@ -602,6 +602,140 @@ async function saveSettings() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Terminal (ADR-0014)
+//
+// Deliberately not an emulator. Rendering escape sequences properly means cursor
+// addressing, scroll regions, colour and character sets -- a real terminal emulator,
+// which is a large thing to hand-write and a larger thing to hand-write correctly. What
+// this does instead is strip the sequences a shell session actually produces and append
+// the text, which gives a usable session for the commands anyone opens this for and
+// degrades honestly on the ones it does not: `top` looks wrong rather than looking right
+// and lying.
+//
+// Every request is a POST, including the poll. http::route gates on the method, so a GET
+// would have made a root shell's output readable without the token.
+// ---------------------------------------------------------------------------
+let termId = null;
+let termOffset = 0;
+let termPolling = false;
+
+const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[()][A-Za-z0-9]|\x1b[=>MNOc]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
+
+function termWrite(text) {
+  const out = document.getElementById("term-out");
+  if (!out) return;
+  // Backspace is handled before the control characters are stripped, because a shell
+  // uses it for line editing and dropping it leaves every correction visible.
+  let cleaned = text.replace(/\r\n/g, "\n").replace(ANSI, "");
+  let body = out.textContent + cleaned;
+  body = body.replace(/[^\n\b]\b/g, "");
+  // Bounded, or a long session grows the DOM until the tab dies.
+  if (body.length > 200000) body = body.slice(-200000);
+  out.textContent = body;
+  out.scrollTop = out.scrollHeight;
+}
+
+async function termPost(payload) {
+  const value = token();
+  if (!value) throw new Error("The device token is needed to open a terminal. Enter it in the Device token box at the top of this page.");
+  const response = await fetch("/api/terminal", {
+    method: "POST",
+    cache: "no-store",
+    headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const text = await response.text();
+  if (!response.ok) { const e = new Error(text.trim()); e.status = response.status; throw e; }
+  return text ? JSON.parse(text) : {};
+}
+
+function termSize() {
+  const out = document.getElementById("term-out");
+  if (!out) return { rows: 24, columns: 80 };
+  // Measured from the element rather than guessed: a shell that thinks it has 80 columns
+  // in a 200-column box wraps in the wrong place, which looks like corruption.
+  const probe = document.createElement("span");
+  probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
+  probe.textContent = "0".repeat(100);
+  out.appendChild(probe);
+  const cell = probe.getBoundingClientRect().width / 100;
+  const line = parseFloat(getComputedStyle(out).lineHeight) || 18;
+  probe.remove();
+  return {
+    rows: Math.max(10, Math.floor(out.clientHeight / line)),
+    columns: Math.max(20, Math.floor(out.clientWidth / (cell || 8))),
+  };
+}
+
+async function termOpen(takeOver) {
+  const status = document.getElementById("term-status");
+  try {
+    const size = termSize();
+    const opened = await termPost({ action: "open", take_over: !!takeOver, rows: size.rows, columns: size.columns });
+    termId = opened.id;
+    termOffset = opened.offset;
+    document.getElementById("term-out").textContent = "";
+    if (status) status.textContent = "connected";
+    document.getElementById("term-in").focus();
+    termLoop();
+  } catch (e) {
+    if (e.status === 409) {
+      if (status) status.innerHTML = esc(e.message) + ' <button id="term-takeover">Take it over</button>';
+    } else if (status) {
+      status.textContent = e.message;
+    }
+  }
+}
+
+// One poll at a time, each waiting on the server until there is output. Not an interval:
+// overlapping polls would deliver output out of order.
+async function termLoop() {
+  if (termPolling) return;
+  termPolling = true;
+  try {
+    while (termId) {
+      const out = await termPost({ action: "poll", id: termId, since: termOffset });
+      if (out.lost) termWrite("\n[output was dropped: the shell produced more than the buffer holds]\n");
+      if (out.data) termWrite(out.data);
+      termOffset = out.offset;
+      if (out.finished) {
+        termWrite("\n[the shell exited]\n");
+        termId = null;
+        const status = document.getElementById("term-status");
+        if (status) status.textContent = "closed";
+      }
+    }
+  } catch (e) {
+    termWrite("\n[" + e.message + "]\n");
+    termId = null;
+    const status = document.getElementById("term-status");
+    if (status) status.textContent = "disconnected";
+  } finally {
+    termPolling = false;
+  }
+}
+
+function terminalCard() {
+  return `
+    <div class="card" id="terminal">
+      <h3>Terminal</h3>
+      <p class="hint"><strong>This is a root shell over plain HTTP.</strong> The device
+        token stops a passer-by, not somebody reading the network. ADR-0014: this console
+        is for a trusted LAN and is not fit to expose beyond one.</p>
+      <div class="row">
+        <button id="term-open">Open a shell</button>
+        <button id="term-close">Close</button>
+        <span id="term-status" class="hint"></span>
+      </div>
+      <pre id="term-out" class="log" style="height:22em;overflow:auto;white-space:pre-wrap"></pre>
+      <div class="row">
+        <input type="text" id="term-in" class="mono" autocomplete="off" spellcheck="false"
+               placeholder="type a command and press Enter">
+      </div>
+    </div>`;
+}
+
 function systemCard(status) {
   const p = status.product || {};
   return `
@@ -629,6 +763,16 @@ function render(status) {
   gate.textContent = status.healthy ? "boot healthy" : "boot NOT healthy";
   gate.style.color = status.healthy ? "var(--ready)" : "var(--unavailable)";
   gate.style.borderColor = status.healthy ? "var(--ready)" : "var(--unavailable)";
+
+  // The terminal is rendered once and never re-rendered: the status poll replaces #main
+  // every few seconds, and a terminal whose scrollback and focus vanished on a timer
+  // would be unusable. It lives outside that element for exactly that reason.
+  if (!document.getElementById("terminal")) {
+    const host = document.createElement("div");
+    host.className = "grid";
+    host.innerHTML = terminalCard();
+    document.getElementById("main").after(host);
+  }
 
   document.getElementById("main").innerHTML =
     gpuSection(status.gpu || {}) +
@@ -1118,6 +1262,14 @@ async function power(action, label) {
 document.addEventListener("click", event => {
   if (event.target && event.target.id === "netdiag-run") runNetworkDiagnosis();
   if (event.target && event.target.id === "settings-save") saveSettings();
+  if (event.target && event.target.id === "term-open") termOpen(false);
+  if (event.target && event.target.id === "term-takeover") termOpen(true);
+  if (event.target && event.target.id === "term-close") {
+    const id = termId; termId = null;
+    if (id) termPost({ action: "close", id }).catch(() => {});
+    const status = document.getElementById("term-status");
+    if (status) status.textContent = "closed";
+  }
 });
 
 document.getElementById("shutdown").addEventListener("click", () => power("off", "Shut down"));
@@ -1138,6 +1290,27 @@ setInterval(tick, REFRESH_MS);
 // whatever somebody was halfway through typing into them, which is the one thing a
 // settings form must never do.
 loadSettings();
+
+// A line at a time rather than a keystroke at a time. Character-level input would need
+// the field to stop being a field -- no browser autocomplete, no selection, and a
+// keydown handler reimplementing line editing that the shell already does. Ctrl-C is
+// wired separately because it is the one control sequence a session genuinely needs.
+document.addEventListener("keydown", event => {
+  if (!termId || !event.target || event.target.id !== "term-in") return;
+
+  if (event.key === "Enter") {
+    event.preventDefault();
+    const field = event.target;
+    termPost({ action: "input", id: termId, data: field.value + "\n" }).catch(e => termWrite("\n[" + e.message + "]\n"));
+    field.value = "";
+  } else if (event.ctrlKey && event.key === "c") {
+    event.preventDefault();
+    termPost({ action: "input", id: termId, data: "\u0003" }).catch(() => {});
+  } else if (event.ctrlKey && event.key === "d") {
+    event.preventDefault();
+    termPost({ action: "input", id: termId, data: "\u0004" }).catch(() => {});
+  }
+});
 plexTick();
 updateTick();
 sharesTick();

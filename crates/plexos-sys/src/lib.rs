@@ -52,6 +52,7 @@ pub mod mount;
 pub mod power;
 pub mod privilege;
 pub mod process;
+pub mod pty;
 pub mod verity;
 
 pub use device::{Partition, by_partlabel, wait_for_partlabel};

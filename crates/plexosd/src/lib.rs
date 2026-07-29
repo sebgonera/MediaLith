@@ -57,6 +57,7 @@ pub mod rollback;
 pub mod settings;
 pub mod shares;
 pub mod status;
+pub mod terminal;
 pub mod update;
 
 pub use bootcounter::BootEntry;

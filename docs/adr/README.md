@@ -27,6 +27,7 @@ kind of decision that is embarrassing to get wrong quietly.
 | [0011](0011-syscall-boundary.md) | One crate for unsafe, and no libraries on the boot path | Accepted |
 | [0012](0012-management-console.md) | A read-only status console, served by `plexosd` | Accepted |
 | [0013](0013-console-authentication.md) | A device token for routes that change the machine | Accepted |
+| [0014](0014-console-terminal.md) | A terminal in the console, on a trusted network | Accepted |
 
 ## Template
 

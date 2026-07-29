@@ -131,6 +131,12 @@ pub fn respond(
             Err(error) => Response::text(400, format!("{error}\n")),
         },
 
+        // The terminal (ADR-0014). Every route here is a POST, including the one that
+        // only reads output — deliberately, because http::route gates on the method and
+        // a root shell's output must not be readable without the token. This is the one
+        // place in the console where "GET is safe" is false.
+        ("POST", "/api/terminal") => terminal_route(&request.body),
+
         // The three questions above the interface list: a resolver, a route, and a name
         // that actually resolves. Its own route rather than a field on /api/status
         // because the name lookup blocks for seconds, and the status page polls -- the
@@ -324,6 +330,107 @@ pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::
     log("");
 
     Credential::Set(fingerprint)
+}
+
+/// The terminal's four actions, behind one `POST` route.
+///
+/// One route rather than four paths because all four must be `POST`: [`crate::http`]
+/// gates on the method, and reading a root shell's output is not a safe operation however
+/// much it looks like a read. A `GET /api/terminal/output` would have been ungated, which
+/// is the kind of mistake that is obvious once written down and invisible while writing
+/// it.
+///
+/// Every call first expires an idle session. There is no timer thread: a session nobody
+/// is polling is one nobody will notice the closing of, so the next request of any kind
+/// does the work.
+fn terminal_route(body: &[u8]) -> Response {
+    crate::terminal::expire_if_idle();
+
+    let request: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(error) => return Response::text(400, format!("the body is not JSON: {error}\n")),
+    };
+
+    let id = request.get("id").and_then(serde_json::Value::as_str);
+    let size = plexos_sys::pty::WindowSize {
+        rows: u16::try_from(
+            request
+                .get("rows")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        )
+        .unwrap_or(0),
+        columns: u16::try_from(
+            request
+                .get("columns")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        )
+        .unwrap_or(0),
+    };
+    // A browser that sends nothing sensible gets the size every program understands
+    // rather than 0x0, which some draw nothing at all into.
+    let size = if size.rows == 0 || size.columns == 0 {
+        plexos_sys::pty::WindowSize::default()
+    } else {
+        size
+    };
+
+    let result = match request.get("action").and_then(serde_json::Value::as_str) {
+        Some("open") => {
+            let take_over = request
+                .get("take_over")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            crate::terminal::open(size, take_over).and_then(|opened| json(&opened))
+        }
+        Some("poll") => {
+            let since = request
+                .get("since")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            id.ok_or_else(|| "poll needs an id".to_owned())
+                .and_then(|id| crate::terminal::poll(id, since))
+                .and_then(|output| json(&output))
+        }
+        Some("input") => {
+            let data = request
+                .get("data")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            id.ok_or_else(|| "input needs an id".to_owned())
+                .and_then(|id| crate::terminal::input(id, data.as_bytes()))
+                .map(|()| "{}".to_owned())
+        }
+        Some("resize") => id
+            .ok_or_else(|| "resize needs an id".to_owned())
+            .and_then(|id| crate::terminal::resize(id, size))
+            .map(|()| "{}".to_owned()),
+        Some("close") => {
+            if let Some(id) = id {
+                crate::terminal::close(id);
+            }
+            Ok("{}".to_owned())
+        }
+        other => Err(format!(
+            "{other:?} is not a terminal action. Remedy: one of open, poll, input, \
+             resize, close."
+        )),
+    };
+
+    match result {
+        Ok(json) => Response::json(json),
+        // 409 rather than 400 for a session conflict: the request was well formed and the
+        // machine's state is what refused it, and the page offers "take over" on exactly
+        // that answer.
+        Err(error) if error.contains("already open") => Response::text(409, format!("{error}\n")),
+        Err(error) => Response::text(400, format!("{error}\n")),
+    }
+}
+
+/// Serialises a value, turning a failure into the same `String` error the routes use.
+fn json<T: serde::Serialize>(value: &T) -> Result<String, String> {
+    serde_json::to_string(value).map_err(|e| format!("could not serialise the reply: {e}"))
 }
 
 /// Applies a settings patch and reports what the machine did about it.
