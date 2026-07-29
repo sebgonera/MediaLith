@@ -45,30 +45,28 @@ goes in as belt and braces.
 
 ## Decision
 
-**Three steps, in this order, and the first two are worth doing whether or not the third
-ever happens.**
+**Report first, then NVIDIA. `amdgpu` stays available and unscheduled.**
 
-### 1. `amdgpu`, built in
+### `amdgpu`, deliberately not first
 
-One kconfig symbol and its firmware. AMD's driver is in-tree, exposes a render node,
-and works with the VA-API path this project already proves out end to end — the same
-`plexos-gpu` probe, the same `vainfo` verification, no new trust story. It covers every
-Radeon and every AMD APU, which is a large share of the hardware a person might put a
-media server on.
+One kconfig symbol and its firmware, in-tree, exposing a render node through the same
+VA-API path this project has already proven end to end — no new trust story at all. It
+is by far the cheapest hardware coverage available, and it was the obvious first step
+until the obvious was checked against who is actually running this: none of the
+hardware here is AMD. Doing it first would be widening support for machines nobody
+owns while the machine somebody owns still transcodes on its CPU.
 
-The cost is size: AMD's firmware is the largest single family in `linux-firmware`. The
-image grows, and that is the whole of it.
+It stays written down because the reasoning survives a change of owner, and because the
+day a second person runs this it is an afternoon's work.
 
-This is the cheapest hardware coverage available and it is not blocked on anything.
-
-### 2. Report what the machine has, before it can use it
+### 1. Report what the machine has, before it can use it
 
 Done, in the commit this ADR accompanies. `plexos_gpu::display_devices` reads the PCI bus
 so a card with no driver is told apart from no card at all. Any hardware decision a user
 makes starts with the appliance saying what it sees, and until now it said the wrong
 thing confidently.
 
-### 3. NVIDIA, as an explicitly bounded piece of work
+### 2. NVIDIA, as an explicitly bounded piece of work
 
 **Accepted as a goal, not scheduled.** It is feasible and it is not small. What it
 requires, in the order the work would be done:
@@ -93,6 +91,90 @@ requires, in the order the work would be done:
    kernel versions. Every kernel bump becomes a bump that can fail to compile against a
    driver release, on a project whose update story is a whole-image replacement. That is
    a recurring maintenance cost, not a one-off.
+
+## What step 2 actually involves
+
+Written out because "add NVIDIA support" hides its shape. Every number here was checked
+rather than recalled, and the order is chosen so the things most likely to stop the work
+are discovered first rather than last.
+
+**The size question is settled and it is not a problem.** `usr_a` is 2097152 sectors —
+1 GiB — and today's image uses 73.6 MiB of it. NVIDIA's userspace does not come close to
+filling the remainder, so none of this touches ADR-0003 or the frozen layout.
+
+**The hardware is supported.** NVIDIA's open kernel modules cover Turing and later,
+which includes this card, and the current release is 610.43.03. They state a minimum of
+Linux 4.15 and no maximum — which is a claim about their intent, not a test against
+6.19, and the first build is what turns one into the other.
+
+### In order
+
+1. **`CONFIG_MODULES=y`, and admit it is a reversal.** It is set to `n` in
+   `linux.fragment` under "Trimming", beside `DRM_NOUVEAU` and `DRM_AMDGPU`, with the
+   reasoning "each is attack surface plus CVE maintenance". That reasoning is still
+   true; it is simply outweighed if this hardware is to work. `CONFIG_MODULE_SIG=y` and
+   `CONFIG_MODULE_SIG_FORCE=y` go in at the same time: `/usr` is already verity, so this
+   buys little, but a kernel that will load only what we signed costs nothing and closes
+   the sentence properly. Build and boot this alone, changing nothing else — a monolithic
+   kernel that suddenly has a module loader is a change worth isolating from a driver.
+
+2. **Find out how `/dev/nvidia*` comes to exist, before writing a package.** This is the
+   step most likely to be the expensive surprise, and it is nearly free to check. There
+   is no `udev` here — the trap list has three separate things that assumed there was —
+   and NVIDIA's device nodes are conventionally created either by udev rules or by
+   `nvidia-modprobe`, a setuid helper this image does not have. `devtmpfs` creates nodes
+   only for drivers that register through the device model. If the open modules do not,
+   something in PlexOS has to create `/dev/nvidiactl`, `/dev/nvidia0` and
+   `/dev/nvidia-uvm` with the right major and minor, and that belongs in `plexos-init`'s
+   plan beside the other things it makes from nothing. Answer this with a throwaway build
+   and a shell before packaging anything.
+
+3. **A Buildroot package: `plexos-nvidia`.** Prefixed, because a package directory name
+   becomes its kconfig symbol and colliding with upstream's `nvidia-driver` would have
+   kconfig merge the two definitions silently — a trap already recorded here. It builds
+   the open modules from source against the pinned kernel using Buildroot's
+   `pkg-kernel-module` infrastructure, which is present in the tree and has working
+   examples. Upstream's own `nvidia-driver` package is pinned at 390.151 and is not a
+   starting point for this.
+
+4. **GSP firmware, in `/usr`, not the initramfs.** The open modules do not run without
+   it. The i915 trap does **not** apply: that firmware had to be in the initramfs because
+   `i915` is built in and fetches during `do_initcalls`, a second before `/usr` is
+   mounted. A module loaded after `/usr` is up can read from it, so the blob goes in the
+   image like any other file. Assuming otherwise would cost a build cycle for nothing.
+
+5. **The userspace, and only the parts Plex calls.** `libnvcuvid` and
+   `libnvidia-encode`, plus the CUDA driver library they sit on. Not OpenGL, not Vulkan,
+   not the X drivers — this machine has no display server and never will. These are
+   binary-only, which is the part that does not fit a build-from-source image and cannot
+   be engineered around.
+
+6. **A Landlock grant for the device nodes.** Plex reaches the GPU through them, and the
+   policy is deny-by-default. `/dev/dri` is already granted with `IOCTL_DEV` for exactly
+   this reason on Intel; `/dev/nvidia*` needs the same. Three separate outages in this
+   project have been a Landlock policy missing something nobody listed, so this is
+   written down before it is discovered.
+
+7. **A probe branch in `plexos-gpu`.** Its design is probe-driven rather than
+   table-driven, which was the right call and pays here: the report asks `vainfo` what
+   the hardware can do. NVIDIA is not a VA-API path, so it needs a different question —
+   the encode library's own capability query, or `nvidia-smi` if the package ships it.
+   The `Report` shape does not change; one more way of answering "what can this decode
+   and encode" does.
+
+8. **Module loading at boot, and the machine that has no NVIDIA card.** Most machines
+   running this image will not have one. Loading must be conditional on the PCI device
+   being present — which `plexos_gpu::display_devices` now reports — and its absence must
+   be silent rather than an error on every boot of the reference laptop.
+
+### What would make this stop
+
+- The open modules failing to build against 6.19. Their claim of no upper bound is not a
+  test, and every future kernel bump repeats the question.
+- Device nodes needing a setuid helper this image will not carry, with no workable way to
+  create them from `plexos-init`.
+- The userspace licence turning out to forbid the redistribution this would require,
+  which lands on the same unanswered question as the project's own unchosen licence.
 
 ## Alternatives considered
 
@@ -121,14 +203,14 @@ so by name.
 
 - **Intel remains the proven path**, and `xe` is already built in, so current Arc parts
   work today with no change. That is the recommendation to anyone asking what to buy
-  while step 3 is unscheduled.
+  while this is unfinished.
 - Step 1 changes what "the image is one verified artefact" means, and every later
   statement about the trust model has to be written with modules in mind.
-- Step 3 puts a binary-only userspace in an image whose licence is still unchosen (open
+- The last step puts a binary-only userspace in an image whose licence is still unchosen (open
   decision 3 in CLAUDE.md). Those two questions become one question.
 - `plexos-gpu`'s probe-driven design already handles this: it picks a driver from what
   the kernel bound and verifies by probing. An NVIDIA path would be a new branch there,
   not a rewrite — the report would ask `nvidia-smi` or the encode library rather than
   `vainfo`.
-- Until step 3, an NVIDIA machine transcodes on the CPU and the console says exactly why,
+- Until it is done, an NVIDIA machine transcodes on the CPU and the console says exactly why,
   naming the device and the missing driver.

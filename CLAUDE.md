@@ -476,8 +476,14 @@ binary-only userspace that Plex reaches NVDEC and NVENC through. Buildroot's
 `nvidia-driver` is pinned at **390.151**, a Kepler-era branch, and is no help.
 
 `CONFIG_DRM_XE=y` is already set, so current Intel Arc cards work today with no change.
-`CONFIG_DRM_AMDGPU` is not set and is the cheapest coverage available — one symbol, its
-firmware, and the VA-API path this project has already proven.
+`CONFIG_DRM_AMDGPU` is not set; it is the cheapest coverage available but is deliberately
+unscheduled, because none of the hardware this actually runs on is AMD.
+
+ADR-0015 breaks the NVIDIA work into eight steps and names the two that would stop it: the
+open modules failing to build against 6.19 — their "4.15 or newer, no maximum" is a claim,
+not a test — and `/dev/nvidia*` needing a setuid helper this image will not carry, since
+there is no `udev` here. The size question is settled: `usr_a` is 1 GiB and the image uses
+73.6 MiB, so nothing about this touches the frozen partition layout.
 
 ## Reference hardware
 
