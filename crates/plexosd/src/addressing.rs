@@ -204,6 +204,72 @@ fn parse_ipv4(text: &str) -> Option<[u8; 4]> {
     parts.next().is_none().then_some(octets)
 }
 
+/// Flushes whatever is on the interface and obtains a DHCP lease, now.
+///
+/// This is the revert path, and it has to restore *reachability*, not merely the file.
+/// The first version of it only wrote the configuration back and promised a lease at the
+/// next restart — which was fine on a machine whose static address happened to work, and
+/// useless on the one case the whole confirmation exists for: an address nobody can reach.
+/// The file would say DHCP and the machine would still be at the wrong address until
+/// somebody power-cycled it, which is the trip to the attached screen this was meant to
+/// prevent. Found by letting a real revert happen and looking at the interface after.
+///
+/// `-n -q` makes udhcpc block until it has a lease and then exit, so an address exists by
+/// the time this returns rather than at some point afterwards. `-t`/`-T` bound that: a
+/// revert that hung waiting for a DHCP server would leave the machine with no address at
+/// all, which is worse than the state it was reverting from.
+///
+/// The background client started at boot is left alone. It will renew on its own
+/// schedule; a second, short-lived one that exits is untidy rather than harmful, and
+/// killing the first would need a pid this module does not have.
+fn take_a_lease(interface: &str, log: &mut dyn FnMut(&str)) -> crate::settings::Outcome {
+    if let Err(error) = crate::net::ip(&["addr", "flush", "dev", interface]) {
+        return crate::settings::Outcome::Failed {
+            detail: format!(
+                "could not clear {interface}: {error}. The address that was set is still \
+                 in force, so the machine is wherever that put it."
+            ),
+        };
+    }
+    log(&format!("{interface} flushed"));
+
+    let Some(udhcpc) = [
+        "/sbin/udhcpc",
+        "/usr/sbin/udhcpc",
+        "/bin/udhcpc",
+        "/usr/bin/udhcpc",
+    ]
+    .into_iter()
+    .find(|p| std::path::Path::new(p).exists()) else {
+        return crate::settings::Outcome::Failed {
+            detail: format!(
+                "{interface} has no address and `udhcpc` is not in this image. Remedy: \
+                 set one by hand from the terminal with `ip addr add`."
+            ),
+        };
+    };
+
+    match std::process::Command::new(udhcpc)
+        .args(["-i", interface, "-n", "-q", "-t", "6", "-T", "3"])
+        .env("PATH", "/sbin:/usr/sbin:/bin:/usr/bin")
+        .status()
+    {
+        Ok(status) if status.success() => crate::settings::Outcome::Applied {
+            detail: format!("{interface} took a DHCP lease"),
+        },
+        Ok(_) => crate::settings::Outcome::Failed {
+            detail: format!(
+                "no DHCP server answered on {interface} within about 18 seconds, so it \
+                 now has no address at all. Remedy: this needs the attached screen — \
+                 check the cable and the router."
+            ),
+        },
+        Err(error) => crate::settings::Outcome::Failed {
+            detail: format!("could not run udhcpc on {interface}: {error}"),
+        },
+    }
+}
+
 /// Puts a network configuration into force.
 ///
 /// Reports rather than returns a hard error: half of this is best-effort by nature — an
@@ -223,15 +289,7 @@ pub fn apply(network: &NetworkConfig, log: &mut dyn FnMut(&str)) -> crate::setti
     };
 
     if !network.is_static() {
-        // Deliberately not "reconfigure to DHCP now". udhcpc is already running from
-        // boot in the ordinary case, and the revert path re-runs it; starting a second
-        // one would leave two clients renewing the same lease.
-        return crate::settings::Outcome::Pending {
-            detail: format!(
-                "{interface} will take a DHCP lease at the next restart. The address it \
-                 has now is whatever it already had."
-            ),
-        };
+        return take_a_lease(&interface, log);
     }
 
     if let Err(error) = validate(network) {
