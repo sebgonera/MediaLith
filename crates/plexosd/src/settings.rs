@@ -268,6 +268,134 @@ pub fn path() -> PathBuf {
     PathBuf::from(paths::CONFIG_FILE)
 }
 
+/// What `GET /api/config` reports.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct View {
+    /// The stored configuration.
+    pub config: Config,
+    /// The hostname the kernel is actually using.
+    ///
+    /// Reported beside the stored one rather than instead of it, because the two
+    /// disagreeing is a real state — a name saved but never applied — and a page that
+    /// showed only the file would present it as if it had taken effect.
+    pub hostname_now: Option<String>,
+    /// Timezone names this image can actually be set to.
+    ///
+    /// Empty on an image built without `BR2_TARGET_TZ_INFO`, which is the honest answer:
+    /// the field should offer nothing rather than offer names that will be refused.
+    pub timezones: Vec<String>,
+    /// Why the stored configuration could not be read, if it could not.
+    pub error: Option<String>,
+}
+
+/// Gathers the current configuration and what the machine is actually doing.
+#[must_use]
+pub fn view(path: &Path) -> View {
+    let (config, error) = match load(path) {
+        Ok(config) => (config, None),
+        // Defaults *and* the error, not one or the other: the page has to render, and it
+        // has to say that what it is rendering is not what is on disk.
+        Err(error) => (Config::default(), Some(error)),
+    };
+
+    View {
+        config,
+        hostname_now: plexos_sys::hostname::get().ok(),
+        timezones: available_timezones(Path::new(ZONEINFO)),
+        error,
+    }
+}
+
+/// Every zone name under a zoneinfo directory, sorted.
+///
+/// Walked rather than read from `zone.tab`, which lists only country zones and omits
+/// `UTC` and the `Etc/` names — a list that silently lacks the default this appliance
+/// ships with would be an odd thing to offer.
+#[must_use]
+pub fn available_timezones(root: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    collect_zones(root, root, &mut found);
+    found.sort();
+    found
+}
+
+/// Recurses, collecting zone names relative to the root.
+fn collect_zones(root: &Path, dir: &Path, into: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+
+        if kind.is_dir() {
+            collect_zones(root, &path, into);
+            continue;
+        }
+
+        // The database ships indexes and a source tarball alongside the zones. Offering
+        // "zone.tab" as a timezone would be a small, silly, entirely avoidable bug.
+        let name = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
+        if !name.contains('.') && !name.starts_with("posix") && !name.starts_with("right") {
+            into.push(name.into_owned());
+        }
+    }
+}
+
+/// Applies a configuration and stores it, in that order.
+///
+/// Applying first is deliberate. If the machine refuses a setting, the file still records
+/// what was asked for — so the page can show the request beside the refusal, and a later
+/// image that *can* honour it will do so at the next boot without anyone retyping. The
+/// alternative, storing only what succeeded, quietly discards the user's intent.
+///
+/// # Errors
+/// Only if the file cannot be written. A setting the machine refused is reported in the
+/// [`Applied`] rather than as an error, because the save did happen.
+pub fn store(config: &Config, path: &Path) -> Result<Applied, String> {
+    let applied = apply(config);
+    save(config, path)?;
+    Ok(applied)
+}
+
+/// Merges an incoming JSON document onto the stored configuration.
+///
+/// A patch rather than a replacement: the page edits two fields, and a body that had to
+/// carry the whole document would silently revert anything a newer page had added. Only
+/// the keys present are changed.
+///
+/// # Errors
+/// If the body is not JSON, or names a field with the wrong type.
+pub fn patch(config: &mut Config, body: &[u8]) -> Result<(), String> {
+    let document: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("the request body is not JSON: {e}"))?;
+
+    let Some(system) = document.get("system") else {
+        return Ok(());
+    };
+
+    if let Some(hostname) = system.get("hostname") {
+        let hostname = hostname
+            .as_str()
+            .ok_or_else(|| "system.hostname must be a string".to_owned())?;
+        config.system.hostname.clear();
+        config.system.hostname.push_str(hostname.trim());
+    }
+
+    if let Some(timezone) = system.get("timezone") {
+        let timezone = timezone
+            .as_str()
+            .ok_or_else(|| "system.timezone must be a string".to_owned())?;
+        config.system.timezone.clear();
+        config.system.timezone.push_str(timezone.trim());
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

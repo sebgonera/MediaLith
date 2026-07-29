@@ -112,6 +112,25 @@ pub fn respond(
 
         ("POST", "/api/shares") => crate::shares::handle(&request.body),
 
+        // The configuration, and what the machine is actually doing about it. Both, side
+        // by side, because a stored hostname that was never applied is a real state and a
+        // page showing only the file would present it as if it had worked.
+        ("GET" | "HEAD", "/api/config") => {
+            match serde_json::to_string_pretty(&crate::settings::view(&crate::settings::path())) {
+                Ok(json) => Response::json(json),
+                Err(error) => {
+                    Response::text(500, format!("could not serialise the settings: {error}\n"))
+                }
+            }
+        }
+
+        // Token-gated by http::route, like every POST (ADR-0013). Renaming somebody's
+        // media server is exactly what that gate is for.
+        ("POST", "/api/config") => match save_settings(&request.body) {
+            Ok(json) => Response::json(json),
+            Err(error) => Response::text(400, format!("{error}\n")),
+        },
+
         // The three questions above the interface list: a resolver, a route, and a name
         // that actually resolves. Its own route rather than a field on /api/status
         // because the name lookup blocks for seconds, and the status page polls -- the
@@ -307,6 +326,28 @@ pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::
     Credential::Set(fingerprint)
 }
 
+/// Applies a settings patch and reports what the machine did about it.
+///
+/// The response carries the whole [`crate::settings::View`] as well as the per-field
+/// outcomes, so the page can re-render from one answer rather than saving and then
+/// polling to find out what happened — and so that "stored but not in force" is visible
+/// in the same breath as the save.
+fn save_settings(body: &[u8]) -> Result<String, String> {
+    let path = crate::settings::path();
+
+    // Loaded, patched, stored: the body carries only the fields the page edits, so a
+    // newer page adding a field cannot have it reverted by an older one.
+    let mut config = crate::settings::load(&path)?;
+    crate::settings::patch(&mut config, body)?;
+    let applied = crate::settings::store(&config, &path)?;
+
+    serde_json::to_string_pretty(&serde_json::json!({
+        "applied": applied,
+        "view": crate::settings::view(&path),
+    }))
+    .map_err(|e| format!("could not serialise the result: {e}"))
+}
+
 /// Writes down why this boot is about to hand itself back to the other slot.
 ///
 /// Reads the version and slot from the same two sources [`crate::status`] does, because a
@@ -369,6 +410,27 @@ fn record_rollback(verdict: &crate::gate::Verdict, log: &mut dyn FnMut(&str)) {
 /// Fails only if the port cannot be bound — almost always because something else holds
 /// it, or because the daemon is not running as root and the port is below 1024.
 pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
+    // First, and before the network. The hostname travels in the DHCP request, so
+    // applying it afterwards would announce the machine under one name while it held
+    // another until the lease renewed -- and the name in the router's client list is
+    // exactly how somebody finds an appliance with no keyboard.
+    //
+    // On every boot rather than only when something changes it: the kernel forgets its
+    // hostname at reboot, so a name set once and never re-applied lasts until the power
+    // goes off.
+    match crate::settings::load(&crate::settings::path()) {
+        Ok(config) => {
+            let applied = crate::settings::apply(&config);
+            log(&format!("hostname: {:?}", applied.hostname));
+            log(&format!("timezone: {:?}", applied.timezone));
+        }
+        Err(error) => log(&format!(
+            "could not read the configuration: {error}. The machine runs with kernel \
+             defaults, and the settings page says the same thing rather than showing \
+             defaults as though they were somebody's choices."
+        )),
+    }
+
     let configured = match net::configure(&System, net::LINK_TIMEOUT, log) {
         Ok(interface) => {
             log(&format!("network configured on {}", interface.name));
@@ -766,6 +828,44 @@ mod tests {
         assert!(
             parsed.get("health").is_some() && parsed.get("findings").is_some(),
             "the report itself, not the wrapper: {parsed}"
+        );
+    }
+
+    #[test]
+    fn the_config_route_reports_the_machine_beside_the_file() {
+        // Both, not one. A hostname stored and never applied is a real state, and a page
+        // shown only the file would render it as though it had taken effect -- which is
+        // the failure this whole settings path was written to refuse.
+        let response = respond_test(&get("/api/config"), &Fixture::new());
+        let parsed: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+
+        assert!(parsed.get("config").is_some(), "{parsed}");
+        assert!(
+            parsed.get("hostname_now").is_some(),
+            "what the kernel is actually using: {parsed}"
+        );
+        assert!(
+            parsed.get("timezones").is_some(),
+            "the zones this image can be set to, so the field offers nothing rather \
+             than names that would be refused: {parsed}"
+        );
+    }
+
+    #[test]
+    fn a_settings_patch_leaves_untouched_fields_alone() {
+        // The body carries only what the page edits. A replacement would mean an older
+        // page silently reverting a field a newer one had added, which is a data-loss
+        // bug that looks like a successful save.
+        let mut config = plexos_types::config::Config::default();
+        config.system.timezone = "Europe/Warsaw".to_owned();
+
+        crate::settings::patch(&mut config, br#"{"system":{"hostname":"cinema"}}"#)
+            .expect("a valid patch");
+
+        assert_eq!(config.system.hostname, "cinema");
+        assert_eq!(
+            config.system.timezone, "Europe/Warsaw",
+            "a field the body did not mention must survive"
         );
     }
 

@@ -229,3 +229,27 @@ BR2_PACKAGE_PLEXOS_SYSTEMD_BOOT=y
 # The stub itself comes from package/plexos-systemd-boot, which builds linuxx64.efi.stub
 # alongside the bootloader. Upstream Buildroot's systemd package never installs it,
 # so without that addition there would be nothing to build a UKI around.
+
+# ---------------------------------------------------------------------------
+# Timezone data
+# ---------------------------------------------------------------------------
+# Without this there is no /usr/share/zoneinfo, and the consequence is not an error.
+# Pointing /etc/localtime at a missing file succeeds, and every program then falls back
+# to UTC silently -- so a timezone setting would appear to work and do nothing. That is
+# the failure plexosd::settings refuses to produce, and this is what makes the refusal
+# unnecessary.
+#
+# The symbol selects BR2_PACKAGE_TZDATA on a glibc toolchain, which is what this is, so
+# the dependency is met -- checked against system/Config.in in the actual tree rather
+# than recalled, and re-checked after kconfig runs, because options with unmet
+# dependencies are dropped silently.
+BR2_TARGET_TZ_INFO=y
+
+# The full set. An appliance is wherever its owner is, and the alternative is a machine
+# that cannot be set to the one zone somebody needs. A few megabytes against a 75 MB
+# /usr image is not a trade worth thinking about twice.
+BR2_TARGET_TZ_ZONELIST="default"
+
+# Matches plexos_types::config::System::default_timezone, so a machine that has never
+# been configured agrees with the configuration it would be given.
+BR2_TARGET_LOCALTIME="UTC"

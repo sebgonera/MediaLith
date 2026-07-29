@@ -497,6 +497,111 @@ async function runNetworkDiagnosis() {
   }
 }
 
+// Settings live in their own card and are fetched once rather than polled: the status
+// poll would overwrite whatever somebody was halfway through typing. Re-fetched only
+// after a save, which is the only thing that can change them.
+let settingsView = null;
+
+function settingsCard() {
+  if (!settingsView) {
+    return `<div class="card"><h3>Settings</h3>
+      <p class="empty">Loading…</p></div>`;
+  }
+
+  const c = settingsView.config || {};
+  const sys = c.system || {};
+  const drift = settingsView.hostname_now && settingsView.hostname_now !== sys.hostname;
+  const zones = settingsView.timezones || [];
+
+  return `
+    <div class="card">
+      <h3>Settings</h3>
+      ${settingsView.error ? `<div class="progress failed"><div>${esc(settingsView.error)}</div></div>` : ""}
+      <p class="hint">Hostname</p>
+      <div class="row">
+        <input type="text" id="set-hostname" class="mono" autocomplete="off" spellcheck="false"
+               value="${esc(sys.hostname || "")}">
+      </div>
+      ${drift ? `<p class="hint">The kernel is currently using
+         <span class="mono">${esc(settingsView.hostname_now)}</span>, which is not what is
+         stored. Saving applies it.</p>` : ""}
+      <p class="hint">Timezone</p>
+      <div class="row">
+        <input type="text" id="set-timezone" class="mono" list="tz-list" autocomplete="off"
+               spellcheck="false" value="${esc(sys.timezone || "")}">
+      </div>
+      <datalist id="tz-list">${zones.map(z => `<option value="${esc(z)}">`).join("")}</datalist>
+      ${zones.length
+         ? `<p class="hint">${zones.length} zones available on this image.</p>`
+         : `<p class="hint">This image carries no timezone database, so any zone but UTC
+              will be refused. It needs a build with BR2_TARGET_TZ_INFO.</p>`}
+      <div class="row"><button id="settings-save">Save settings</button></div>
+      <div id="settings-result"></div>
+    </div>`;
+}
+
+async function loadSettings() {
+  try {
+    settingsView = await (await fetch("/api/config")).json();
+  } catch (e) {
+    settingsView = { config: {}, timezones: [], error: String(e) };
+  }
+  const host = document.getElementById("settings");
+  if (host) host.outerHTML = settingsCard().replace('class="card"', 'class="card" id="settings"');
+}
+
+// Every field reports what happened to the machine, not merely that it was stored.
+// "Saved" over a setting that changed nothing is the failure this whole path exists to
+// avoid, so pending and failed are rendered differently from applied.
+async function saveSettings() {
+  const out = document.getElementById("settings-result");
+  const button = document.getElementById("settings-save");
+  const value = token();
+  if (!value) {
+    if (out) out.innerHTML = `<div class="progress failed"><span class="now">Not saved</span>
+      <div>The device token is needed to change settings. Enter it in the Device token
+      box at the top of this page.</div></div>`;
+    return;
+  }
+  const body = {
+    system: {
+      hostname: (document.getElementById("set-hostname") || {}).value || "",
+      timezone: (document.getElementById("set-timezone") || {}).value || "",
+    },
+  };
+
+  if (button) { button.disabled = true; button.textContent = "Saving…"; }
+  try {
+    const response = await fetch("/api/config", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(text.trim() || response.statusText);
+
+    const result = JSON.parse(text);
+    settingsView = result.view;
+    const applied = result.applied || {};
+    const rows = Object.keys(applied).map(name => {
+      const o = applied[name] || {};
+      const label = o.state === "applied" ? "in force now"
+                  : o.state === "pending" ? "stored — takes effect later"
+                  : o.state === "failed" ? "NOT applied"
+                  : "unchanged";
+      return `<div><strong>${esc(name)}</strong>: ${esc(label)}${o.detail ? ` — ${esc(o.detail)}` : ""}</div>`;
+    }).join("");
+    const bad = Object.keys(applied).some(n => (applied[n] || {}).state === "failed");
+
+    if (out) out.innerHTML = `<div class="progress ${bad ? "failed" : ""}">${rows}</div>`;
+  } catch (e) {
+    if (out) out.innerHTML = `<div class="progress failed"><span class="now">Not saved</span>
+      <div>${esc(String(e))}</div></div>`;
+  } finally {
+    if (button) { button.disabled = false; button.textContent = "Save settings"; }
+  }
+}
+
 function systemCard(status) {
   const p = status.product || {};
   return `
@@ -532,6 +637,7 @@ function render(status) {
        ${devicesCard(status.gpu || {})}
        ${networkCard(status.network || {})}
        ${systemCard(status)}
+       ${settingsCard().replace('class="card"', 'class="card" id="settings"')}
      </div>`;
 
   document.getElementById("uptime").textContent = humanUptime(status.uptime_seconds);
@@ -1011,6 +1117,7 @@ async function power(action, label) {
 // it looks like a slow page.
 document.addEventListener("click", event => {
   if (event.target && event.target.id === "netdiag-run") runNetworkDiagnosis();
+  if (event.target && event.target.id === "settings-save") saveSettings();
 });
 
 document.getElementById("shutdown").addEventListener("click", () => power("off", "Shut down"));
@@ -1026,6 +1133,11 @@ document.getElementById("restart").addEventListener("click", () => power("restar
 
 tick();
 setInterval(tick, REFRESH_MS);
+
+// Fetched once, and re-fetched only after a save. Polling settings would overwrite
+// whatever somebody was halfway through typing into them, which is the one thing a
+// settings form must never do.
+loadSettings();
 plexTick();
 updateTick();
 sharesTick();
