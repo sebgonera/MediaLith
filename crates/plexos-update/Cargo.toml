@@ -13,6 +13,8 @@ plexos-sys = { path = "../plexos-sys" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc", "zeroize"] }
+base64 = "0.22"
 
 [lints]
 workspace = true

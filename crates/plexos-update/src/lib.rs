@@ -51,6 +51,7 @@
 
 pub mod bundle;
 pub mod plan;
+pub mod trust;
 pub mod write;
 
 pub use bundle::{Artifact, Metadata, MetadataError};
