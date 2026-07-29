@@ -383,9 +383,26 @@ pub fn run(
 
     job.step(Phase::Activating, "installing the boot entry, on trial");
     let device = plexos_sys::device::by_partlabel(plexos_types::partition::LABEL_ESP)?;
+    let mut cleared = Vec::new();
     let installed = crate::esp::with_esp_mounted(&device, &mut |esp| {
+        // Before the install, and inside the same mount. A failed update leaves an
+        // exhausted 18 MB entry on an ESP sized for three, and nothing else ever removes
+        // it -- so without this the partition the machine cannot boot without fills up
+        // one bad update at a time. Found by causing a rollback rather than by reading.
+        cleared = crate::esp::remove_wreckage(esp, &running);
         crate::esp::install_entry(esp, &uki, &version)
     })?;
+    if !cleared.is_empty() {
+        job.note(&format!(
+            "removed the boot {} of a previous failed update: {}",
+            if cleared.len() == 1 {
+                "entry"
+            } else {
+                "entries"
+            },
+            cleared.join(", ")
+        ));
+    }
     job.note(&format!(
         "{} installed with {} tries; the entry that works now is untouched and is the \
          way back",

@@ -282,20 +282,36 @@ fn trial_state(device: &str) -> Trial {
 
     let result = crate::esp::with_esp_mounted(device, &mut |esp_path| {
         let entries = crate::esp::entries(esp_path)?;
-        let on_trial: Vec<_> = entries.iter().filter(|(_, e)| e.is_on_trial()).collect();
 
-        found = match on_trial.as_slice() {
-            [] => Trial::Permanent,
-            // Exhausted and still running means the bootloader had nothing better, so
-            // spending another try changes nothing about where the next boot lands.
-            [(_, entry)] if entry.is_exhausted() => Trial::Exhausted,
+        // Three sets, and the reason for three rather than two is a real rollback. An
+        // exhausted entry still carries its counter in the name, so `is_on_trial` is true
+        // for it -- and after one failed update the wreckage would have counted as a
+        // second entry on trial, making every later boot ambiguous and switching this off
+        // for good. The mechanism would have worked exactly once.
+        let counting: Vec<_> = entries
+            .iter()
+            .filter(|(_, e)| e.is_on_trial() && !e.is_exhausted())
+            .collect();
+        let exhausted = entries.iter().any(|(_, e)| e.is_exhausted());
+        let permanent = entries.iter().any(|(_, e)| !e.is_on_trial());
+
+        found = match counting.as_slice() {
             [(_, entry)] => Trial::Counting {
-                // `is_on_trial` is exactly `tries_left.is_some()`, so this cannot be
-                // None here. Defaulted rather than unwrapped anyway: the cost of being
-                // wrong is a restart on a machine that had no counter to spend, and 0
-                // reads as Exhausted's neighbour rather than as a licence to loop.
+                // `is_on_trial` is exactly `tries_left.is_some()`, so this cannot be None
+                // here. Defaulted rather than unwrapped anyway: the cost of being wrong is
+                // a restart on a machine that had no counter to spend, and 0 reads as
+                // Exhausted's neighbour rather than as a licence to loop.
                 tries_left: entry.tries_left.unwrap_or(0),
             },
+            // Nothing is being counted. Which entry booted then depends on whether a
+            // permanent one exists at all: systemd-boot sorts an exhausted entry below
+            // every good one, so if there is a good one, that is what we are running and
+            // the exhausted entry is somebody else's failure. If there is not, the
+            // bootloader had nothing but an entry it had already given up on -- and
+            // spending another try cannot change where the next boot lands.
+            [] if permanent => Trial::Permanent,
+            [] if exhausted => Trial::Exhausted,
+            [] => Trial::Permanent,
             many => Trial::Unknown(format!(
                 "{} entries are on trial and there is no way to tell which one booted",
                 many.len()
@@ -316,11 +332,42 @@ fn clear_counter(device: &str) -> Result<String, String> {
 
     let result = crate::esp::with_esp_mounted(device, &mut |esp_path| {
         let entries = crate::esp::entries(esp_path)?;
-        let on_trial: Vec<_> = entries.iter().filter(|(_, e)| e.is_on_trial()).collect();
+
+        // Exhausted entries are excluded before anything else looks at this set, and that
+        // exclusion is what a real rollback taught. `is_on_trial` is true for `+0-3` --
+        // the counter is still in the name -- so the wreckage of a failed update read as
+        // "an entry on trial" forever after. `mark_good` rightly refused to resurrect it,
+        // which turned every subsequent healthy boot into `Unrecorded`, under a message
+        // ending "this rolls the machine back in three reboots". Nothing was going to roll
+        // back: the running entry was permanent and the bootloader had already given up on
+        // the other one. The remedy the message named was for a problem that did not
+        // exist, which is worse than saying nothing.
+        let wreckage: Vec<_> = entries.iter().filter(|(_, e)| e.is_exhausted()).collect();
+        let on_trial: Vec<_> = entries
+            .iter()
+            .filter(|(_, e)| e.is_on_trial() && !e.is_exhausted())
+            .collect();
+
+        // Reported, not acted on. Removing it is the update path's job -- see
+        // `esp::install_entry`, which knows which entry booted and so can tell wreckage
+        // from the last thing standing.
+        let note = if wreckage.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ". A previous update failed and its entry is still here, skipped by the \
+                 bootloader and cleared away by the next update: {}",
+                wreckage
+                    .iter()
+                    .map(|(_, e)| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
 
         match on_trial.as_slice() {
             [] => {
-                "no entry on trial; this slot is already permanent".clone_into(&mut outcome);
+                outcome = format!("no entry on trial; this slot is already permanent{note}");
                 Ok(())
             }
             [(path, entry)] => {
@@ -334,6 +381,7 @@ fn clear_counter(device: &str) -> Result<String, String> {
                     }
                     None => outcome = format!("{entry} was already good"),
                 }
+                outcome.push_str(&note);
                 Ok(())
             }
             many => {
@@ -456,6 +504,30 @@ mod tests {
         let message = verdict.to_string();
         assert!(message.contains("unknown"), "{message}");
         assert!(message.contains("the ESP was not found"), "{message}");
+    }
+
+    #[test]
+    fn an_exhausted_entry_is_not_an_entry_on_trial() {
+        // The distinction a real rollback produced, and the reason both `clear_counter`
+        // and `trial_state` filter on it. `is_on_trial` is true for `+0-3` -- the counter
+        // is still in the name -- so the wreckage of a failed update looked exactly like
+        // a boot awaiting judgement. That made every healthy boot afterwards report
+        // "could not clear the boot counter ... this rolls the machine back in three
+        // reboots", about a machine whose running entry was permanent and which was never
+        // going to roll back anywhere.
+        let wreckage = crate::bootcounter::BootEntry::parse("plexos-0.1.0.1+0-3.efi")
+            .expect("the bootloader writes this name");
+        assert!(
+            wreckage.is_on_trial(),
+            "the counter is still in the name, which is exactly the trap"
+        );
+        assert!(
+            wreckage.is_exhausted(),
+            "and this is the property that has to be consulted as well"
+        );
+
+        let live = crate::bootcounter::BootEntry::parse("plexos-0.1.0.2+2-1.efi").unwrap();
+        assert!(live.is_on_trial() && !live.is_exhausted());
     }
 
     #[test]

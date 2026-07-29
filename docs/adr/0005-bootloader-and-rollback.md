@@ -64,6 +64,43 @@ the important rejection. Spawning is not working. An update that breaks Plex whi
 leaving PID 1 healthy would be marked good and never rolled back — precisely the
 failure this mechanism exists to catch.
 
+## Amendment, 2026-07-29: what actually spends a try
+
+The decision above describes the counter and who clears it, and says nothing about what
+*decrements* it. That turned out to be the whole of the mechanism, and neither half of it
+existed.
+
+A try is spent by booting. So a boot that fails has to end in another boot, and neither
+failure shape did.
+
+**An image that cannot boot.** `plexos-init` reports the fault, holds it on screen and
+exits; PID 1 exiting is a kernel panic, and `panic_timeout` defaults to 0, which means
+loop forever. The machine sat at a panic screen with three unused tries. `panic=20` on
+the kernel command line is the fix, and it is asserted by `post-image-test.sh`, because
+an absent parameter and a wrong one look identical from outside.
+
+**An image that boots into a system that does not work.** The gate left the counter
+standing, correctly, and then nothing restarted — so nothing consumed it. This is the
+failure this ADR calls out as the important one, and it was the one with no path at all.
+`plexosd` now restarts on an unhealthy verdict.
+
+**But only when the booted entry is still being counted**, which is the substance of the
+amendment. The counter exists to undo an *update*, not to repair a machine, and the three
+other states each take a different answer:
+
+| State of the entry | On an unhealthy boot |
+| --- | --- |
+| On trial, tries left | Restart. Three of these and the other slot takes over. |
+| Already permanent | Stay up. There is no counter to spend, so restarting is an unbounded loop that removes the only means of diagnosis. |
+| On trial, no tries left | Stay up. The bootloader gave up on this entry and booted it anyway, so there is nothing else to reach — the two-bad-updates case below, which needs recovery media and therefore needs a console. |
+| ESP unreadable | Stay up. Asymmetric on purpose: a machine left running with a broken Plex can be looked at over the network, and one in a reboot loop cannot. |
+
+**A rollback leaves a record on `/var`.** Reverting `/usr` destroys every explanation the
+failed boot produced, and the system that comes back is the older one, which has no way to
+know it is a replacement. `/var` survives precisely because of the rule two entries down —
+rollback never reverts it — so the note is written there immediately before the restart
+and served from `/api/update`.
+
 ## Consequences
 
 - `systemd-boot` is a C dependency on the boot path, tracked and updated with the

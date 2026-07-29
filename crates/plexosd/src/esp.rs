@@ -101,6 +101,10 @@ pub fn mark_good(path: &Path, entry: &BootEntry) -> io::Result<Option<PathBuf>> 
 /// `plexos_update::plan` refuses a bundle whose version does not sort above the running
 /// one for exactly that reason.
 ///
+/// It does not remove the wreckage of a *failed* update either, which is a different
+/// thing and does need removing — see [`remove_wreckage`], which the update path calls
+/// alongside this one so that what it cleared can be reported.
+///
 /// # Errors
 /// If the entry directory cannot be created or the file cannot be written. A partial
 /// write is left behind rather than cleaned up: it carries a `+3` counter and a version
@@ -120,6 +124,44 @@ pub fn install_entry(esp: &Path, source: &Path, version: &str) -> io::Result<Pat
     fs::File::open(&destination)?.sync_all()?;
 
     Ok(destination)
+}
+
+/// Removes boot entries the bootloader has given up on, except the one that is running.
+///
+/// Found by causing a real rollback. A failed update leaves an exhausted entry — `+0-3` —
+/// on the ESP, and nothing ever removed it. ADR-0003 sized the ESP for three UKIs and
+/// each of these is 18 MB, so a handful of bad updates fills the one partition the
+/// machine cannot boot without. An exhausted entry is the safest thing on the ESP to
+/// delete, because it is the one entry that is definitely not a rollback target:
+/// `systemd-boot` sorts it below every other entry and will not choose it while anything
+/// else exists.
+///
+/// `running` guards the case where that reasoning fails. A machine can be *running* an
+/// exhausted entry — two bad updates in a row leave the bootloader with nothing else and
+/// it boots one anyway, which is ADR-0005's "no known-good slot left". Deleting that
+/// would remove the boot entry of the system executing the delete, turning an appliance
+/// somebody can still reach into one that needs recovery media. So the entry whose
+/// version is the running one survives, however dead its counter looks.
+///
+/// Returns what it removed, so the update log can say so. Every failure is swallowed:
+/// this is housekeeping alongside an update, and refusing an update because a dead file
+/// would not delete is a worse bargain than a full ESP.
+#[must_use]
+pub fn remove_wreckage(esp: &Path, running: &str) -> Vec<String> {
+    let running_stem = format!("plexos-{running}");
+    let mut removed = Vec::new();
+
+    let Ok(entries) = entries(esp) else {
+        return removed;
+    };
+
+    for (path, entry) in entries {
+        if entry.is_exhausted() && entry.stem != running_stem && fs::remove_file(&path).is_ok() {
+            removed.push(entry.to_string());
+        }
+    }
+
+    removed
 }
 
 /// Tries a new entry is given before the bootloader gives up on it (ADR-0005).
@@ -212,6 +254,82 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join(ENTRY_DIR)).unwrap();
         dir
+    }
+
+    #[test]
+    fn an_update_clears_away_the_wreckage_of_a_failed_one() {
+        // Found by causing a real rollback. The exhausted entry was left on the ESP with
+        // nothing to remove it, on a partition ADR-0003 sized for three UKIs of 18 MB
+        // each -- so failed updates accumulate until the thing that decides whether the
+        // machine boots runs out of room. The pairing with install_entry mirrors
+        // `update::run`, which does both inside one mount of the ESP.
+        let esp = scratch("wreckage");
+        let dead = esp.join(ENTRY_DIR).join("plexos-0.1.0.1+0-3.efi");
+        let good = esp.join(ENTRY_DIR).join("plexos-0.1.0.efi");
+        fs::write(&dead, b"three failed boots").unwrap();
+        fs::write(&good, b"the entry that works").unwrap();
+
+        let source = esp.join("new.efi");
+        fs::write(&source, b"the new kernel").unwrap();
+
+        let cleared = remove_wreckage(&esp, "0.1.0");
+        install_entry(&esp, &source, "0.1.0.2").unwrap();
+
+        assert_eq!(cleared, ["plexos-0.1.0.1+0-3.efi"]);
+        assert!(!dead.exists(), "the bootloader has given up on this one");
+        assert!(good.exists(), "the rollback target must survive");
+
+        let _ = fs::remove_dir_all(&esp);
+    }
+
+    #[test]
+    fn the_entry_that_is_running_survives_even_when_it_is_exhausted() {
+        // The case that makes the rule non-obvious. Two bad updates in a row leave the
+        // bootloader with nothing but an entry it has already given up on, and it boots
+        // that anyway -- ADR-0005's "no known-good slot left". Removing it here would
+        // delete the boot entry of the system doing the deleting, which turns an
+        // appliance somebody can still reach into one that needs recovery media.
+        let esp = scratch("running-exhausted");
+        let running = esp.join(ENTRY_DIR).join("plexos-0.1.0.9+0-3.efi");
+        fs::write(&running, b"exhausted, and the only thing that booted").unwrap();
+
+        let cleared = remove_wreckage(&esp, "0.1.0.9");
+
+        assert!(cleared.is_empty(), "nothing was safe to remove");
+        assert!(
+            running.exists(),
+            "never delete the entry this system is running from"
+        );
+
+        let _ = fs::remove_dir_all(&esp);
+    }
+
+    #[test]
+    fn wreckage_removal_reports_what_it_removed_and_leaves_healthy_entries() {
+        let esp = scratch("wreckage-report");
+        for name in [
+            "plexos-0.1.0.efi",     // permanent
+            "plexos-0.1.0.5+2.efi", // on trial, still counting
+            "plexos-0.1.0.1+0-3.efi",
+            "plexos-0.1.0.2+0-3.efi",
+        ] {
+            fs::write(esp.join(ENTRY_DIR).join(name), b"x").unwrap();
+        }
+
+        let mut removed = remove_wreckage(&esp, "0.1.0");
+        removed.sort();
+        assert_eq!(
+            removed,
+            ["plexos-0.1.0.1+0-3.efi", "plexos-0.1.0.2+0-3.efi"]
+        );
+
+        assert!(esp.join(ENTRY_DIR).join("plexos-0.1.0.efi").exists());
+        assert!(
+            esp.join(ENTRY_DIR).join("plexos-0.1.0.5+2.efi").exists(),
+            "an entry with tries left is a live candidate, not wreckage"
+        );
+
+        let _ = fs::remove_dir_all(&esp);
     }
 
     #[test]
