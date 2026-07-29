@@ -63,6 +63,32 @@ fn remember(verdict: &Verdict) {
 /// The ESP's GPT label, resolved through sysfs because this system has no `udev`.
 const ESP_LABEL: &str = plexos_types::partition::LABEL_ESP;
 
+/// Whether this boot is one the bootloader is still counting.
+///
+/// The distinction decides what an unhealthy boot should *do*, and getting it backwards
+/// is expensive in both directions. An entry on trial has tries left to burn, so
+/// restarting spends one and three of them hand the machine to the slot that worked.
+/// An entry that is already permanent has no counter at all: restarting cannot roll
+/// anything back, it just takes away the console — which on this appliance is the only
+/// way to find out what is wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Trial {
+    /// The booted entry still carries a try counter. Restarting spends one.
+    Counting,
+    /// No entry is on trial. This slot is permanent and nothing will roll back.
+    Permanent,
+    /// The entry is on trial at zero tries left, and we are running it anyway.
+    ///
+    /// The bootloader has already given up on this entry, and it booted it regardless —
+    /// which means there was nothing else to boot. Restarting cannot reach a different
+    /// slot, so it would loop forever on the one machine that most needs its console:
+    /// ADR-0005 says two consecutive bad updates leave no known-good slot and need
+    /// recovery media, and somebody has to be able to find that out.
+    Exhausted,
+    /// The ESP could not be read, so which of the others this is cannot be known.
+    Unknown(String),
+}
+
 /// What the gate decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -71,14 +97,45 @@ pub enum Verdict {
     /// Healthy, but the counter could not be cleared. The slot will still roll back.
     Unrecorded(String),
     /// Not healthy. The counter is deliberately left standing.
-    Unhealthy(Vec<String>),
+    Unhealthy {
+        /// The checks that failed, each as `name: detail`.
+        failures: Vec<String>,
+        /// Whether the bootloader is still counting this entry's tries.
+        trial: Trial,
+    },
 }
 
 impl Verdict {
     /// Whether the boot was healthy, regardless of whether that could be recorded.
     #[must_use]
     pub fn is_healthy(&self) -> bool {
-        !matches!(self, Self::Unhealthy(_))
+        !matches!(self, Self::Unhealthy { .. })
+    }
+
+    /// Whether the caller should restart the machine to spend a try.
+    ///
+    /// This is the half of ADR-0005 that never existed. The counter was left standing on
+    /// an unhealthy boot and the verdict said the slot "rolls back" — but nothing
+    /// restarted, so nothing consumed the counter, and a machine that booted into a
+    /// broken Plex ran happily forever underneath a message claiming it was rolling back.
+    /// Two failure shapes wore one sentence: an image that cannot boot at all, which the
+    /// kernel's `panic=` now recycles, and this one, which reaches userspace and needs a
+    /// decision made here.
+    ///
+    /// Only [`Trial::Counting`] restarts. [`Trial::Permanent`] must not: there is no
+    /// counter to spend, so it would be an unbounded reboot loop on a machine whose
+    /// console is the only thing that could diagnose it. [`Trial::Unknown`] must not
+    /// either, and that default is deliberate — a machine that stays up with a broken
+    /// Plex can be looked at, and one in a reboot loop cannot.
+    #[must_use]
+    pub fn demands_restart(&self) -> bool {
+        matches!(
+            self,
+            Self::Unhealthy {
+                trial: Trial::Counting,
+                ..
+            }
+        )
     }
 }
 
@@ -91,12 +148,38 @@ impl std::fmt::Display for Verdict {
                 "healthy, but could not clear the boot counter: {error}. Left unfixed \
                  this rolls the machine back in three reboots, long after the cause."
             ),
-            Self::Unhealthy(failures) => write!(
-                f,
-                "NOT healthy, so the try counter stands and this slot rolls back \
-                 (ADR-0005): {}",
-                failures.join("; ")
-            ),
+            Self::Unhealthy { failures, trial } => {
+                let failures = failures.join("; ");
+                match trial {
+                    Trial::Counting => write!(
+                        f,
+                        "NOT healthy, and this entry is on trial, so the try counter \
+                         stands and the machine restarts to spend one (ADR-0005). Three \
+                         of these and the previous slot takes over: {failures}"
+                    ),
+                    Trial::Permanent => write!(
+                        f,
+                        "NOT healthy, but this slot is already permanent, so there is no \
+                         try counter to spend and nothing rolls back. Restarting would \
+                         loop forever and take away the console, so the machine stays up \
+                         and this needs fixing by hand: {failures}"
+                    ),
+                    Trial::Exhausted => write!(
+                        f,
+                        "NOT healthy, and this entry has no tries left but was booted \
+                         anyway -- so there is no other slot to fall back to. Both slots \
+                         are bad and the appliance needs recovery media (ADR-0005). \
+                         Staying up so the console can be reached: {failures}"
+                    ),
+                    Trial::Unknown(error) => write!(
+                        f,
+                        "NOT healthy, and the ESP could not be read ({error}), so whether \
+                         this boot is on trial is unknown. Staying up rather than \
+                         restarting, because a machine in a reboot loop cannot be \
+                         diagnosed and this one can: {failures}"
+                    ),
+                }
+            }
         }
     }
 }
@@ -111,30 +194,41 @@ pub fn run(esp_device: Option<&str>, log: &mut dyn FnMut(&str)) -> Verdict {
         log(&format!("  {check}"));
     }
 
+    // Resolved before the branch, not after. It used to be resolved late, on the
+    // reasoning that "an unhealthy boot must not fail for want of an ESP it was never
+    // going to write to" -- which was true while an unhealthy boot did nothing. It now
+    // has a decision to make that only the ESP can answer, so it needs the device too.
+    // Failing to find it is no longer fatal to either path: it degrades the healthy one
+    // to `Unrecorded` and the unhealthy one to `Trial::Unknown`.
+    let device = match esp_device.map(ToOwned::to_owned) {
+        Some(explicit) => Ok(explicit),
+        None => plexos_sys::device::by_partlabel(ESP_LABEL)
+            .map_err(|error| format!("the ESP was not found: {error}")),
+    };
+
     if !health.is_healthy() {
-        let verdict = Verdict::Unhealthy(
-            health
+        let verdict = Verdict::Unhealthy {
+            failures: health
                 .failures()
                 .iter()
                 .map(|c| format!("{}: {}", c.name, c.detail))
                 .collect(),
-        );
+            trial: match &device {
+                Ok(device) => trial_state(device),
+                Err(error) => Trial::Unknown(error.clone()),
+            },
+        };
         remember(&verdict);
         return verdict;
     }
 
-    // Resolved late: an unhealthy boot must not fail for want of an ESP it was never
-    // going to write to.
-    let device = match esp_device.map(ToOwned::to_owned) {
-        Some(explicit) => explicit,
-        None => match plexos_sys::device::by_partlabel(ESP_LABEL) {
-            Ok(found) => found,
-            Err(error) => {
-                let verdict = Verdict::Unrecorded(format!("the ESP was not found: {error}"));
-                remember(&verdict);
-                return verdict;
-            }
-        },
+    let device = match device {
+        Ok(found) => found,
+        Err(error) => {
+            let verdict = Verdict::Unrecorded(error);
+            remember(&verdict);
+            return verdict;
+        }
     };
 
     let verdict = match clear_counter(&device) {
@@ -163,6 +257,41 @@ pub fn run_after_plex(
         ));
     }
     run(esp_device, log)
+}
+
+/// Asks the ESP whether the bootloader is still counting this boot's tries.
+///
+/// Read-only, and it answers a question about *this* boot from evidence about all the
+/// entries, which is only sound because of how few there are. Two slots, and an update
+/// puts exactly one entry on trial while leaving the other permanent — so a single entry
+/// on trial is the one that just booted. [`clear_counter`] leans on the same reasoning
+/// and refuses when more than one is on trial; this refuses in the same shape, because
+/// guessing here restarts a machine that had no reason to restart.
+fn trial_state(device: &str) -> Trial {
+    let mut found = Trial::Permanent;
+
+    let result = crate::esp::with_esp_mounted(device, &mut |esp_path| {
+        let entries = crate::esp::entries(esp_path)?;
+        let on_trial: Vec<_> = entries.iter().filter(|(_, e)| e.is_on_trial()).collect();
+
+        found = match on_trial.as_slice() {
+            [] => Trial::Permanent,
+            // Exhausted and still running means the bootloader had nothing better, so
+            // spending another try changes nothing about where the next boot lands.
+            [(_, entry)] if entry.is_exhausted() => Trial::Exhausted,
+            [_] => Trial::Counting,
+            many => Trial::Unknown(format!(
+                "{} entries are on trial and there is no way to tell which one booted",
+                many.len()
+            )),
+        };
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => found,
+        Err(error) => Trial::Unknown(error.to_string()),
+    }
 }
 
 /// Clears the try counter by renaming the entry on the ESP.
@@ -233,14 +362,81 @@ mod tests {
         assert!(seen.starts_with("healthy"), "{seen}");
     }
 
+    fn unhealthy(trial: Trial) -> Verdict {
+        Verdict::Unhealthy {
+            failures: vec!["plex-http: not answering".to_owned()],
+            trial,
+        }
+    }
+
     #[test]
-    fn an_unhealthy_verdict_says_the_slot_rolls_back_and_names_what_failed() {
-        let verdict = Verdict::Unhealthy(vec!["plex-http: not answering".to_owned()]);
-        let message = verdict.to_string();
+    fn an_unhealthy_boot_on_trial_restarts_to_spend_a_try() {
+        // The defect this replaces: the verdict said the slot "rolls back" and nothing
+        // restarted, so the counter it left standing was never spent by anybody. A
+        // machine that booted into a broken Plex ran forever underneath a sentence
+        // claiming it was rolling back.
+        let verdict = unhealthy(Trial::Counting);
         assert!(!verdict.is_healthy());
-        assert!(message.contains("rolls back"), "{message}");
+        assert!(verdict.demands_restart());
+
+        let message = verdict.to_string();
+        assert!(message.contains("restarts"), "{message}");
         assert!(message.contains("plex-http"), "{message}");
         assert!(message.contains("ADR-0005"), "{message}");
+    }
+
+    #[test]
+    fn an_unhealthy_boot_on_a_permanent_slot_stays_up() {
+        // There is no counter to spend, so restarting cannot roll anything back -- it is
+        // an unbounded loop that takes away the console, which on this appliance is the
+        // only way to find out what is wrong. Broken Plex on a slot that was already
+        // good is a repair, not a rollback.
+        let verdict = unhealthy(Trial::Permanent);
+        assert!(!verdict.is_healthy());
+        assert!(!verdict.demands_restart());
+
+        let message = verdict.to_string();
+        assert!(message.contains("nothing rolls back"), "{message}");
+        assert!(
+            message.contains("loop forever"),
+            "and says why it is not restarting: {message}"
+        );
+    }
+
+    #[test]
+    fn an_exhausted_entry_that_booted_anyway_stays_up() {
+        // Exhausted means the bootloader gave up on this entry, and it booted it
+        // regardless -- so there was nothing else to boot, and another try lands in the
+        // same place. ADR-0005 calls this the two-bad-updates case, which needs recovery
+        // media and therefore needs somebody to be able to read the machine.
+        let verdict = unhealthy(Trial::Exhausted);
+        assert!(!verdict.demands_restart());
+
+        let message = verdict.to_string();
+        assert!(message.contains("recovery media"), "{message}");
+    }
+
+    #[test]
+    fn an_unknown_trial_state_does_not_restart() {
+        // Asymmetric on purpose. Guessing "on trial" restarts a machine that had no
+        // reason to; guessing "permanent" leaves one up that a person can still reach.
+        // Only one of those two mistakes is recoverable over the network.
+        let verdict = unhealthy(Trial::Unknown("the ESP was not found".to_owned()));
+        assert!(!verdict.demands_restart());
+
+        let message = verdict.to_string();
+        assert!(message.contains("unknown"), "{message}");
+        assert!(message.contains("the ESP was not found"), "{message}");
+    }
+
+    #[test]
+    fn a_healthy_verdict_never_restarts() {
+        // The restart is reached from one place, and this is the guard that it cannot
+        // widen by accident into the path that runs on every successful boot.
+        assert!(
+            !Verdict::Good("plexos-0.1.0+3.efi -> plexos-0.1.0.efi".to_owned()).demands_restart()
+        );
+        assert!(!Verdict::Unrecorded("the ESP was not found".to_owned()).demands_restart());
     }
 
     #[test]

@@ -222,13 +222,20 @@ fn main() -> ExitCode {
             log("healthy (--check, counter untouched)");
             return ExitCode::SUCCESS;
         }
-        plexosd::gate::Verdict::Unhealthy(
-            health
+        plexosd::gate::Verdict::Unhealthy {
+            failures: health
                 .failures()
                 .iter()
                 .map(|c| format!("{}: {}", c.name, c.detail))
                 .collect(),
-        )
+            // Genuinely unknown rather than defensively defaulted: --check promises not
+            // to touch the ESP, and whether an entry is on trial can only be read from
+            // there. Saying so is also what keeps `demands_restart` false, which is what
+            // a flag whose whole contract is "reports and touches nothing" requires.
+            trial: plexosd::gate::Trial::Unknown(
+                "--check does not read the ESP, by design".to_owned(),
+            ),
+        }
     } else {
         plexosd::gate::run(esp_device.as_deref(), &mut log)
     };

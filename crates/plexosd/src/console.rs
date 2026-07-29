@@ -385,7 +385,11 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     // On a thread, because waiting for Plex takes seconds and the console is the only
     // tool for finding out why a machine is unwell. It must not wait for the machine to
     // be well before it will say anything.
-    std::thread::spawn(|| {
+    // The gate's thread owns a Plex handle because an unhealthy verdict may end in a
+    // restart, and a restart has to stop Plex and get /var read-only first. Rolling back
+    // by cutting power to a mounted XFS would trade a bad update for a bad database.
+    let gate_plex = std::sync::Arc::clone(&plex);
+    std::thread::spawn(move || {
         let mut log = |line: &str| println!("plexosd: gate: {line}");
         let verdict = crate::gate::run_after_plex(
             std::path::Path::new(plexos_types::paths::PLEX_APPS),
@@ -393,6 +397,19 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
             &mut log,
         );
         log(&verdict.to_string());
+
+        // ADR-0005's other half, and the one that has never run. The counter is spent by
+        // booting, so leaving it standing achieves nothing on a machine that does not
+        // reboot -- which is every machine, because nothing here rebooted. The verdict
+        // decides; `demands_restart` is true only for an entry the bootloader is still
+        // counting, so a permanent slot stays up and diagnosable.
+        if verdict.demands_restart() {
+            log(
+                "restarting to spend a try. If this boot was an update, three of these \
+                 hand the machine back to the slot that worked.",
+            );
+            crate::power::stop_now(plexos_sys::power::Action::Restart, &gate_plex, &mut log);
+        }
     });
 
     let served_job = std::sync::Arc::clone(&job);
