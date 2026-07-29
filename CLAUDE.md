@@ -39,11 +39,11 @@ Everything else is cheap to revise. Prefer revising it.
 | Component | State |
 | --- | --- |
 | `crates/plexos-types` | Done. Formats and the layout emitter, 41 tests. |
-| `crates/plexos-update` | The bundle format, which slot an update goes to, and writing a partition and reading it back. 21 tests. **Has updated the reference laptop four times, alternating slots — and one of those updates was deliberately unbootable and was rolled back.** Nothing signs a bundle; ADR-0005's rollback is what makes that survivable. |
+| `crates/plexos-update` | The bundle format, which slot an update goes to, writing a partition and reading it back, and the ADR-0006 trust chain with `plexos-sign` to feed it. 32 tests. **Has updated the reference laptop four times, alternating slots — and one of those updates was deliberately unbootable and was rolled back.** Nothing signs a bundle; ADR-0005's rollback is what makes that survivable. |
 | `crates/plexos-gpu` | Done, 41 tests, and it has now answered the question it was written for. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
 | `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, and `reboot(2)`. 71 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
 | `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate, spawns the status console, and then starts a shell. 50 tests. |
-| `crates/plexosd` | Health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates. 194 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
+| `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates. 203 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
 | `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 97 tests. Provisioning now runs end to end **on the appliance**, driven from a browser: download, signature, manifest, build, publish, mount, confine, start. |
 | `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. |
 | `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 47 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree. |
@@ -100,14 +100,22 @@ the hardware alone months before Plex existed on the machine.
 
 Next, in order:
 
-1. **Sign the bundle (ADR-0006).** The updater works and trusts whoever answers at the
-   address it was given, which is a bench arrangement and says so on the page. The layers
-   underneath — slot choice, writing, verification, boot entry — do not change when
-   signatures arrive; only what vouches for the bytes does. This is now the widest gap
-   between what the appliance does and what it should be allowed to do.
-2. **Network diagnostics in the console.** Three diagnoses so far have needed somebody to
-   read a shell on the attached screen. `resolv.conf`, the default route and a name
-   lookup belong on the page.
+1. **Finish signing (ADR-0006).** The chain is written: `plexos-update::trust` verifies
+   root key → certificate → signing key → detached signature over the manifest's raw
+   bytes, and `plexos-sign` is the publisher's half, with a test that signs with one and
+   verifies with the other. `ROOT_KEYS` is empty, so nothing is trusted and nothing calls
+   any of it yet; updates behave exactly as before.
+
+   Three things remain. A development root key has to be generated and baked in, which is
+   a key-custody decision rather than a coding one. The updater has to move onto the
+   ADR-0006 manifest — and that has an obstacle worth knowing before starting: the frozen
+   schema in `plexos-types::manifest` has a single `uki`, while PlexOS builds one per slot
+   because `plexos.slot=` is on the command line inside it. That crate is append-only
+   because its formats reach disks, and this one never has — the appliance has only ever
+   parsed the improvised `update.json` — so reconciling it is cheap now and never again.
+   Then anti-rollback by `sequence`: `paths::ACCEPTED_SEQUENCE_FILE` and `REVOCATION_FILE`
+   are declared and have no callers, which is the shape of two defects already in this
+   file.
 3. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
    asked for and both are deferred: an 83 MB upload has to stream to disk, and
    `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
@@ -155,6 +163,13 @@ And an unhealthy boot that reached userspace left the counter standing and then 
 restarted, so nothing consumed it. The experiment then found two more, in the wreckage it
 left behind: an exhausted entry still carries a counter in its name, so it read as "on
 trial" forever, and nothing ever deleted it from an ESP sized for three UKIs.
+
+**The console answers the three network questions now.** `/api/network` reports the
+resolver with its symlink target, the default route, and whether `downloads.plex.tv`
+actually resolves — in 88 ms on the reference laptop. It found a defect in itself on its
+first real run: udhcpc writes the interface as a trailing comment, so the nameservers
+came back as `8.8.8.8 # eth0`, while a test whose fixture was imagined rather than
+captured passed throughout.
 
 Still unproven: signing, and the half of rollback where the image boots but the system
 does not work. Images are unsigned, so Secure Boot must be off.
@@ -371,6 +386,12 @@ does not work. Images are unsigned, so Secure Boot must be off.
   informed by evidence — the kernel had already written the reason to its ring buffer and
   nothing here could read it. Reach for the log, or ask the person with a shell, before
   the second guess.
+- **A fixture you imagined is a test that agrees with your code and not with the
+  machine.** `resolv.conf` was parsed with the comment rules guessed rather than captured
+  — udhcpc writes `nameserver 8.8.8.8 # eth0`, with the comment at the end of the line,
+  and the test put comments on their own line. The parser reported `8.8.8.8 # eth0` as an
+  address on the appliance while its test passed. Same rule as `CONFIG_*` symbols and PCI
+  IDs, applied to the output format of any program whose file you read.
 - **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error
