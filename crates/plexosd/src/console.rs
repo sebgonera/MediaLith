@@ -112,30 +112,22 @@ pub fn respond(
 
         ("POST", "/api/shares") => crate::shares::handle(&request.body),
 
-        // The configuration, and what the machine is actually doing about it. Both, side
-        // by side, because a stored hostname that was never applied is a real state and a
-        // page showing only the file would present it as if it had worked.
-        ("GET" | "HEAD", "/api/config") => {
-            match serde_json::to_string_pretty(&crate::settings::view(&crate::settings::path())) {
-                Ok(json) => Response::json(json),
-                Err(error) => {
-                    Response::text(500, format!("could not serialise the settings: {error}\n"))
-                }
-            }
+        // The configuration, what the machine is doing about it, and confirming an
+        // address change. Grouped into one helper because `respond` is a route table and
+        // these three share everything except their verb.
+        ("GET" | "HEAD" | "POST", "/api/config" | "/api/network")
+            if request.path != "/api/network" || request.method == "POST" =>
+        {
+            config_route(&request.method, &request.path, &request.body)
         }
-
-        // Token-gated by http::route, like every POST (ADR-0013). Renaming somebody's
-        // media server is exactly what that gate is for.
-        ("POST", "/api/config") => match save_settings(&request.body) {
-            Ok(json) => Response::json(json),
-            Err(error) => Response::text(400, format!("{error}\n")),
-        },
 
         // The terminal (ADR-0014). Every route here is a POST, including the one that
         // only reads output — deliberately, because http::route gates on the method and
         // a root shell's output must not be readable without the token. This is the one
         // place in the console where "GET is safe" is false.
         ("POST", "/api/terminal") => terminal_route(&request.body),
+
+        ("POST", "/api/token") => rotate_token(),
 
         // The three questions above the interface list: a resolver, a route, and a name
         // that actually resolves. Its own route rather than a field on /api/status
@@ -332,6 +324,63 @@ pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::
     Credential::Set(fingerprint)
 }
 
+/// Issues a new device token and puts it in force at once.
+///
+/// Rotating used to mean deleting a file from a shell on the attached screen and
+/// rebooting — one of the last operations that still needed the panel, and the one
+/// ADR-0014 made most awkward by turning the token into a root shell.
+///
+/// The new token is in the reply and nowhere else. The file holds a fingerprint, and
+/// there is deliberately no route that will say it again: a credential a machine can be
+/// asked to repeat is one an attacker can ask it to repeat.
+fn rotate_token() -> Response {
+    match crate::auth::rotate(std::path::Path::new(crate::auth::CREDENTIAL_FILE)) {
+        Ok(token) => {
+            // Also to the attached screen, which is where ADR-0013 says a device
+            // announces itself — and the only place left if the browser that asked for
+            // it loses the reply.
+            let shown = crate::auth::grouped(&token);
+            println!("plexosd: the device token is now {shown}");
+            Response::json(format!("{{\"token\":\"{shown}\"}}"))
+        }
+        Err(error) => Response::text(
+            500,
+            format!(
+                "could not issue a new token: {error}. Remedy: the old one still works — \
+                 nothing changes until both the file and the running server have the new \
+                 one.\n"
+            ),
+        ),
+    }
+}
+
+/// The settings routes: read, write, and confirm an address change.
+///
+/// Together because they are one subject and `respond` is a table. Reading is open like
+/// every other `GET` here; writing and confirming are `POST`, so [`crate::http::route`]
+/// has already demanded the token before this is reached.
+///
+/// The confirmation carries no body and needs none. Reaching this route at all is the
+/// proof being asked for: the console is still reachable at the new address.
+fn config_route(method: &str, path: &str, body: &[u8]) -> Response {
+    if path == "/api/network" {
+        let confirmed = crate::addressing::confirm();
+        return Response::json(format!("{{\"confirmed\":{confirmed}}}"));
+    }
+
+    if method == "POST" {
+        return match save_settings(body) {
+            Ok(json) => Response::json(json),
+            Err(error) => Response::text(400, format!("{error}\n")),
+        };
+    }
+
+    match serde_json::to_string_pretty(&crate::settings::view(&crate::settings::path())) {
+        Ok(json) => Response::json(json),
+        Err(error) => Response::text(500, format!("could not serialise the settings: {error}\n")),
+    }
+}
+
 /// The terminal's four actions, behind one `POST` route.
 ///
 /// One route rather than four paths because all four must be `POST`: [`crate::http`]
@@ -444,9 +493,17 @@ fn save_settings(body: &[u8]) -> Result<String, String> {
 
     // Loaded, patched, stored: the body carries only the fields the page edits, so a
     // newer page adding a field cannot have it reverted by an older one.
-    let mut config = crate::settings::load(&path)?;
+    let previous = crate::settings::load(&path)?;
+    let mut config = previous.clone();
     crate::settings::patch(&mut config, body)?;
-    let applied = crate::settings::store(&config, &path)?;
+    let touched_network = crate::settings::patch_network(&mut config, body)?;
+
+    let mut log = |line: &str| println!("plexosd: addressing: {line}");
+    let applied = if touched_network {
+        crate::settings::store_with_network(&config, &previous, &path, &mut log)?
+    } else {
+        crate::settings::store(&config, &path)?
+    };
 
     serde_json::to_string_pretty(&serde_json::json!({
         "applied": applied,

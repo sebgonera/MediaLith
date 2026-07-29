@@ -72,8 +72,20 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 /// The complete system configuration.
+///
+/// **Unknown top-level sections are ignored, and the sub-structures below are strict.**
+/// That split is deliberate and was arrived at the hard way. With `deny_unknown_fields`
+/// here as well, this format could not gain a field at all: a configuration written by a
+/// newer release was refused outright by an older one, which on a machine with A/B
+/// rollback means the slot you fall back to cannot read its own settings. ADR-0006 chose
+/// tolerance for the update manifest and wrote down why; this had chosen the opposite,
+/// for the same class of document.
+///
+/// Strictness stays where a person actually types. A misspelt key inside `[system]` is a
+/// setting that silently does nothing, which is the failure this project keeps recording
+/// — so that is still an error. A whole section this build has never heard of is a newer
+/// release talking, and ignoring it is how a rollback survives.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Schema version. Mandatory — there is no default, because guessing which schema
     /// a file was written against is exactly the ambiguity this field removes.
@@ -90,6 +102,9 @@ pub struct Config {
     /// Network file sharing.
     #[serde(default)]
     pub shares: Shares,
+    /// How this machine gets its address.
+    #[serde(default)]
+    pub network: NetworkConfig,
 }
 
 impl Config {
@@ -120,6 +135,56 @@ impl Config {
     }
 }
 
+/// How the appliance obtains its address.
+///
+/// A media server is a thing other machines connect *to*, so its address wants to stay
+/// still — and a DHCP reservation is not always somebody's to make. This is also the one
+/// setting on the console that can cut off the console, which is why applying it is
+/// wrapped in a confirmation rather than simply done.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkConfig {
+    /// `dhcp` or `static`.
+    #[serde(default = "NetworkConfig::default_mode")]
+    pub mode: String,
+    /// The address, with its prefix length, e.g. `192.168.2.50/24`.
+    ///
+    /// Carried as written rather than parsed into an address type, because this crate is
+    /// the wire format and a value that will not parse has to survive a round trip to be
+    /// reportable. The consumer validates.
+    #[serde(default)]
+    pub address: String,
+    /// The default gateway.
+    #[serde(default)]
+    pub gateway: String,
+    /// Resolvers, in the order they should be tried.
+    #[serde(default)]
+    pub nameservers: Vec<String>,
+}
+
+impl NetworkConfig {
+    fn default_mode() -> String {
+        "dhcp".into()
+    }
+
+    /// Whether this asks for a static address.
+    #[must_use]
+    pub fn is_static(&self) -> bool {
+        self.mode == "static"
+    }
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            mode: Self::default_mode(),
+            address: String::new(),
+            gateway: String::new(),
+            nameservers: Vec::new(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -128,6 +193,7 @@ impl Default for Config {
             updates: Updates::default(),
             plex: Plex::default(),
             shares: Shares::default(),
+            network: NetworkConfig::default(),
         }
     }
 }
@@ -338,6 +404,39 @@ pub struct ShareService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_section_from_a_newer_release_is_ignored_rather_than_fatal() {
+        // The property that lets an A/B machine roll back and still read its own
+        // settings. Without it, a configuration written by a newer image is refused
+        // outright by the older one, which is the slot you fall back *to*.
+        let newer = "schema_version = 1\n\n[system]\nhostname = \"cinema\"\n\n\
+                     [telemetry]\nenabled = true\n";
+        let config = Config::parse(newer).expect("an unknown section must not be fatal");
+        assert_eq!(config.system.hostname, "cinema");
+    }
+
+    #[test]
+    fn a_misspelt_key_inside_a_known_section_is_still_an_error() {
+        // Strictness stays where a person types. A setting that silently does nothing is
+        // the failure this project keeps recording, and inside [system] the reader knows
+        // every legal key.
+        let typo = "schema_version = 1\n\n[system]\nhostnam = \"cinema\"\n";
+        assert!(
+            Config::parse(typo).is_err(),
+            "a typo in a known section must not be swallowed"
+        );
+    }
+
+    #[test]
+    fn network_defaults_to_dhcp_and_survives_a_round_trip() {
+        let config = Config::parse("schema_version = 1\n").expect("a bare file is valid");
+        assert!(!config.network.is_static());
+        assert_eq!(config.network.mode, "dhcp");
+
+        let text = toml::to_string(&config).expect("serialises");
+        assert_eq!(Config::parse(&text).expect("re-parses"), config);
+    }
 
     #[test]
     fn a_minimal_config_yields_a_working_system() {

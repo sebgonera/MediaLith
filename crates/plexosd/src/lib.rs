@@ -40,6 +40,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod addressing;
 pub mod appmount;
 pub mod auth;
 pub mod bootcounter;

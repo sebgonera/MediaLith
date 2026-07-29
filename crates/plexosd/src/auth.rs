@@ -226,6 +226,59 @@ pub enum Credential {
     Unset,
 }
 
+/// The credential the running server is checking against.
+///
+/// Held here rather than captured by [`crate::http::serve`] so that rotation takes effect
+/// at once. The distinction that matters is *who* may change it: the original reasoning
+/// was that re-reading [`CREDENTIAL_FILE`] on every request would let a file replaced
+/// out-of-band become the credential without a restart, which is a way past the console
+/// rather than through it. That still holds — nothing here re-reads the file. What
+/// changed is that the console may now deliberately swap the value, which is the whole
+/// point of being able to rotate: a token rotated because it leaked has to stop working
+/// now, not at the next reboot.
+static CURRENT: std::sync::RwLock<Option<Credential>> = std::sync::RwLock::new(None);
+
+/// Installs the credential the server will check against.
+pub fn install(credential: Credential) {
+    *CURRENT
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(credential);
+}
+
+/// The credential in force.
+///
+/// [`Credential::Unset`] until [`install`] has run, which is the safe direction: an
+/// unclaimed device refuses every mutating route rather than allowing them.
+#[must_use]
+pub fn current() -> Credential {
+    CURRENT
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .unwrap_or(Credential::Unset)
+}
+
+/// Issues a new token, stores its fingerprint, and puts it in force immediately.
+///
+/// Returns the token itself, which is the only time it exists in a readable form — the
+/// file holds a fingerprint, and there is deliberately no way to ask for it again.
+///
+/// # Errors
+/// If randomness cannot be read or the credential file cannot be written. The credential
+/// in force is left alone in that case, so a failed rotation does not lock anybody out.
+pub fn rotate(path: &Path) -> std::io::Result<String> {
+    let token = generate()?;
+    let print = fingerprint(&token);
+
+    // Written before it is installed. A machine that loses power between the two comes
+    // back checking the new token, which the person who asked for it has; the other order
+    // would come back checking a token nobody was ever shown.
+    write(path, &print)?;
+    install(Credential::Set(print));
+
+    Ok(token)
+}
+
 /// Reads the stored fingerprint.
 ///
 /// A missing file means unclaimed, not broken: that is the state of every device on its
@@ -278,6 +331,56 @@ pub fn bearer(header_value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rotated_token_is_in_force_immediately_and_the_old_one_is_not() {
+        // The whole reason rotation exists. A token replaced because it leaked and then
+        // honoured until the next reboot has not been revoked, it has been scheduled for
+        // revocation -- and what it guards is a root shell.
+        let path = std::env::temp_dir().join("plexos-auth-rotate");
+        let _ = std::fs::remove_file(&path);
+
+        let old = "AAAA-BBBB-CCCC-DDDD";
+        install(Credential::Set(fingerprint(old)));
+
+        let new = rotate(&path).expect("issues a token");
+        assert_ne!(
+            normalise(&new),
+            normalise(old),
+            "a fresh token, not the old one"
+        );
+
+        let Credential::Set(in_force) = current() else {
+            panic!("rotation must leave a credential in force");
+        };
+
+        assert!(matches(&new, &in_force), "the token just issued must work");
+        assert!(
+            !matches(old, &in_force),
+            "and the one it replaced must not -- otherwise nothing was revoked"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_token_is_readable_once_and_the_file_holds_only_its_fingerprint() {
+        // There is deliberately no route that says it again. If the browser that asked
+        // loses the reply, the remedy is another rotation, not a lookup.
+        let path = std::env::temp_dir().join("plexos-auth-once");
+        let _ = std::fs::remove_file(&path);
+
+        let token = rotate(&path).expect("issues a token");
+        let stored = std::fs::read_to_string(&path).expect("the file exists");
+
+        assert!(
+            !stored.contains(&normalise(&token)),
+            "the token itself must never reach the disk: {stored:?}"
+        );
+        assert!(stored.trim().len() >= 32, "a fingerprint, not a token");
+
+        let _ = std::fs::remove_file(&path);
+    }
 
     /// A token shaped like a real one. Not secret: it is in a public repository.
     const SAMPLE: &str = "4K7QM2XR9T8BHVWP";

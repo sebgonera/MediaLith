@@ -412,18 +412,22 @@ where
     F: Fn(&Request) -> Response + Send + Sync + 'static,
 {
     let handler = std::sync::Arc::new(handler);
-    // Read once, at startup, and shared. Re-reading per request would let a file
-    // replaced mid-session take effect without a restart, which is a way to change the
-    // credential that does not go through the console.
-    let credential = std::sync::Arc::new(credential);
+
+    // Installed once, at startup, and read from `auth` per connection rather than
+    // captured here. The original reasoning against re-reading held that a credential
+    // file replaced mid-session must not take effect without a restart, because that is
+    // a way past the console rather than through it. That is still true: nothing reads
+    // the file again. What this allows is the console *deliberately* swapping it, which
+    // is what rotation is -- a token rotated because it leaked has to stop working now.
+    crate::auth::install(credential);
 
     for incoming in listener.incoming() {
         match incoming {
             Ok(mut stream) => {
                 let handler = std::sync::Arc::clone(&handler);
-                let credential = std::sync::Arc::clone(&credential);
                 std::thread::spawn(move || {
-                    let _ = handle(&mut stream, credential.as_ref(), handler.as_ref());
+                    let credential = crate::auth::current();
+                    let _ = handle(&mut stream, &credential, handler.as_ref());
                 });
             }
             Err(error) => log(&format!("could not accept a connection: {error}")),

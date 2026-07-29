@@ -30,6 +30,8 @@
     --degraded: #9a6400;
     --unavailable: #b3261e;
     --accent: #2f5fd0;
+    --screen: #101319;
+    --screen-ink: #d7dde6;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -42,6 +44,8 @@
       --degraded: #e0a83a;
       --unavailable: #ef6a63;
       --accent: #7fa5f5;
+      --screen: #0d1014;
+      --screen-ink: #dde3ec;
     }
   }
 
@@ -219,6 +223,133 @@
     font-weight: 600;
     text-decoration: none;
   }
+  /* ------------------------------------------------------------------
+     Cards that take input.
+     The older ones scope their form styling under .plex and .power, so anything added
+     later got browser defaults and looked like a different page. .form is that styling,
+     named for what it is rather than for one card, so the next one inherits it.
+     ------------------------------------------------------------------ */
+  .form .row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .6rem;
+    align-items: center;
+    margin-top: .7rem;
+  }
+  .form .field { margin-top: .9rem; }
+  .form .field > label {
+    display: block;
+    margin-bottom: .3rem;
+    color: var(--muted);
+    font-size: .75rem;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+  .form input[type=text] {
+    width: 100%;
+    flex: 1 1 12rem;
+    min-width: 0;
+    padding: .55rem .7rem;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .9rem;
+  }
+  .form input[type=text]:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+    border-color: var(--accent);
+  }
+  .form button {
+    padding: .55rem 1.1rem;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .form button[disabled] { opacity: .55; cursor: default; }
+  .form button.ghost {
+    background: transparent;
+    color: var(--ink);
+    border-color: var(--line);
+    font-weight: 500;
+  }
+
+  /* ------------------------------------------------------------------
+     The terminal.
+     Full width, and not in the card grid: 80 columns of monospace inside a 17rem
+     column wraps every line, which reads as corruption rather than as a narrow window.
+     ------------------------------------------------------------------ */
+  .wide { margin-top: 1rem; }
+
+  #terminal .screen {
+    margin: .85rem 0 0;
+    padding: .75rem .9rem;
+    height: 26rem;
+    overflow: auto;
+    background: var(--screen);
+    color: var(--screen-ink);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .82rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    tab-size: 8;
+  }
+  #terminal .screen:empty::before {
+    content: "No session. Open a shell to start one.";
+    color: var(--muted);
+  }
+
+  /* The prompt is a row that does not wrap: the field takes whatever the buttons leave,
+     so it is always the width of the screen above it. */
+  #terminal .prompt {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: .5rem;
+    align-items: center;
+    margin-top: .6rem;
+  }
+  #terminal .prompt .sigil {
+    color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .95rem;
+    user-select: none;
+  }
+  #terminal .prompt input[type=text] { flex: 1 1 auto; }
+  #terminal .prompt input[disabled] { opacity: .5; }
+
+  #terminal .bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .6rem;
+    align-items: center;
+  }
+  #terminal .state {
+    margin-left: auto;
+    font-size: .82rem;
+    color: var(--muted);
+  }
+  #terminal .state.live { color: var(--ready); }
+  #terminal .state.gone { color: var(--unavailable); }
+
+  .warn {
+    margin: 0 0 .2rem;
+    padding: .55rem .7rem;
+    border: 1px solid var(--degraded);
+    border-radius: 8px;
+    color: var(--ink);
+    background: color-mix(in srgb, var(--degraded) 12%, transparent);
+    font-size: .88rem;
+  }
+
   .progress {
     margin-top: .9rem;
     padding: .7rem .8rem;
@@ -501,43 +632,152 @@ async function runNetworkDiagnosis() {
 // poll would overwrite whatever somebody was halfway through typing. Re-fetched only
 // after a save, which is the only thing that can change them.
 let settingsView = null;
+// Which addressing mode the buttons have selected but not yet saved. Kept out of
+// settingsView because that is what came from the machine, and mixing the two is how a
+// page comes to show a setting nobody stored.
+let pendingMode = null;
 
 function settingsCard() {
   if (!settingsView) {
-    return `<div class="card"><h3>Settings</h3>
+    return `<div class="card form"><h3>Settings</h3>
       <p class="empty">Loading…</p></div>`;
   }
 
   const c = settingsView.config || {};
   const sys = c.system || {};
+  const net = c.network || { mode: "dhcp" };
   const drift = settingsView.hostname_now && settingsView.hostname_now !== sys.hostname;
   const zones = settingsView.timezones || [];
 
   return `
-    <div class="card">
+    <div class="card form">
       <h3>Settings</h3>
-      ${settingsView.error ? `<div class="progress failed"><div>${esc(settingsView.error)}</div></div>` : ""}
-      <p class="hint">Hostname</p>
-      <div class="row">
-        <input type="text" id="set-hostname" class="mono" autocomplete="off" spellcheck="false"
+      ${settingsView.error ? `<p class="warn">${esc(settingsView.error)}</p>` : ""}
+      <div class="field">
+        <label for="set-hostname">Hostname</label>
+        <input type="text" id="set-hostname" autocomplete="off" spellcheck="false"
                value="${esc(sys.hostname || "")}">
+        ${drift ? `<p class="hint">The kernel is using
+           <span class="mono">${esc(settingsView.hostname_now)}</span>, which is not what
+           is stored. Saving applies it.</p>` : ""}
       </div>
-      ${drift ? `<p class="hint">The kernel is currently using
-         <span class="mono">${esc(settingsView.hostname_now)}</span>, which is not what is
-         stored. Saving applies it.</p>` : ""}
-      <p class="hint">Timezone</p>
-      <div class="row">
-        <input type="text" id="set-timezone" class="mono" list="tz-list" autocomplete="off"
+      <div class="field">
+        <label for="set-timezone">Timezone</label>
+        <input type="text" id="set-timezone" list="tz-list" autocomplete="off"
                spellcheck="false" value="${esc(sys.timezone || "")}">
+        <datalist id="tz-list">${zones.map(z => `<option value="${esc(z)}">`).join("")}</datalist>
+        ${zones.length
+           ? `<p class="hint">${zones.length} zones on this image.</p>`
+           : `<p class="hint">This image carries no timezone database, so any zone but UTC
+                will be refused. It needs a build with BR2_TARGET_TZ_INFO.</p>`}
       </div>
-      <datalist id="tz-list">${zones.map(z => `<option value="${esc(z)}">`).join("")}</datalist>
-      ${zones.length
-         ? `<p class="hint">${zones.length} zones available on this image.</p>`
-         : `<p class="hint">This image carries no timezone database, so any zone but UTC
-              will be refused. It needs a build with BR2_TARGET_TZ_INFO.</p>`}
+      <div class="field">
+        <label for="set-mode">Addressing</label>
+        <div class="row">
+          <button id="mode-dhcp" class="${net.mode === "static" ? "ghost" : ""}">DHCP</button>
+          <button id="mode-static" class="${net.mode === "static" ? "" : "ghost"}">Static</button>
+        </div>
+      </div>
+      ${net.mode === "static" ? `
+        <div class="field">
+          <label for="set-address">Address and prefix</label>
+          <input type="text" id="set-address" autocomplete="off" spellcheck="false"
+                 placeholder="192.168.2.50/24" value="${esc(net.address || "")}">
+        </div>
+        <div class="field">
+          <label for="set-gateway">Gateway</label>
+          <input type="text" id="set-gateway" autocomplete="off" spellcheck="false"
+                 placeholder="192.168.2.1" value="${esc(net.gateway || "")}">
+        </div>
+        <div class="field">
+          <label for="set-dns">Nameservers, comma separated</label>
+          <input type="text" id="set-dns" autocomplete="off" spellcheck="false"
+                 placeholder="192.168.2.1" value="${esc((net.nameservers || []).join(", "))}">
+        </div>
+        <p class="hint">A wrong address takes this page away. Saving applies it and then
+          undoes it unless you confirm from the new address, which is the only proof the
+          console is still reachable.</p>` : ""}
       <div class="row"><button id="settings-save">Save settings</button></div>
       <div id="settings-result"></div>
+
+      <div class="field">
+        <label>Device token</label>
+        <p class="hint">Rotating issues a new one and revokes this one immediately. It is
+          shown once, here and on the attached screen, and cannot be asked for again.</p>
+        <div class="row"><button id="token-rotate" class="ghost">Rotate the device token</button></div>
+        <div id="token-result"></div>
+      </div>
     </div>`;
+}
+
+/// Draws the trial banner into its own container, if there is a trial.
+function renderTrial() {
+  const host = document.getElementById("net-trial");
+  if (host) host.innerHTML = networkTrialBanner();
+}
+
+/// The banner shown while an address change is provisional.
+///
+/// Rendered from the settings view rather than from a timer, so a browser that arrived
+/// at the new address after a reload still sees it and can confirm.
+function networkTrialBanner() {
+  const t = settingsView && settingsView.network_trial;
+  if (!t) return "";
+  return `
+    <div class="wide">
+      <div class="card form">
+        <p class="warn"><strong>This machine is provisionally at ${esc(t.address)}.</strong>
+          It goes back to a DHCP lease in ${t.seconds_left} seconds unless you confirm.
+          You are reading this, so the address works.</p>
+        <div class="row"><button id="net-confirm">Keep this address</button></div>
+      </div>
+    </div>`;
+}
+
+async function confirmNetwork() {
+  const value = token();
+  if (!value) return;
+  try {
+    await fetch("/api/network", {
+      method: "POST", cache: "no-store",
+      headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
+      body: "{}",
+    });
+  } catch (e) { /* the reload below reports the truth either way */ }
+  loadSettings();
+}
+
+async function rotateToken() {
+  const out = document.getElementById("token-result");
+  const value = token();
+  if (!value) {
+    if (out) out.innerHTML = `<div class="progress failed"><div>The current token is
+      needed to issue a new one.</div></div>`;
+    return;
+  }
+  if (!confirm("Rotate the device token? The current one stops working at once, and every browser using it will have to be given the new one.")) return;
+
+  try {
+    const response = await fetch("/api/token", {
+      method: "POST", cache: "no-store",
+      headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(text.trim() || response.statusText);
+    const issued = JSON.parse(text).token;
+    // Stored straight away: the old one in this tab is already dead, and a page that
+    // showed the new token and then refused every button would be a poor trade.
+    rememberToken(issued);
+    const field = document.getElementById("token");
+    if (field) field.value = issued;
+    if (out) out.innerHTML = `<div class="progress"><span class="now">New device token</span>
+      <div class="mono" style="font-size:1.1rem;letter-spacing:.06em">${esc(issued)}</div>
+      <div>Write it down. It is not stored anywhere it can be read back, and it is also
+        on the machine's attached screen.</div></div>`;
+  } catch (e) {
+    if (out) out.innerHTML = `<div class="progress failed"><div>${esc(String(e))}</div></div>`;
+  }
 }
 
 async function loadSettings() {
@@ -547,7 +787,8 @@ async function loadSettings() {
     settingsView = { config: {}, timezones: [], error: String(e) };
   }
   const host = document.getElementById("settings");
-  if (host) host.outerHTML = settingsCard().replace('class="card"', 'class="card" id="settings"');
+  if (host) host.outerHTML = settingsCard().replace('class="card form"', 'class="card form" id="settings"');
+  renderTrial();
 }
 
 // Every field reports what happened to the machine, not merely that it was stored.
@@ -563,12 +804,23 @@ async function saveSettings() {
       box at the top of this page.</div></div>`;
     return;
   }
+  const val = id => (document.getElementById(id) || {}).value || "";
   const body = {
-    system: {
-      hostname: (document.getElementById("set-hostname") || {}).value || "",
-      timezone: (document.getElementById("set-timezone") || {}).value || "",
-    },
+    system: { hostname: val("set-hostname"), timezone: val("set-timezone") },
   };
+  // Sent only when the form is showing the fields, so a save that only renamed the
+  // machine does not arm a confirmation nobody is expecting.
+  if (document.getElementById("set-address")) {
+    body.network = {
+      mode: "static",
+      address: val("set-address"),
+      gateway: val("set-gateway"),
+      nameservers: val("set-dns").split(",").map(x => x.trim()).filter(Boolean),
+    };
+  } else if (pendingMode) {
+    body.network = { mode: pendingMode };
+  }
+  pendingMode = null;
 
   if (button) { button.disabled = true; button.textContent = "Saving…"; }
   try {
@@ -582,6 +834,7 @@ async function saveSettings() {
 
     const result = JSON.parse(text);
     settingsView = result.view;
+    renderTrial();
     const applied = result.applied || {};
     const rows = Object.keys(applied).map(name => {
       const o = applied[name] || {};
@@ -669,21 +922,29 @@ function termSize() {
 }
 
 async function termOpen(takeOver) {
-  const status = document.getElementById("term-status");
   try {
     const size = termSize();
     const opened = await termPost({ action: "open", take_over: !!takeOver, rows: size.rows, columns: size.columns });
     termId = opened.id;
     termOffset = opened.offset;
     document.getElementById("term-out").textContent = "";
-    if (status) status.textContent = "connected";
+    termStatus("connected", "live");
     document.getElementById("term-in").focus();
     termLoop();
   } catch (e) {
     if (e.status === 409) {
-      if (status) status.innerHTML = esc(e.message) + ' <button id="term-takeover">Take it over</button>';
-    } else if (status) {
-      status.textContent = e.message;
+      termStatus("another session is open", "gone");
+      termWrite("\n[" + e.message + "]\n");
+      const row = document.querySelector("#terminal .row");
+      if (row && !document.getElementById("term-takeover")) {
+        const take = document.createElement("button");
+        take.id = "term-takeover";
+        take.className = "ghost";
+        take.textContent = "Take it over";
+        row.appendChild(take);
+      }
+    } else {
+      termStatus(e.message, "gone");
     }
   }
 }
@@ -702,15 +963,13 @@ async function termLoop() {
       if (out.finished) {
         termWrite("\n[the shell exited]\n");
         termId = null;
-        const status = document.getElementById("term-status");
-        if (status) status.textContent = "closed";
+        termStatus("closed");
       }
     }
   } catch (e) {
     termWrite("\n[" + e.message + "]\n");
     termId = null;
-    const status = document.getElementById("term-status");
-    if (status) status.textContent = "disconnected";
+    termStatus("disconnected", "gone");
   } finally {
     termPolling = false;
   }
@@ -718,23 +977,42 @@ async function termLoop() {
 
 function terminalCard() {
   return `
-    <div class="card" id="terminal">
-      <h3>Terminal</h3>
-      <p class="hint"><strong>This is a root shell over plain HTTP.</strong> The device
-        token stops a passer-by, not somebody reading the network. ADR-0014: this console
-        is for a trusted LAN and is not fit to expose beyond one.</p>
+    <div class="card form" id="terminal">
+      <div class="bar">
+        <h3 style="margin:0">Terminal</h3>
+        <span class="state" id="term-status">no session</span>
+      </div>
+      <p class="warn"><strong>A root shell, over plain HTTP.</strong> The device token
+        stops a passer-by, not somebody reading the network. ADR-0014: this console is
+        for a trusted LAN and is not fit to expose beyond one.</p>
       <div class="row">
         <button id="term-open">Open a shell</button>
-        <button id="term-close">Close</button>
-        <span id="term-status" class="hint"></span>
+        <button id="term-close" class="ghost">Close</button>
       </div>
-      <pre id="term-out" class="log" style="height:22em;overflow:auto;white-space:pre-wrap"></pre>
-      <div class="row">
-        <input type="text" id="term-in" class="mono" autocomplete="off" spellcheck="false"
-               placeholder="type a command and press Enter">
+      <pre class="screen" id="term-out"></pre>
+      <div class="prompt">
+        <span class="sigil">$</span>
+        <input type="text" id="term-in" autocomplete="off" spellcheck="false"
+               autocapitalize="off" placeholder="a command, then Enter — Ctrl-C interrupts">
       </div>
     </div>`;
 }
+
+/// Sets the status line, its colour, and whether the prompt accepts anything.
+///
+/// One function for all three because they are one fact. A prompt that takes keystrokes
+/// with no session behind it looks like a shell that has stopped responding, which is a
+/// worse thing to show than a disabled field.
+function termStatus(text, kind) {
+  const el = document.getElementById("term-status");
+  if (el) {
+    el.textContent = text;
+    el.className = "state" + (kind ? " " + kind : "");
+  }
+  const field = document.getElementById("term-in");
+  if (field) field.disabled = !termId;
+}
+
 
 function systemCard(status) {
   const p = status.product || {};
@@ -769,9 +1047,17 @@ function render(status) {
   // would be unusable. It lives outside that element for exactly that reason.
   if (!document.getElementById("terminal")) {
     const host = document.createElement("div");
-    host.className = "grid";
+    host.className = "wide";
+    // Two containers, because they change on different schedules: the banner follows the
+    // settings, which are fetched, and the terminal must never be re-rendered at all.
+    const trial = document.createElement("div");
+    trial.id = "net-trial";
+    document.getElementById("main").after(trial);
+
     host.innerHTML = terminalCard();
-    document.getElementById("main").after(host);
+    trial.after(host);
+    termStatus("no session");
+    renderTrial();
   }
 
   document.getElementById("main").innerHTML =
@@ -781,7 +1067,7 @@ function render(status) {
        ${devicesCard(status.gpu || {})}
        ${networkCard(status.network || {})}
        ${systemCard(status)}
-       ${settingsCard().replace('class="card"', 'class="card" id="settings"')}
+       ${settingsCard().replace('class="card form"', 'class="card form" id="settings"')}
      </div>`;
 
   document.getElementById("uptime").textContent = humanUptime(status.uptime_seconds);
@@ -1262,13 +1548,21 @@ async function power(action, label) {
 document.addEventListener("click", event => {
   if (event.target && event.target.id === "netdiag-run") runNetworkDiagnosis();
   if (event.target && event.target.id === "settings-save") saveSettings();
+  if (event.target && event.target.id === "token-rotate") rotateToken();
+  if (event.target && event.target.id === "net-confirm") confirmNetwork();
+  if (event.target && (event.target.id === "mode-dhcp" || event.target.id === "mode-static")) {
+    pendingMode = event.target.id === "mode-static" ? "static" : "dhcp";
+    settingsView.config = settingsView.config || {};
+    settingsView.config.network = Object.assign({}, settingsView.config.network, { mode: pendingMode });
+    const host = document.getElementById("settings");
+    if (host) host.outerHTML = settingsCard().replace('class="card form"', 'class="card form" id="settings"');
+  }
   if (event.target && event.target.id === "term-open") termOpen(false);
   if (event.target && event.target.id === "term-takeover") termOpen(true);
   if (event.target && event.target.id === "term-close") {
     const id = termId; termId = null;
     if (id) termPost({ action: "close", id }).catch(() => {});
-    const status = document.getElementById("term-status");
-    if (status) status.textContent = "closed";
+    termStatus("closed");
   }
 });
 

@@ -70,6 +70,12 @@ pub struct Applied {
     pub hostname: Outcome,
     /// What happened to the timezone.
     pub timezone: Outcome,
+    /// What happened to the addressing, if it was changed.
+    ///
+    /// `None` when the request did not touch it. A change that was applied and is not
+    /// yet confirmed says so here, and the console has [`crate::addressing::CONFIRM_WITHIN`]
+    /// to prove it can still be reached before the machine puts it back.
+    pub network: Option<Outcome>,
 }
 
 /// Loads the configuration, falling back to defaults.
@@ -146,6 +152,11 @@ pub fn apply(config: &Config) -> Applied {
     Applied {
         hostname: apply_hostname(&config.system.hostname),
         timezone: apply_timezone(&config.system.timezone),
+        // Not applied here. Addressing is the one setting that can take away the console,
+        // so it goes through `store_with_network`, which arms a revert -- and `apply` is
+        // also what runs at every boot, where re-applying a confirmed address would arm a
+        // confirmation nobody is waiting to give.
+        network: None,
     }
 }
 
@@ -286,6 +297,8 @@ pub struct View {
     pub timezones: Vec<String>,
     /// Why the stored configuration could not be read, if it could not.
     pub error: Option<String>,
+    /// An address change applied and awaiting confirmation, if there is one.
+    pub network_trial: Option<crate::addressing::Trial>,
 }
 
 /// Gathers the current configuration and what the machine is actually doing.
@@ -303,6 +316,7 @@ pub fn view(path: &Path) -> View {
         hostname_now: plexos_sys::hostname::get().ok(),
         timezones: available_timezones(Path::new(ZONEINFO)),
         error,
+        network_trial: crate::addressing::in_flight(),
     }
 }
 
@@ -365,6 +379,45 @@ pub fn store(config: &Config, path: &Path) -> Result<Applied, String> {
     Ok(applied)
 }
 
+/// Stores a configuration, applying an addressing change under a confirmation.
+///
+/// `previous` is what to go back to if nobody confirms. The address is applied *after*
+/// the file is written, so a machine that loses power mid-change comes up asking for the
+/// address somebody chose rather than silently keeping the old one — and the revert
+/// writes the old file back before it re-applies, for the same reason in the other
+/// direction.
+///
+/// # Errors
+/// If the file cannot be written. A refused address is reported in the [`Applied`].
+pub fn store_with_network(
+    config: &Config,
+    previous: &Config,
+    path: &Path,
+    log: &mut dyn FnMut(&str),
+) -> Result<Applied, String> {
+    let mut applied = store(config, path)?;
+
+    if config.network == previous.network {
+        return Ok(applied);
+    }
+
+    let outcome = crate::addressing::apply(&config.network, log);
+
+    // Armed only when the change actually took. A refused address left the machine where
+    // it was, so there is nothing to undo and nothing to confirm -- and arming anyway
+    // would tell the page to ask for a confirmation about a change that did not happen.
+    if matches!(outcome, Outcome::Applied { .. }) {
+        crate::addressing::arm(
+            previous.clone(),
+            &config.network.address,
+            path.to_path_buf(),
+        );
+    }
+
+    applied.network = Some(outcome);
+    Ok(applied)
+}
+
 /// Merges an incoming JSON document onto the stored configuration.
 ///
 /// A patch rather than a replacement: the page edits two fields, and a body that had to
@@ -398,6 +451,60 @@ pub fn patch(config: &mut Config, body: &[u8]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Merges the `network` section of an incoming document.
+///
+/// Separate from [`patch`] because the caller has to know whether addressing was touched
+/// at all: applying it arms a revert, and arming one for a request that only renamed the
+/// machine would demand a confirmation nobody expects.
+///
+/// # Errors
+/// If a field is present with the wrong type.
+pub fn patch_network(config: &mut Config, body: &[u8]) -> Result<bool, String> {
+    let document: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("the request body is not JSON: {e}"))?;
+
+    let Some(network) = document.get("network") else {
+        return Ok(false);
+    };
+
+    for (key, slot) in [
+        ("mode", &mut config.network.mode),
+        ("address", &mut config.network.address),
+        ("gateway", &mut config.network.gateway),
+    ] {
+        if let Some(value) = network.get(key) {
+            let value = value
+                .as_str()
+                .ok_or_else(|| format!("network.{key} must be a string"))?;
+            slot.clear();
+            slot.push_str(value.trim());
+        }
+    }
+
+    if let Some(nameservers) = network.get("nameservers") {
+        let list = nameservers
+            .as_array()
+            .ok_or_else(|| "network.nameservers must be a list".to_owned())?;
+        config.network.nameservers = list
+            .iter()
+            .map(|n| {
+                n.as_str()
+                    .map(|s| s.trim().to_owned())
+                    .ok_or_else(|| "network.nameservers must be strings".to_owned())
+            })
+            .collect::<Result<_, _>>()?;
+    }
+
+    if config.network.mode != "dhcp" && config.network.mode != "static" {
+        return Err(format!(
+            "{:?} is not an addressing mode. Remedy: \"dhcp\" or \"static\".",
+            config.network.mode
+        ));
+    }
+
+    Ok(true)
 }
 
 #[cfg(test)]

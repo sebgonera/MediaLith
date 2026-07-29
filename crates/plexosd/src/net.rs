@@ -495,6 +495,30 @@ pub fn wait_for_link(
 
 /// The loopback interface, which nothing else in this module will touch.
 pub const LOOPBACK: &str = "lo";
+/// Runs `ip` with the given arguments against the real machine.
+///
+/// Resolved through [`PROGRAM_DIRS`] like everything else here, because busybox installs
+/// `ip` into `/sbin` and this process has no `PATH`. `ip` is silent when it succeeds, so
+/// any output at all is it objecting and is returned as the error — a caller that only
+/// checked the exit status would report success for a refused address.
+///
+/// # Errors
+/// If `ip` is not in the image, cannot be run, or says anything.
+pub fn ip(args: &[&str]) -> io::Result<()> {
+    use plexos_gpu::env::{Environment as _, System};
+
+    let program = resolve(&System, "ip").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("`ip` is in none of {}", PROGRAM_DIRS.join(", ")),
+        )
+    })?;
+
+    match System.run(&program, args)? {
+        output if output.trim().is_empty() => Ok(()),
+        output => Err(io::Error::other(output.trim().to_owned())),
+    }
+}
 
 /// Brings loopback up, because nothing else does and almost everything needs it.
 ///
