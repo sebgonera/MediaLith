@@ -66,6 +66,10 @@ pub fn prepare(log: &mut dyn FnMut(&str)) -> io::Result<PathBuf> {
     // library, with nothing saying why.
     std::fs::create_dir_all(paths::MEDIA)?;
 
+    // Before Plex starts, and every boot: devtmpfs is assembled fresh each time, so a
+    // mode set on a previous boot is not there on this one.
+    open_render_nodes_to_plex(log);
+
     for directory in [paths::PLEX_DATA, paths::PLEX_TRANSCODE_DIR] {
         let path = Path::new(directory);
         std::fs::create_dir_all(path)?;
@@ -92,6 +96,61 @@ pub fn prepare(log: &mut dyn FnMut(&str)) -> io::Result<PathBuf> {
     }
 
     plexos_plex::cgroup::apply(Path::new(plexos_plex::cgroup::CGROUP_ROOT), total, log)
+}
+
+/// Where DRM devices appear once a driver has bound.
+const DRI: &str = "/dev/dri";
+
+/// Makes the GPU's render nodes openable by the account Plex runs as.
+///
+/// **This is what `udev` does everywhere else, and there is no `udev` here.** DRM does
+/// not set a mode on its device nodes, so `devtmpfs` creates them `0600 root:root`; every
+/// ordinary distribution then relaxes the render nodes with a rule like
+/// `SUBSYSTEM=="drm", KERNEL=="renderD*", MODE="0666"`. PlexOS has no such rule and
+/// nothing else was doing it, so Plex — which runs as uid 900 and has its supplementary
+/// groups deliberately cleared — could not open the device at all.
+///
+/// The symptom is the reason this is worth the comment: **every layer above reports
+/// success**. `plexos-gpu` says `ready` with the full capability list, because it probes
+/// as root. `vainfo` works from a shell, because that is root too. The Landlock grant on
+/// `/dev/dri` is present and correct, because Landlock can only restrict what the
+/// ordinary permissions already allow — it cannot grant past them. Only Plex fails, and
+/// it fails by quietly transcoding on the CPU.
+///
+/// Render nodes and not `card0`. That distinction is the whole point of render nodes:
+/// they carry no modesetting and no access to another client's buffers, which is why
+/// they are the node every distribution makes world-accessible and `card0` is the one
+/// they do not.
+fn open_render_nodes_to_plex(log: &mut dyn FnMut(&str)) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let Ok(entries) = std::fs::read_dir(DRI) else {
+        // No /dev/dri at all is a machine with no driver bound, which plexos-gpu reports
+        // in its own words. Not this function's business, and not an error here.
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("renderD"))
+        {
+            continue;
+        }
+
+        match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)) {
+            Ok(()) => log(&format!("{} is open to Plex", path.display())),
+            Err(error) => log(&format!(
+                "could not make {} readable by Plex: {error}. Hardware transcoding will \
+                 not work -- Plex runs as uid {} and the node is root-only, which every \
+                 report above this will still describe as healthy because they all probe \
+                 as root.",
+                path.display(),
+                paths::PLEX_UID
+            )),
+        }
+    }
 }
 
 /// Gives a directory to the Plex account, with a mode only it can use.

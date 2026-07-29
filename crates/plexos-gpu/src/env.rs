@@ -34,6 +34,24 @@ pub trait Environment {
     /// Fails if the path is not a symlink or cannot be read.
     fn read_link(&self, path: &Path) -> io::Result<PathBuf>;
 
+    /// The permission bits of a path, if it exists.
+    ///
+    /// Exists for one question: whether the account Plex runs as can open the render
+    /// node. Everything else this crate asks is answered by a root process about the
+    /// hardware, and a report that says "ready" while the device is root-only is
+    /// answering about the wrong process.
+    ///
+    /// Returns `None` rather than an error for a path that is not there, because a
+    /// machine with no render node is a case the report already covers by name.
+    ///
+    /// Defaulted to `None` so that a test double describing a network interface does not
+    /// have to invent an answer about file permissions. `None` means "no opinion", and
+    /// the one caller treats that as nothing to report rather than as a problem.
+    fn mode(&self, path: &Path) -> Option<u32> {
+        let _ = path;
+        None
+    }
+
     /// Runs a command and returns its combined stdout and stderr.
     ///
     /// `vainfo` writes some of its most useful output to stderr, so the two are merged
@@ -65,6 +83,11 @@ impl Environment for System {
         std::fs::read_to_string(path)
     }
 
+    fn mode(&self, path: &Path) -> Option<u32> {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path).ok().map(|m| m.permissions().mode())
+    }
+
     fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
         std::fs::read_link(path)
     }
@@ -86,6 +109,7 @@ pub struct Fixture {
     files: BTreeMap<PathBuf, String>,
     links: BTreeMap<PathBuf, PathBuf>,
     commands: BTreeMap<String, String>,
+    modes: BTreeMap<PathBuf, u32>,
 }
 
 impl Fixture {
@@ -106,6 +130,13 @@ impl Fixture {
     #[must_use]
     pub fn link(mut self, path: impl Into<PathBuf>, target: impl Into<PathBuf>) -> Self {
         self.links.insert(path.into(), target.into());
+        self
+    }
+
+    /// Records the permission bits of a path.
+    #[must_use]
+    pub fn mode(mut self, path: impl Into<PathBuf>, mode: u32) -> Self {
+        self.modes.insert(path.into(), mode);
         self
     }
 
@@ -141,6 +172,16 @@ fn not_found(path: &Path) -> io::Error {
 }
 
 impl Environment for Fixture {
+    fn mode(&self, path: &Path) -> Option<u32> {
+        // A recorded file with no recorded mode is 0666, which is what a render node
+        // looks like on any machine with a udev rule -- so a fixture that does not care
+        // about permissions does not accidentally assert the broken case.
+        self.modes
+            .get(path)
+            .copied()
+            .or_else(|| self.files.contains_key(path).then_some(0o666))
+    }
+
     fn list_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
         let prefix = path.to_string_lossy();
         let prefix = format!("{}/", prefix.trim_end_matches('/'));

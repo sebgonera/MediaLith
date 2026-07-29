@@ -423,6 +423,20 @@ does not work. Images are unsigned, so Secure Boot must be off.
   graphics. `plexos_gpu::display_devices` reads the PCI bus so the three states are told
   apart: nothing there, something there with no driver, and a driver bound that produced
   no render node.
+- **There is no `udev`, so a DRM render node is `0600 root:root` and Plex cannot open
+  it.** DRM sets no mode on its device nodes, `devtmpfs` therefore creates them
+  root-only, and every ordinary distribution relaxes the render nodes with a rule like
+  `SUBSYSTEM=="drm", KERNEL=="renderD*", MODE="0666"`. Nothing here did. The reason it
+  took a second machine to find is that **every layer above reports success**:
+  `plexos-gpu` says `ready` with the full capability list because it probes as root,
+  `vainfo` works from a shell for the same reason, and the Landlock grant on `/dev/dri`
+  is correct and grants nothing — Landlock only ever restricts what the ordinary
+  permissions already allow. Only Plex fails, and it fails by quietly using the CPU.
+  Fourth thing to assume udev existed, after `/dev/mapper`, the two `by-partlabel`
+  lookups, and this.
+- **A report that probes as root is answering about the wrong process.** The GPU report
+  now checks whether the render node's `other` bits are set, because "the hardware can do
+  this" and "the account Plex runs as can reach it" had never been the same question.
 - **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error

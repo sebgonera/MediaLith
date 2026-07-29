@@ -111,6 +111,7 @@ impl Report {
 
         let firmware = firmware::status(env, &primary);
         findings.extend(firmware_findings(firmware));
+        findings.extend(render_node_reachable_finding(env, &primary));
 
         let capabilities = match vainfo::probe(env, &primary) {
             Ok(caps) => caps,
@@ -244,6 +245,45 @@ fn nothing_to_render_with(present: &[crate::gpu::DisplayDevice]) -> Finding {
         ),
         remedy,
     )
+}
+
+/// Whether the account Plex runs as can open the render node at all.
+///
+/// Everything else in this report is a root process asking the hardware what it can do,
+/// and the answer has been `ready` on a machine where Plex was transcoding on the CPU.
+/// That is the failure this whole crate exists to prevent, arrived at from a direction
+/// nobody had covered: the capability was real, the driver was right, the Landlock grant
+/// was correct — and the device node was `0600 root:root`, because DRM does not set a
+/// mode and there is no `udev` here to relax it.
+///
+/// Landlock cannot paper over this. It only ever restricts what the ordinary permissions
+/// already allow, so a grant on `/dev/dri` looks correct and grants nothing.
+fn render_node_reachable_finding(env: &impl Environment, primary: &Gpu) -> Option<Finding> {
+    // Absent is not a failure here: a missing node is reported elsewhere in its own
+    // words, and inventing a second message for it would be two answers to one question.
+    let mode = env.mode(&primary.render_node)?;
+
+    // The `other` bits. Plex runs as its own uid with supplementary groups deliberately
+    // cleared, so group ownership cannot help it either -- world-accessible is the only
+    // thing that works, which is exactly what every distribution's udev rule sets.
+    if mode & 0o006 != 0 {
+        return None;
+    }
+
+    Some(Finding::new(
+        Severity::Critical,
+        format!(
+            "{} is mode {:04o} and Plex cannot open it",
+            primary.render_node.display(),
+            mode & 0o777
+        ),
+        "Everything above this line is true and Plex will still transcode on the CPU: \
+         these capabilities were probed as root, and Plex runs unprivileged. DRM leaves \
+         render nodes at 0600 and every ordinary distribution relaxes them with a udev \
+         rule; PlexOS has no udev, so plexosd does it before starting Plex. Seeing this \
+         means that step did not run or did not work — check the boot log for the line \
+         about the render node.",
+    ))
 }
 
 fn no_usable_gpu_finding(gpus: &[Gpu], present: &[crate::gpu::DisplayDevice]) -> Finding {
@@ -451,6 +491,51 @@ mod tests {
                 "/sys/kernel/debug/dri/0/gt0/uc/huc_info",
                 "HuC authenticated: yes\n",
             )
+    }
+
+    #[test]
+    fn a_root_only_render_node_is_reported_however_capable_the_hardware_is() {
+        // The failure that produced this test: a laptop whose GPU reported `ready` with
+        // fifty-five VA-API entries while Plex transcoded on the CPU. Every probe here
+        // runs as root; Plex does not. DRM leaves render nodes at 0600 and there is no
+        // udev in this image to relax them.
+        let gpu = Gpu {
+            node: "renderD128".to_owned(),
+            render_node: std::path::PathBuf::from("/dev/dri/renderD128"),
+            vendor: crate::gpu::Vendor::Intel,
+            device_id: 0x46b3,
+            kernel_driver: "i915".to_owned(),
+            model: None,
+        };
+        let env = Fixture::new()
+            .file("/dev/dri/renderD128", String::new())
+            .mode("/dev/dri/renderD128", 0o600);
+
+        let finding = render_node_reachable_finding(&env, &gpu).expect("must be reported");
+        assert_eq!(finding.severity, Severity::Critical);
+        assert!(finding.summary.contains("0600"), "{finding:?}");
+        assert!(
+            finding.remedy.contains("probed as root"),
+            "and says why everything above it looked fine: {finding:?}"
+        );
+    }
+
+    #[test]
+    fn a_world_accessible_render_node_says_nothing() {
+        // What every machine with a udev rule looks like, and what plexosd now produces.
+        let gpu = Gpu {
+            node: "renderD128".to_owned(),
+            render_node: std::path::PathBuf::from("/dev/dri/renderD128"),
+            vendor: crate::gpu::Vendor::Intel,
+            device_id: 0x46b3,
+            kernel_driver: "i915".to_owned(),
+            model: None,
+        };
+        let env = Fixture::new()
+            .file("/dev/dri/renderD128", String::new())
+            .mode("/dev/dri/renderD128", 0o666);
+
+        assert!(render_node_reachable_finding(&env, &gpu).is_none());
     }
 
     #[test]
