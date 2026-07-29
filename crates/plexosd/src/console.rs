@@ -112,6 +112,25 @@ pub fn respond(
 
         ("POST", "/api/shares") => crate::shares::handle(&request.body),
 
+        // The three questions above the interface list: a resolver, a route, and a name
+        // that actually resolves. Its own route rather than a field on /api/status
+        // because the name lookup blocks for seconds, and the status page polls -- the
+        // one view that must keep answering while the machine is unwell must not wait on
+        // the machine being well.
+        //
+        // Unauthenticated, like every other GET here. It reveals the nameservers and the
+        // gateway, which is less than the interface list already on /api/status, and the
+        // host it looks up is a constant rather than anything a caller chooses.
+        ("GET" | "HEAD", "/api/network") => {
+            match serde_json::to_string_pretty(&crate::netdiag::gather()) {
+                Ok(json) => Response::json(json),
+                Err(error) => Response::text(
+                    500,
+                    format!("could not serialise the network diagnosis: {error}\n"),
+                ),
+            }
+        }
+
         // Stopping the machine. The response goes out before anything happens, because
         // reboot(2) does not return -- see crate::power for why that ordering matters.
         ("POST", "/api/power") => match crate::power::action_in(&request.body) {

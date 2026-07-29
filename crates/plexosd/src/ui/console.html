@@ -418,6 +418,11 @@ function healthCard(status) {
     </div>`;
 }
 
+// render() replaces #main wholesale on every status poll, so anything this card drew
+// would vanish a second later. Held here and re-inserted, which is cheaper than making
+// the poll aware of a card that answers to a button rather than to the poll.
+let lastNetdiag = "";
+
 function networkCard(net) {
   const rows = (net.interfaces || [])
     .filter(i => i.kind !== "loopback")
@@ -438,7 +443,58 @@ function networkCard(net) {
              <tbody>${rows}</tbody>
            </table></div>`
         : `<p class="empty">No interface besides loopback. On this hardware Ethernet arrives over USB — check the adapter is plugged in.</p>`}
+      <div class="row">
+        <button id="netdiag-run">Diagnose the network</button>
+      </div>
+      <div id="netdiag">${lastNetdiag}</div>
     </div>`;
+}
+
+// Asked for, never polled. The name lookup blocks for up to eight seconds, and the
+// status poll behind this page has to keep answering while the machine is unwell.
+async function runNetworkDiagnosis() {
+  const out = document.getElementById("netdiag");
+  const button = document.getElementById("netdiag-run");
+  if (!out) return;
+
+  if (button) { button.disabled = true; button.textContent = "Diagnosing…"; }
+  lastNetdiag = `<div class="progress"><span class="now">Looking up a name…</span>
+    <div>A resolver that is not answering takes a few seconds to give up.</div></div>`;
+  out.innerHTML = lastNetdiag;
+
+  try {
+    const d = await (await fetch("/api/network")).json();
+    const r = d.resolver || {};
+    const route = d.default_route;
+    const lookup = d.lookup || {};
+    const bad = (d.remedies || []).length && !(d.remedies[0] || "").startsWith("Nothing to fix");
+
+    lastNetdiag = `
+      <dl>
+        <dt>Default route</dt>
+        <dd class="mono">${route ? `${esc(route.gateway)} via ${esc(route.interface)}` : "none — nothing can leave this network"}</dd>
+        <dt>Resolver</dt>
+        <dd class="mono">${esc(r.path || "")}${r.symlink_to ? ` → ${esc(r.symlink_to)}` : ""}</dd>
+        <dt>Nameservers</dt>
+        <dd class="mono">${r.error ? esc(r.error) : (esc((r.nameservers || []).join(", ")) || "none")}</dd>
+        <dt>Name lookup</dt>
+        <dd class="mono">${lookup.outcome === "resolved"
+            ? `${esc(lookup.host)} → ${esc((lookup.addresses || []).join(", "))}`
+            : lookup.outcome === "timed_out"
+              ? `${esc(lookup.host)} — no answer at all`
+              : `${esc(lookup.host)} — ${esc(lookup.error || "failed")}`}</dd>
+      </dl>
+      <div class="progress ${bad ? "failed" : ""}">
+        ${(d.remedies || []).map(m => `<div>${esc(m)}</div>`).join("")}
+      </div>`;
+    out.innerHTML = lastNetdiag;
+  } catch (e) {
+    lastNetdiag = `<div class="progress failed"><span class="now">Could not reach /api/network</span>
+      <div>${esc(String(e))}. The console itself answered, so this is the daemon rather than the network between you and it.</div></div>`;
+    out.innerHTML = lastNetdiag;
+  } finally {
+    if (button) { button.disabled = false; button.textContent = "Diagnose the network"; }
+  }
 }
 
 function systemCard(status) {
@@ -948,6 +1004,14 @@ async function power(action, label) {
     ? "Shutting down. Wait for the machine to go quiet before cutting power."
     : "Restarting. This page will come back on its own once the console is up.";
 }
+
+// Delegated rather than bound to the button: render() replaces the button element on
+// every poll, and a listener attached to the old one goes with it -- the click would
+// simply stop working after a second, which is the kind of fault nobody reports because
+// it looks like a slow page.
+document.addEventListener("click", event => {
+  if (event.target && event.target.id === "netdiag-run") runNetworkDiagnosis();
+});
 
 document.getElementById("shutdown").addEventListener("click", () => power("off", "Shut down"));
 document.getElementById("restart").addEventListener("click", () => power("restart", "Restart"));

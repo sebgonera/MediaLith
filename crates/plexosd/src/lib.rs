@@ -49,6 +49,7 @@ pub mod gate;
 pub mod health;
 pub mod http;
 pub mod net;
+pub mod netdiag;
 pub mod plex;
 pub mod power;
 pub mod provision;
