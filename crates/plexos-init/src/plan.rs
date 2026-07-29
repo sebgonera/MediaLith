@@ -218,8 +218,25 @@ pub fn boot_plan(args: &BootArgs, state: StateAction) -> Vec<BootStep> {
     // at all. It comes after sysfs because /sys/fs/cgroup is a directory *in* sysfs and
     // does not exist before it. It is carried into the new root by the MS_MOVE of /sys
     // below, which relocates the whole subtree beneath a mount rather than only its top.
+    //
+    // devpts is here for exactly the same reason, and was found the same way -- by the
+    // thing that needed it failing on hardware. devtmpfs provides the /dev/ptmx device
+    // node, so opening it succeeds; what it does not provide is the /dev/pts directory
+    // the allocated slave appears in, and without that openpty(3) fails with ENOENT. The
+    // symptom is a terminal that reports it cannot start a shell, naming a shell that
+    // exists and was never reached. It comes after /dev because /dev/pts is a directory
+    // in it.
+    //
+    // gid=5,mode=0620 is the conventional tty-group ownership for slaves; ptmxmode=0666
+    // makes /dev/pts/ptmx usable, which matters if anything ever opens that rather than
+    // the devtmpfs node.
     for (fstype, target, options) in [
         ("devtmpfs", "/dev", "nosuid,mode=0755"),
+        (
+            "devpts",
+            "/dev/pts",
+            "nosuid,noexec,gid=5,mode=0620,ptmxmode=0666",
+        ),
         ("proc", "/proc", "nosuid,nodev,noexec"),
         ("sysfs", "/sys", "nosuid,nodev,noexec"),
         ("cgroup2", "/sys/fs/cgroup", "nosuid,nodev,noexec"),
@@ -384,6 +401,38 @@ mod tests {
             .iter()
             .position(predicate)
             .expect("step not present in plan")
+    }
+
+    #[test]
+    fn devpts_is_mounted_or_no_terminal_can_ever_be_opened() {
+        // Found on hardware, and it looks like something else entirely: devtmpfs gives
+        // /dev/ptmx, so opening it works, and openpty then fails with ENOENT because the
+        // slave appears under /dev/pts and nothing mounted one. The console reported that
+        // it could not start /bin/sh -- a shell that exists and was never reached.
+        //
+        // Same shape as cgroup2 two entries above it: the running root contains only what
+        // this plan puts there.
+        let plan = boot_plan(&args(Slot::A), StateAction::Proceed);
+
+        let devpts = plan.iter().position(
+            |s| matches!(s, BootStep::MountPseudo { fstype: "devpts", target, .. } if target == "/dev/pts"),
+        );
+        let dev = plan.iter().position(|s| {
+            matches!(
+                s,
+                BootStep::MountPseudo {
+                    fstype: "devtmpfs",
+                    ..
+                }
+            )
+        });
+
+        let devpts = devpts.expect("devpts must be mounted; openpty needs /dev/pts");
+        let dev = dev.expect("devtmpfs is mounted");
+        assert!(
+            dev < devpts,
+            "/dev/pts is a directory in /dev, so it cannot be mounted first"
+        );
     }
 
     #[test]

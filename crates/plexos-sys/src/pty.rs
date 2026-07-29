@@ -116,7 +116,22 @@ pub fn spawn(program: &str, argv: &[&str], size: WindowSize) -> io::Result<Termi
         )
     };
     if opened != 0 {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        // Attributed here, because the caller cannot. openpty fails before the program is
+        // ever looked at, so an error passed up bare gets reported as "could not start
+        // /bin/sh" about a shell that exists and was never reached -- which is exactly
+        // what happened on the appliance's first terminal.
+        if error.kind() == io::ErrorKind::NotFound {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "no pseudo-terminal could be allocated: /dev/pts is missing. Remedy: \
+                 devtmpfs provides /dev/ptmx, so opening it succeeds, but the slave \
+                 appears under /dev/pts and that has to be a devpts mount. The boot plan \
+                 mounts it; a machine without it predates that. This is not about the \
+                 program that was going to be run.",
+            ));
+        }
+        return Err(error);
     }
 
     // SAFETY: fork() takes no arguments. In the parent it returns the child's pid; in the
