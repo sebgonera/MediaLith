@@ -3,9 +3,20 @@
 A small, immutable, atomically-updated Linux appliance distribution built for a single
 purpose: running Plex Media Server well.
 
-**Status: design phase.** No bootable image exists yet. This repository currently
-contains the architecture, the accepted design decisions, and the Rust crate that
-encodes the on-disk and on-wire formats those decisions define.
+**Status: it runs.** The reference laptop boots PlexOS from its own disk with `/usr`
+verified by dm-verity, installs Plex Media Server from a browser, and transcodes 4K HDR10
+on the iGPU. It updates itself over the network, and on 2026-07-29 a deliberately corrupt
+update undid itself: three failed boots, then the slot that worked.
+
+Not yet done: update bundles are unsigned, so Secure Boot must be off; there is no
+supervisor, so a service that dies stays dead until a reboot; and there is no installer or
+first-boot wizard.
+
+> **The management console is for a trusted LAN.** It offers a root shell and the ability
+> to replace the operating system, authenticated by a bearer token sent in cleartext over
+> plain HTTP. Do not expose it to the internet or to a network you do not control. See
+> [ADR-0014](docs/adr/0014-console-terminal.md), which states the threat model in full and
+> explains why TLS is sequenced after update signing rather than before it.
 
 ## What this is
 

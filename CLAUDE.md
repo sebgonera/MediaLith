@@ -41,9 +41,9 @@ Everything else is cheap to revise. Prefer revising it.
 | `crates/plexos-types` | Done. Formats and the layout emitter, 41 tests. |
 | `crates/plexos-update` | The bundle format, which slot an update goes to, writing a partition and reading it back, and the ADR-0006 trust chain with `plexos-sign` to feed it. 32 tests. **Has updated the reference laptop four times, alternating slots — and one of those updates was deliberately unbootable and was rolled back.** Nothing signs a bundle; ADR-0005's rollback is what makes that survivable. |
 | `crates/plexos-gpu` | Done, 41 tests, and it has now answered the question it was written for. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
-| `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, and `reboot(2)`. 71 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
+| `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, `reboot(2)`, `sethostname(2)`, and PTY allocation for the console terminal. 83 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
 | `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate, spawns the status console, and then starts a shell. 50 tests. |
-| `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates. 203 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
+| `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates, the configuration model actually applied (ADR-0008), and the terminal session (ADR-0014). 222 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
 | `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 97 tests. Provisioning now runs end to end **on the appliance**, driven from a browser: download, signature, manifest, build, publish, mount, confine, start. |
 | `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. |
 | `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 47 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree. |
@@ -129,16 +129,12 @@ Next, in order:
    tested and has never executed on hardware. Staging it needs a bundle that boots but
    whose Plex cannot start, which is a realistic bad update and not obviously easy to
    build deliberately.
-6. **A terminal in the status console**, so administering the appliance stops meaning
-   PuTTY on another machine. The pieces are mostly there — `plexosd` already owns an
-   HTTP server and the ADR-0013 token gate, and busybox provides the shell — but two
-   decisions come first. The server answers request/response only, so this needs either
-   a hand-written WebSocket (handshake and framing, since nothing in the image provides
-   them) or a long-lived response stream with a second route for keystrokes. And it is
-   a root shell offered over plain HTTP on the LAN: the token stops a passer-by, not
-   somebody reading the wire, so either the console gets TLS with a fingerprint shown
-   on the attached screen, or the terminal is documented as trusted-network-only. Worth
-   an ADR before any code, because the second decision changes ADR-0013's threat model.
+6. **Configuration from the page.** `plexosd::settings` reads, writes and *applies*
+   `/etc/plexos/config.toml`: hostname through a new `sethostname(2)` in `plexos-sys`,
+   timezone through `/etc/localtime` against a zoneinfo database the image now carries.
+   Static addressing is the notable gap, and it is the one setting that cuts off the
+   console when it is wrong — so it needs apply-then-revert-unless-confirmed, the same
+   shape as ADR-0005.
 
 **Hardware transcoding works.** `/api/gpu` on the reference laptop reports H.264 and
 HEVC Main and Main10 decode *and* encode, plus VP9 decode, with GuC and HuC running —
@@ -163,6 +159,13 @@ And an unhealthy boot that reached userspace left the counter standing and then 
 restarted, so nothing consumed it. The experiment then found two more, in the wreckage it
 left behind: an exhausted entry still carries a counter in its name, so it read as "on
 trial" forever, and nothing ever deleted it from an ESP sized for three UKIs.
+
+**The console has a terminal, and settings that change the machine.** ADR-0014 records
+the two decisions that had to come first: long-polling rather than a hand-written
+WebSocket behind a root shell, and a documented network boundary — this console is for a
+trusted LAN and is not fit to expose beyond one. TLS is sequenced after update signing,
+because closing the console while an unsigned update path lets anyone on the wire choose
+what `/usr` runs would protect the smaller opening.
 
 **The console answers the three network questions now.** `/api/network` reports the
 resolver with its symlink target, the default route, and whether `downloads.plex.tv`
@@ -392,6 +395,16 @@ does not work. Images are unsigned, so Secure Boot must be off.
   and the test put comments on their own line. The parser reported `8.8.8.8 # eth0` as an
   address on the appliance while its test passed. Same rule as `CONFIG_*` symbols and PCI
   IDs, applied to the output format of any program whose file you read.
+- **A design can be complete, tested and uncalled, and the tests will not tell you.**
+  Three times now: the `auth` gate, `cgroup::delegation`, and the whole ADR-0008
+  configuration model — schema, validation, fixtures, and `paths::CONFIG_FILE` with no
+  callers anywhere, so no hostname was ever set and no timezone ever applied. Grep for
+  callers of a constant before assuming the feature behind it exists.
+- **Storing is not applying, and a settings page that conflates them is worse than none.**
+  It looks like it worked. `plexosd::settings` reports four distinct outcomes per field
+  for that reason, and the sharpest case is the timezone: with no zoneinfo in the image,
+  pointing `/etc/localtime` at a missing file *succeeds* and every program then falls back
+  to UTC in silence.
 - **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error
