@@ -46,6 +46,7 @@
 
 pub mod device;
 pub mod dm;
+pub mod hostname;
 pub mod landlock;
 pub mod mount;
 pub mod power;

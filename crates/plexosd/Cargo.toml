@@ -22,6 +22,7 @@ plexos-update = { path = "../plexos-update" }
 serde = { workspace = true }
 sha2 = { workspace = true }
 serde_json = { workspace = true }
+toml = "0.8"
 
 [lints]
 workspace = true

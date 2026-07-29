@@ -54,6 +54,7 @@ pub mod plex;
 pub mod power;
 pub mod provision;
 pub mod rollback;
+pub mod settings;
 pub mod shares;
 pub mod status;
 pub mod update;
