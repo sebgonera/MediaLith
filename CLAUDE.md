@@ -39,14 +39,14 @@ Everything else is cheap to revise. Prefer revising it.
 | Component | State |
 | --- | --- |
 | `crates/plexos-types` | Done. Formats and the layout emitter, 41 tests. |
-| `crates/plexos-update` | The bundle format, which slot an update goes to, and writing a partition and reading it back. 21 tests. **Has updated the reference laptop twice, alternating slots.** Nothing signs a bundle; ADR-0005's rollback is what makes that survivable. |
+| `crates/plexos-update` | The bundle format, which slot an update goes to, and writing a partition and reading it back. 21 tests. **Has updated the reference laptop four times, alternating slots — and one of those updates was deliberately unbootable and was rolled back.** Nothing signs a bundle; ADR-0005's rollback is what makes that survivable. |
 | `crates/plexos-gpu` | Done, 41 tests, and it has now answered the question it was written for. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
 | `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, and `reboot(2)`. 71 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
 | `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate, spawns the status console, and then starts a shell. 50 tests. |
-| `crates/plexosd` | Health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. 147 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
+| `crates/plexosd` | Health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates. 194 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
 | `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 97 tests. Provisioning now runs end to end **on the appliance**, driven from a browser: download, signature, manifest, build, publish, mount, confine, start. |
 | `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. |
-| `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 42 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree. |
+| `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 47 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree. |
 | Installer, updater, first-boot wizard | Not started. |
 
 **The image boots on the reference laptop, from a USB stick, to a shell.** tmpfs root,
@@ -67,13 +67,13 @@ assembled root, which broke udhcpc's lease script. The lesson worth keeping is t
 every one of them passed a full test suite, because every test described a machine
 where the thing being waited for had already happened.
 
-**Updates work over the network, and rollback has finally been exercised.** The
+**Updates work over the network, and the try counter has been exercised.** The
 appliance was updated twice from a browser's request with no USB stick: slot A to B and
 back, each time fetching a bundle from the build host, writing the inactive slot, reading
 it back, installing a boot entry on trial and restarting into it. The last boot produced
 the thing this project had never seen — `plexos-0.1.0.202607281844+2-1.efi` renamed to
 `plexos-0.1.0.202607281844.efi`, which is systemd-boot decrementing the try counter and
-the health gate then declaring the slot permanent. ADR-0005 has completed a cycle.
+the health gate then declaring the slot permanent — the *success* half of ADR-0005.
 Nothing signs a bundle yet; what makes that survivable is that a bad one costs three
 reboots and lands back on the system that worked.
 
@@ -111,17 +111,16 @@ Next, in order:
 3. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
    asked for and both are deferred: an 83 MB upload has to stream to disk, and
    `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
-4. **Prove a rollback by causing one.** The update flow exists and works, and the
-   *counter* half of ADR-0005 has been exercised: an entry went in at `+3`, systemd-boot
-   decremented it to `+2-1`, and the health gate renamed it good. What has never happened
-   is the failure path — an image that does not boot, three times, falling back to the
-   slot that worked. That is the branch a bug in bricks a device rather than degrading
-   it, and it is now testable cheaply: publish a bundle with a deliberately broken `/usr`,
-   install it, and watch the machine come back on the other slot.
-5. **A supervisor.** `plexos-init` still prints "no supervisor yet" and hands over to a
+4. **A supervisor.** `plexos-init` still prints "no supervisor yet" and hands over to a
    shell. Nothing restarts a service that dies — and `plexosd::plex` says so rather than
    pretending: a Plex that exits stays exited, and a newly provisioned version does not
    replace a running one without a reboot.
+5. **Prove the *other* rollback path.** The unbootable-image branch has now run (below).
+   What has not is the one where the image boots and the system does not work — the gate
+   restarting to spend a try, and the record it leaves on `/var`. That code is written and
+   tested and has never executed on hardware. Staging it needs a bundle that boots but
+   whose Plex cannot start, which is a realistic bad update and not obviously easy to
+   build deliberately.
 6. **A terminal in the status console**, so administering the appliance stops meaning
    PuTTY on another machine. The pieces are mostly there — `plexosd` already owns an
    HTTP server and the ADR-0013 token gate, and busybox provides the shell — but two
@@ -141,8 +140,24 @@ Plex now transcodes through it: 4K HDR10 HEVC Main 10 to 1080p HEVC, `(hw)` on t
 decode and `(hw)` on the encode. The verdict `plexos-gpu` reached from sysfs and vainfo
 turned out to describe what the machine actually does.
 
-Still unproven: updates, rollback, and signing. Images are unsigned, so Secure Boot
-must be off.
+**And a bad update has now undone itself, with nobody touching the machine.** A bundle
+whose `/usr` had its first block overwritten — hash tree and root hash left intact, so
+every check in the update path passed — was installed to the inactive slot and booted.
+The appliance went unreachable at 13:27:09 and answered again at 13:33:33 running the
+previous version from the previous slot, with the bootloader's own bookkeeping left on
+the ESP: `plexos-0.1.0.202607291323+0-3.efi`, three tries offered and three used.
+
+Getting there needed two fixes first, both of which meant ADR-0005 did not work at all,
+and neither of which any test could have caught. `panic_timeout` defaults to 0, so a
+machine that could not verify `/usr` sat at a panic screen forever with three unused
+tries — the counter is spent by *booting*, so a failed boot has to end in another one.
+And an unhealthy boot that reached userspace left the counter standing and then nothing
+restarted, so nothing consumed it. The experiment then found two more, in the wreckage it
+left behind: an exhausted entry still carries a counter in its name, so it read as "on
+trial" forever, and nothing ever deleted it from an ESP sized for three UKIs.
+
+Still unproven: signing, and the half of rollback where the image boots but the system
+does not work. Images are unsigned, so Secure Boot must be off.
 
 ## Known traps
 
@@ -360,6 +375,37 @@ must be off.
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error
   kind, not to the operation that failed.
+- **`panic_timeout` defaults to 0, and 0 means loop forever.** Every automatic-recovery
+  scheme that ends in a kernel panic needs `panic=N` on the command line, or the machine
+  simply stops. ADR-0005's counter is spent by *booting*, so a boot that fails has to end
+  in another boot — and for the whole life of the project a failed one ended in a panic
+  screen with three unused tries, which turned "undoes itself with nobody present" into
+  "hold the power button three times". Neither the absence nor a wrong value is visible
+  from outside, which is why `post-image-test.sh` now asserts it.
+- **An exhausted boot entry is still "on trial" by its name.** `plexos-<v>+0-3.efi`
+  carries a counter, so `tries_left.is_some()` is true and the wreckage of a failed update
+  satisfies every naive on-trial test. It made the gate announce an impending rollback on
+  a machine where nothing could roll back, and it would have made the *next* update see
+  two entries on trial, fail to tell which had booted, and silently stop rolling back at
+  all — the mechanism working exactly once per machine and then disabling itself. Ask
+  `is_exhausted` as well, everywhere `is_on_trial` is asked.
+- **Nothing removed the wreckage, on the one partition the machine cannot boot without.**
+  Each failed update leaves an 18 MB UKI on an ESP that ADR-0003 sized for three.
+  `install_entry` deliberately never removes the entry that works, which is right, and
+  that principle quietly covered a case it should not have. An exhausted entry is the
+  safest thing on an ESP to delete — except when it is the one that booted, which is what
+  two bad updates in a row produce.
+- **A rollback destroys its own explanation.** Reverting `/usr` takes the log, the gate's
+  verdict and the version string with it, and the system that comes back is the older one,
+  which cannot tell it is a replacement. `/var` is the only surface that survives, and it
+  survives because of the rule that makes it awkward everywhere else.
+- **Break the image, not the manifest, when testing rollback.** Overwriting a data block
+  and recomputing only the manifest digest leaves the hash tree and root hash intact, so
+  the updater accepts the bundle — correctly, because every check it makes asks whether the
+  bytes offered are the bytes stored. Only dm-verity can know, and only at boot. Breaking
+  the manifest instead tests the updater's parser and proves nothing about ADR-0005.
+  `tools/break-bundle.sh` does the former, and `veritysetup verify` will confirm the
+  premise on the build host before anything is sent to a machine.
 
 ## Reference hardware
 

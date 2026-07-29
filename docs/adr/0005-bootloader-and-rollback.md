@@ -99,7 +99,38 @@ other states each take a different answer:
 failed boot produced, and the system that comes back is the older one, which has no way to
 know it is a replacement. `/var` survives precisely because of the rule two entries down —
 rollback never reverts it — so the note is written there immediately before the restart
-and served from `/api/update`.
+and served from `/api/update`. It covers the boots-but-unwell path only: an image that
+cannot boot at all never reaches userspace, so nothing is there to write it down.
+
+**An exhausted entry is not an entry on trial**, and conflating the two very nearly cost
+the mechanism. `plexos-<version>+0-3.efi` still carries a counter in its name, so the
+wreckage of a failed update satisfied every "is this on trial" test. Two consequences:
+the gate reported an impending rollback on machines where nothing was going to roll back,
+and — worse — the next genuine update would have found *two* entries on trial, been unable
+to say which had booted, and quietly stopped restarting on an unhealthy boot. Rollback
+would have worked once per machine and then disabled itself.
+
+**Wreckage is removed by the next update.** Nothing removed it before, and each one is an
+18 MB UKI on an ESP that ADR-0003 sized for three. It is the safest entry on the disk to
+delete — `systemd-boot` will not choose it while any other exists — except when it is the
+one that booted, which happens after two bad updates and is the case that must survive.
+
+### This has now run
+
+On 2026-07-29 the reference laptop was updated to a bundle whose `/usr` had its first
+4 KiB block overwritten, with the hash tree and root hash left intact. Every check in the
+update path passed, because every check in the update path asks whether the bytes offered
+were the bytes stored, and they were. The machine restarted at 13:26:40, went unreachable
+at 13:27:09, and answered again at 13:33:33 running the *previous* version from the
+*previous* slot with an uptime of 22 seconds.
+
+The evidence is the bootloader's own bookkeeping, left on the ESP:
+`plexos-0.1.0.202607291323+0-3.efi` — three tries offered, three used, none left. Six
+minutes and twenty-four seconds for three failed boots and one good one.
+
+Verified boot and rollback were exercised together, which is the point of breaking the
+image that way rather than the manifest: dm-verity loaded cleanly against an intact tree
+and refused the first read of a block that did not match it.
 
 ## Consequences
 
