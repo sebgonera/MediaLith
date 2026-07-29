@@ -514,7 +514,22 @@ build_uki() {
     # No connector name, so it applies to whichever output exists. A mode the panel
     # cannot do is not fatal -- DRM falls back to the preferred mode, which is today's
     # behaviour, so the worst case is no improvement rather than no picture.
-    printf 'plexos.slot=%s plexos.roothash=%s i915.enable_guc=2 earlycon=efifb console=ttyS0,115200 console=tty0 video=1280x720 fbcon=font:TER16x32\n' \
+    #
+    # panic=20 -- without it ADR-0005 does not work, and this was missing for the whole
+    # life of the project. A boot that cannot verify /usr ends in plexos-init's fail(),
+    # which holds the message on screen and then returns; PID 1 returning is
+    # "Attempted to kill init!", which is a panic. panic_timeout defaults to 0, and 0
+    # means loop forever. So the machine sat at a panic screen with a try counter it
+    # never consumed, and the "bad update undoes itself with nobody present" that
+    # ADR-0005 opens with required somebody present, holding the power button, three
+    # times.
+    #
+    # 20 seconds, not the more usual 5: an early panic -- a bad kernel, a truncated
+    # initrd -- happens before fail()'s own 60-second hold exists to help, and on this
+    # machine the only way to capture a panic is to photograph it. Three failed boots
+    # then cost about four minutes end to end, which is the right side of the trade for
+    # a path that runs when an update was already broken.
+    printf 'plexos.slot=%s plexos.roothash=%s i915.enable_guc=2 panic=20 earlycon=efifb console=ttyS0,115200 console=tty0 video=1280x720 fbcon=font:TER16x32\n' \
         "${slot}" "${ROOT_HASH}" > "${WORK}/cmdline"
 
     # Written by stage_os_release, before the /usr image was built. See there for why

@@ -331,6 +331,15 @@ else
     # signature transitively cover /usr (ADR-0004).
     assert "the root hash is embedded in .cmdline" \
            "objcopy -O binary --only-section=.cmdline '${WORK}/plexos.efi' '${TMP}/cmdline.bin' 2>/dev/null && grep -q '${ROOT_HASH}' '${TMP}/cmdline.bin'"
+
+    # ADR-0005 requires a failed boot to consume a try, and a try is consumed by
+    # booting -- so a boot that ends in a panic has to reboot rather than sit there.
+    # panic_timeout defaults to 0, which means loop forever, so the parameter being
+    # absent is indistinguishable from the parameter being wrong. Asserted here
+    # because nothing else can: the alternative is to notice on the one occasion the
+    # rollback path is exercised, which is the occasion it must not fail on.
+    assert "a panicking boot is told to reboot, so a try is actually consumed" \
+           "objcopy -O binary --only-section=.cmdline '${WORK}/plexos.efi' '${TMP}/cmdline.bin' 2>/dev/null && grep -qE 'panic=[1-9]' '${TMP}/cmdline.bin'"
 fi
 
 # --------------------------------------------------------------------------
