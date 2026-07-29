@@ -312,17 +312,24 @@ fn firmware_findings(status: FirmwareStatus) -> Vec<Finding> {
         findings.push(Finding::new(
             Severity::Warning,
             "Intel HuC firmware is not running",
-            "Transcoding will work but produce noticeably worse quality at a given \
-             bitrate. Install the linux-firmware package containing the HuC blob for \
-             this GPU and reboot.",
+            "Transcoding works and produces noticeably worse quality at a given bitrate. \
+             On PlexOS the blob has to be in the *initramfs*, not in /usr: i915 is built \
+             into the kernel and fetches firmware while it probes, a second before /usr \
+             is mounted, and it carries on without it rather than failing. \
+             post-image.sh's install_gpu_firmware puts every GuC and HuC blob there, so \
+             seeing this means the one this GPU asked for was not among them — the \
+             debugfs file names it. Elsewhere, install the linux-firmware package that \
+             carries it.",
         ));
     }
     if status.guc == LoadState::NotRunning {
         findings.push(Finding::new(
             Severity::Warning,
             "Intel GuC firmware is not running",
-            "Install the linux-firmware package containing the GuC blob for this GPU \
-             and reboot. HuC cannot be authenticated without GuC.",
+            "HuC cannot be authenticated without GuC, so this takes the quality of every \
+             transcode with it. On PlexOS the blob belongs in the initramfs for the \
+             reason given above; the debugfs file says which file i915 wanted and did \
+             not find.",
         ));
     }
     // Unknown is the common case off the appliance: debugfs is usually unmounted or
@@ -338,11 +345,12 @@ fn firmware_findings(status: FirmwareStatus) -> Vec<Finding> {
         findings.push(Finding::new(
             Severity::Info,
             "Could not determine GuC/HuC firmware status",
-            "The state lives in debugfs, and debugfs is not mounted. On PlexOS \
-             plexos-init mounts it during startup, so this means that mount failed — \
-             check the boot log. Elsewhere, `mount -t debugfs debugfs /sys/kernel/debug` \
-             makes it readable. HuC affects transcode quality at low bitrates, so this \
-             is worth resolving rather than living with.",
+            "The state lives in debugfs. Either it is not mounted — plexos-init mounts \
+             it during startup, so check the boot log — or this kernel keeps it \
+             somewhere this build does not know to look, which upstream has moved twice \
+             already. This message deliberately no longer claims to know which: it once \
+             asserted an unmounted debugfs about a file that had been read successfully, \
+             and hid a missing firmware blob for as long as nobody changed machines.",
         ));
     }
     findings

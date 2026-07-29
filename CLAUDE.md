@@ -437,6 +437,19 @@ does not work. Images are unsigned, so Secure Boot must be off.
 - **A report that probes as root is answering about the wrong process.** The GPU report
   now checks whether the render node's `other` bits are set, because "the hardware can do
   this" and "the account Plex runs as can reach it" had never been the same question.
+- **A firmware list written for one machine is a firmware list that works on one
+  machine.** `install_gpu_firmware` shipped two blobs — the Kaby Lake pair Whiskey Lake-U
+  asks for — and was correct for a month. On an Alder Lake laptop i915 asked for
+  `adlp_guc_70.bin`, found nothing in the initramfs, and *carried on*: hardware
+  transcoding worked and produced worse quality than the chip can manage. The blob was in
+  `/usr` the whole time. It globs every GuC and HuC blob now, about 25 MiB, which lands
+  in both UKIs and twice in every bundle — the price of an image that works on the
+  hardware it is put on rather than the hardware it was built on.
+- **`Unknown` is not licence to guess a cause.** The GPU report saw a debugfs value it
+  did not recognise and reported "debugfs is not mounted" — about a file it had just read
+  successfully. That guess hid the missing firmware above for as long as nobody changed
+  machines. The parser knows `status: MISSING` and `status: ERROR` now, and the remaining
+  unknown case says it does not know which of two things is true.
 - **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error

@@ -91,6 +91,13 @@ fn interpret(contents: &str) -> LoadState {
     if text.contains("not supported") || text.contains("not present") {
         return LoadState::NotApplicable;
     }
+    // The file says which blob it wanted and that it did not get it. This used to fall
+    // through to Unknown, and Unknown was then reported as "debugfs is probably not
+    // mounted" -- a guess, about a file that had just been read successfully, which hid
+    // a real fault for as long as nobody moved the image to different hardware.
+    if text.contains("status: missing") || text.contains("status: error") {
+        return LoadState::NotRunning;
+    }
     // Checked before the positive signals: "authenticated: no" contains "authenticated".
     if text.contains("authenticated: no")
         || text.contains("status: disabled")

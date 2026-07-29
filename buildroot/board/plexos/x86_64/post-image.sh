@@ -376,23 +376,42 @@ build_verity() {
 # kconfig fragment that is checked in. This keeps image assembly in the script that
 # does image assembly.
 #
-# Whiskey Lake-U is Gen9.5 and i915 asks for the Kaby Lake blobs; the names come from
-# the fw_def table in drivers/gpu/drm/i915/gt/uc/intel_uc_fw.c rather than from
-# guesswork, and a mismatch is checked below rather than discovered on the machine.
+# Every GuC and HuC blob, not a list of the ones the developer's own laptop wants.
+#
+# This was two filenames — the Kaby Lake pair Whiskey Lake-U asks for — and it worked
+# perfectly on the machine it was written on. Moving the image to an Alder Lake laptop
+# produced hardware transcoding that ran but at lower quality than the chip can manage,
+# because i915 asked for adlp_guc_70.bin, found nothing, and continued without it. The
+# blob was in /usr the whole time; it was the initramfs that lacked it.
+#
+# The failure is quiet by construction. i915 does not fail to probe over missing GuC
+# firmware, it carries on, and the only place that says so is a debugfs file nobody reads
+# — which is why the appliance's own GPU report now parses that file's "MISSING" and
+# "ERROR" rather than shrugging.
+#
+# Roughly 25 MiB, which lands in both UKIs and so twice in every update bundle. That is
+# the price of an appliance image that works on the hardware it is put on rather than on
+# the hardware it was built on, and after three machines in one day the argument is not
+# close.
 install_gpu_firmware() {
-    local wanted=(i915/kbl_guc_70.1.1.bin i915/kbl_huc_4.0.0.bin)
     local from="${TARGET_DIR}/usr/lib/firmware"
     local total=0
+    local count=0
 
-    for blob in "${wanted[@]}"; do
-        [ -e "${from}/${blob}" ] || die \
-            "the kernel wants ${blob} and linux-firmware did not provide it" \
-            "check BR2_PACKAGE_LINUX_FIRMWARE_I915 is still set, and that the name still matches the fw_def table in drivers/gpu/drm/i915/gt/uc/intel_uc_fw.c — upstream renames these between kernel versions"
-        install -D -m 0444 "${from}/${blob}" "${WORK}/initrd/lib/firmware/${blob}"
-        total=$(( total + $(stat -c %s "${from}/${blob}") ))
+    # Globbed rather than listed. A list has to be revised for every generation and is
+    # only ever revised after somebody notices, which is the whole story above.
+    for blob in "${from}"/i915/*guc*.bin "${from}"/i915/*huc*.bin; do
+        [ -e "${blob}" ] || continue
+        install -D -m 0444 "${blob}" "${WORK}/initrd/lib/firmware/i915/$(basename "${blob}")"
+        total=$(( total + $(stat -c %s "${blob}") ))
+        count=$(( count + 1 ))
     done
 
-    msg "  GuC/HuC firmware in initrd: $(( total / 1024 )) KiB"
+    [ "${count}" -gt 0 ] || die \
+        "linux-firmware provided no i915 GuC or HuC blobs at all" \
+        "check BR2_PACKAGE_LINUX_FIRMWARE_I915 is still set; without these, hardware transcoding runs at reduced quality on every Intel machine and says so only in debugfs"
+
+    msg "  GuC/HuC firmware in initrd: ${count} blobs, $(( total / 1024 )) KiB"
 }
 
 build_initrd() {
