@@ -109,6 +109,17 @@ pub struct Progress {
     /// relationship with its slots, which is what this endpoint is about — and because
     /// the answer was previously only ever printed to a console.
     pub gate: Option<String>,
+    /// The last boot that was handed back to the other slot, if there has ever been one.
+    ///
+    /// The one field here that describes a system other than this one. A rollback reverts
+    /// `/usr`, so the image that failed is gone and every explanation it held went with
+    /// it; what a person otherwise sees is an appliance that quietly went backwards a
+    /// version. This is read off `/var`, which rollback leaves alone (ADR-0005).
+    ///
+    /// History rather than status: it is not cleared, and it carries the version it is
+    /// about so a reader can tell "you were rolled back off this" from "an older boot of
+    /// what you are running now failed once".
+    pub rollback: Option<crate::rollback::Record>,
     /// Everything logged so far.
     pub log: Vec<String>,
 }
@@ -125,6 +136,7 @@ impl Default for Progress {
             error: None,
             trusted: Metadata::TRUSTED,
             gate: crate::gate::last_verdict(),
+            rollback: crate::rollback::last(),
             log: Vec::new(),
         }
     }
@@ -149,7 +161,19 @@ pub fn running_slot() -> plexos_types::Slot {
 #[must_use]
 pub fn running_version() -> String {
     let contents = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
-    crate::status::os_release_value(&contents, "VERSION_ID").unwrap_or_else(|| "unknown".to_owned())
+    running_version_from(&contents)
+}
+
+/// The running version, out of an `os-release` that has already been read.
+///
+/// Split out so the rollback record can pin that it reads the same field of the same
+/// file. The console compares the two strings to decide whether a recorded rollback is
+/// about the version running now, and that comparison is only meaningful while both
+/// sides come from one source.
+#[must_use]
+pub fn running_version_from(os_release: &str) -> String {
+    crate::status::os_release_value(os_release, "VERSION_ID")
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 /// The one update job, and its progress.
@@ -177,6 +201,7 @@ impl Job {
         state.running = running_version();
         state.slot = running_slot().to_string();
         state.gate = crate::gate::last_verdict();
+        state.rollback = crate::rollback::last();
         state.clone()
     }
 

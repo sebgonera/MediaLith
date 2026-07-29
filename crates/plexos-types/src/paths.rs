@@ -48,6 +48,16 @@ pub const ACCEPTED_SEQUENCE_FILE: &str = "/var/lib/plexos/update/accepted_sequen
 /// Root-signed signing-key revocation list.
 pub const REVOCATION_FILE: &str = "/var/lib/plexos/update/revocations.json";
 
+/// Why the last boot was handed back to the other slot.
+///
+/// On `/var` for the reason that makes `/var` awkward everywhere else: rollback reverts
+/// `/usr` and never this (ADR-0005, ADR-0009). Everything describing a failed boot lives
+/// in the image that failed, so it goes away exactly when it becomes interesting — the
+/// system that comes back is the *older* one, and it has no way to know it is a
+/// replacement rather than a machine that simply restarted. This file is the only place
+/// a note can outlive the thing it is about.
+pub const ROLLBACK_RECORD_FILE: &str = "/var/lib/plexos/update/rollback.json";
+
 /// Pre-migration snapshots of small state (ADR-0009).
 pub const BACKUP: &str = "/var/lib/plexos/backup";
 

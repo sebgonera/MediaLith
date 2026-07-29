@@ -288,13 +288,63 @@ pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::
     Credential::Set(fingerprint)
 }
 
+/// Writes down why this boot is about to hand itself back to the other slot.
+///
+/// Reads the version and slot from the same two sources [`crate::status`] does, because a
+/// record that disagreed with the status page about which version failed would be worse
+/// than no record. Both are optional: an `/etc/os-release` that cannot be read is a
+/// reason to write a partial note, not to skip the note.
+///
+/// Every failure here is logged and swallowed. A rollback that happens without a note is
+/// bad; a rollback that does not happen because a note could not be written is worse, and
+/// the caller is one line from `reboot(2)`.
+fn record_rollback(verdict: &crate::gate::Verdict, log: &mut dyn FnMut(&str)) {
+    let crate::gate::Verdict::Unhealthy { failures, trial } = verdict else {
+        return;
+    };
+    let tries_left = match trial {
+        crate::gate::Trial::Counting { tries_left } => *tries_left,
+        _ => 0,
+    };
+
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+
+    let record = crate::rollback::Record {
+        version: crate::status::os_release_value(&os_release, "VERSION_ID"),
+        slot: crate::status::cmdline_value(&cmdline, crate::status::KEY_SLOT),
+        tries_left,
+        failures: failures.clone(),
+        verdict: verdict.to_string(),
+    };
+
+    let path = std::path::Path::new(plexos_types::paths::ROLLBACK_RECORD_FILE);
+    match crate::rollback::write(&record, path) {
+        Ok(()) => log(&format!(
+            "why this boot failed is recorded in {}, which rollback does not revert",
+            path.display()
+        )),
+        Err(error) => log(&format!(
+            "could not record why this boot failed in {}: {error}. The rollback still \
+             happens; what is lost is the explanation, so the machine will come back on \
+             the older slot with nothing saying why.",
+            path.display()
+        )),
+    }
+}
+
 /// Brings the network up, then serves the console until the listener fails.
 ///
 /// The network is configured first and its failure is **reported, not propagated**: a
 /// machine with no cable should still serve the console to anyone who reaches it by
 /// another route, and more importantly should still be running so the console on the
-/// machine itself can say why. This function is called after the health gate has
-/// already returned its verdict, so nothing it does can affect a rollback.
+/// machine itself can say why.
+///
+/// The health gate runs from *inside* this function, on a thread, because the gate asks
+/// whether Plex is answering and this is the process that starts Plex. So a rollback can
+/// begin here — which is the opposite of what this comment said while the gate still ran
+/// in `plexos-init`, and is worth stating plainly because the ordering has now been
+/// wrong in both directions.
 ///
 /// # Errors
 /// Fails only if the port cannot be bound — almost always because something else holds
@@ -404,10 +454,13 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
         // decides; `demands_restart` is true only for an entry the bootloader is still
         // counting, so a permanent slot stays up and diagnosable.
         if verdict.demands_restart() {
-            log(
-                "restarting to spend a try. If this boot was an update, three of these \
-                 hand the machine back to the slot that worked.",
-            );
+            // Before the restart, because there is no after: stop_now does not return.
+            // The record goes on /var, which is the only surface a rollback leaves alone
+            // -- everything else that could explain this boot is in the /usr about to be
+            // rolled away, so it vanishes exactly when somebody wants it.
+            record_rollback(&verdict, &mut log);
+
+            log("restarting to spend a try");
             crate::power::stop_now(plexos_sys::power::Action::Restart, &gate_plex, &mut log);
         }
     });

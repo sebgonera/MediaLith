@@ -74,7 +74,16 @@ const ESP_LABEL: &str = plexos_types::partition::LABEL_ESP;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trial {
     /// The booted entry still carries a try counter. Restarting spends one.
-    Counting,
+    ///
+    /// `tries_left` is what remains *after* this boot: the bootloader decrements by
+    /// renaming before it hands off, so the filename already accounts for the attempt
+    /// currently running. Carried rather than recomputed because it is the number that
+    /// makes a rollback legible while it is happening — "two left" says how much of the
+    /// mechanism has run, and a log that only says "restarting" does not.
+    Counting {
+        /// Tries remaining after the boot that is running now.
+        tries_left: u32,
+    },
     /// No entry is on trial. This slot is permanent and nothing will roll back.
     Permanent,
     /// The entry is on trial at zero tries left, and we are running it anyway.
@@ -132,7 +141,7 @@ impl Verdict {
         matches!(
             self,
             Self::Unhealthy {
-                trial: Trial::Counting,
+                trial: Trial::Counting { .. },
                 ..
             }
         )
@@ -151,11 +160,12 @@ impl std::fmt::Display for Verdict {
             Self::Unhealthy { failures, trial } => {
                 let failures = failures.join("; ");
                 match trial {
-                    Trial::Counting => write!(
+                    Trial::Counting { tries_left } => write!(
                         f,
-                        "NOT healthy, and this entry is on trial, so the try counter \
-                         stands and the machine restarts to spend one (ADR-0005). Three \
-                         of these and the previous slot takes over: {failures}"
+                        "NOT healthy, and this entry is on trial with {tries_left} \
+                         {} left, so the machine restarts to spend one (ADR-0005). \
+                         When they run out the previous slot takes over: {failures}",
+                        if *tries_left == 1 { "try" } else { "tries" }
                     ),
                     Trial::Permanent => write!(
                         f,
@@ -279,7 +289,13 @@ fn trial_state(device: &str) -> Trial {
             // Exhausted and still running means the bootloader had nothing better, so
             // spending another try changes nothing about where the next boot lands.
             [(_, entry)] if entry.is_exhausted() => Trial::Exhausted,
-            [_] => Trial::Counting,
+            [(_, entry)] => Trial::Counting {
+                // `is_on_trial` is exactly `tries_left.is_some()`, so this cannot be
+                // None here. Defaulted rather than unwrapped anyway: the cost of being
+                // wrong is a restart on a machine that had no counter to spend, and 0
+                // reads as Exhausted's neighbour rather than as a licence to loop.
+                tries_left: entry.tries_left.unwrap_or(0),
+            },
             many => Trial::Unknown(format!(
                 "{} entries are on trial and there is no way to tell which one booted",
                 many.len()
@@ -375,7 +391,7 @@ mod tests {
         // restarted, so the counter it left standing was never spent by anybody. A
         // machine that booted into a broken Plex ran forever underneath a sentence
         // claiming it was rolling back.
-        let verdict = unhealthy(Trial::Counting);
+        let verdict = unhealthy(Trial::Counting { tries_left: 2 });
         assert!(!verdict.is_healthy());
         assert!(verdict.demands_restart());
 
@@ -383,6 +399,19 @@ mod tests {
         assert!(message.contains("restarts"), "{message}");
         assert!(message.contains("plex-http"), "{message}");
         assert!(message.contains("ADR-0005"), "{message}");
+        assert!(
+            message.contains("2 tries left"),
+            "and says how much of the mechanism has run: {message}"
+        );
+    }
+
+    #[test]
+    fn the_last_try_is_reported_in_the_singular() {
+        // Small, and the reason it is worth a test is that this line is read exactly
+        // once per project -- while somebody watches a rollback happen and wants to know
+        // whether the next restart is the one that changes slots.
+        let message = unhealthy(Trial::Counting { tries_left: 1 }).to_string();
+        assert!(message.contains("1 try left"), "{message}");
     }
 
     #[test]

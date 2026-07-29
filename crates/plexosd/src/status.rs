@@ -28,7 +28,10 @@ use crate::health::{self, Health};
 use crate::net;
 
 /// Command line key naming the slot that booted. Matches `plexos-init`'s parser.
-const KEY_SLOT: &str = "plexos.slot";
+///
+/// Public because the rollback record needs the same answer from the same source, and a
+/// second copy of the string is how two readers of one command line drift apart.
+pub const KEY_SLOT: &str = "plexos.slot";
 /// Command line key carrying the dm-verity root hash.
 const KEY_ROOTHASH: &str = "plexos.roothash";
 
