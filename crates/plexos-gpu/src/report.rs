@@ -216,10 +216,11 @@ fn nothing_to_render_with(present: &[crate::gpu::DisplayDevice]) -> Finding {
              could be used; until then, transcoding runs on the CPU."
         }
         crate::gpu::Vendor::Intel => {
-            "An Intel device the kernel did not bind to. `i915` is built in, so this is \
-             most likely a generation newer than this kernel supports — check the boot \
-             messages. The `xe` driver covers the newest Intel graphics and is not in \
-             this image."
+            "An Intel device the kernel did not bind to, which is unexpected: this image \
+             builds both `i915` and `xe`, which between them cover everything from \
+             Broadwell to the current Arc parts. Check the boot messages for that \
+             device — the likeliest cause is firmware the driver wanted and did not \
+             find, since firmware for a built-in driver has to be in the initramfs."
         }
         crate::gpu::Vendor::Other(id) => {
             return Finding::new(

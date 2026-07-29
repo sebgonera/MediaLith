@@ -466,13 +466,18 @@ boots, serves the console, and transcodes on the CPU. No kernel driver binds to 
 this kernel builds `i915` and nothing else, so `/sys/class/drm` holds only `version` and
 `/dev/dri` never exists.
 
-Supporting it is not a kernel option away. Plex reaches NVDEC and NVENC through NVIDIA's
-own userspace libraries, which need the matching kernel module, and for Blackwell that is
-the *open* module from driver 570 or newer. Buildroot's `nvidia-driver` package is pinned
-at **390.151**, a legacy branch for Kepler-era cards, so it is no help — a new package
-would have to build NVIDIA's open modules against this kernel and install the userspace
-beside them. That is a real piece of work and an open question for an immutable image,
-not a missing checkbox.
+Supporting it is not a kernel option away, and ADR-0015 works out why. The blocker is not
+NVIDIA: **`# CONFIG_MODULES is not set`.** This kernel cannot load a module at all, and an
+out-of-tree driver cannot be built in — so the first step is admitting loadable modules to
+an image whose defining property is that it is one artefact built from source and covered
+by one root hash. After that comes a package building NVIDIA's open modules (Blackwell
+requires them; they are dual MIT/GPL, which is the good news), GSP firmware, and a
+binary-only userspace that Plex reaches NVDEC and NVENC through. Buildroot's
+`nvidia-driver` is pinned at **390.151**, a Kepler-era branch, and is no help.
+
+`CONFIG_DRM_XE=y` is already set, so current Intel Arc cards work today with no change.
+`CONFIG_DRM_AMDGPU` is not set and is the cheapest coverage available — one symbol, its
+firmware, and the VA-API path this project has already proven.
 
 ## Reference hardware
 
