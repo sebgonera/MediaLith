@@ -23,8 +23,9 @@
 //!
 //! # What has run
 //!
-//! **Nothing on hardware.** The parsers are covered by tests against captured output;
-//! no appliance has served this yet.
+//! **This has answered on the reference laptop**, in 88 ms: resolver, route and a
+//! resolved name, with the remedy line reporting nothing to fix. It found a defect in
+//! itself while doing so — see [`parse_nameservers`].
 
 use std::path::Path;
 
@@ -146,15 +147,22 @@ pub fn resolver(path: &Path) -> Resolver {
 }
 
 /// Pulls the nameserver addresses out of a `resolv.conf`.
+///
+/// The trailing-comment handling is not defensive programming, it is a capture. udhcpc
+/// on this appliance writes `nameserver 8.8.8.8 # eth0`, and the first version of this
+/// reported `8.8.8.8 # eth0` as an address on the real machine while its test — whose
+/// fixture put comments on their own line, because the fixture was imagined rather than
+/// captured — passed. Everything about the format of a file another program writes gets
+/// checked against that program's actual output.
 #[must_use]
 pub fn parse_nameservers(contents: &str) -> Vec<String> {
     contents
         .lines()
+        .map(|l| l.split('#').next().unwrap_or(l))
+        .map(|l| l.split(';').next().unwrap_or(l))
         .map(str::trim)
-        .filter(|l| !l.starts_with('#') && !l.starts_with(';'))
         .filter_map(|l| l.strip_prefix("nameserver"))
-        .map(str::trim)
-        .filter(|a| !a.is_empty())
+        .filter_map(|a| a.split_whitespace().next())
         .map(ToOwned::to_owned)
         .collect()
 }
@@ -317,6 +325,19 @@ mod tests {
         assert_eq!(
             parse_nameservers(contents),
             ["192.168.2.1".to_owned(), "8.8.8.8".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_trailing_comment_is_not_part_of_the_address() {
+        // Captured from /etc/resolv.conf on the reference laptop, not invented. The first
+        // version of this parser reported "8.8.8.8 # eth0" as a nameserver on the real
+        // machine while the test above passed, because the test put its comments on their
+        // own line and udhcpc puts them at the end of the nameserver line.
+        let captured = "nameserver 8.8.8.8 # eth0\nnameserver 8.8.4.4 # eth0\n";
+        assert_eq!(
+            parse_nameservers(captured),
+            ["8.8.8.8".to_owned(), "8.8.4.4".to_owned()]
         );
     }
 
