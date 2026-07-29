@@ -327,11 +327,15 @@ fn collect_zones(root: &Path, dir: &Path, into: &mut Vec<String>) {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
 
-        if kind.is_dir() {
+        // `metadata` follows symlinks; `entry.file_type()` does not, and that distinction
+        // is the whole bug. tzdata ships `Europe` as a symlink to `posix/Europe`, so
+        // `file_type()` reported it as a symlink -- neither a file nor a directory --
+        // whereupon it fell through to the leaf branch and "Europe" was offered as a
+        // timezone. The build host's own tzdata lays those out as real directories, so
+        // the unit tests and a local run both agreed with the bug; a shell on the
+        // appliance answered it in one `ls -ld`.
+        if std::fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
             collect_zones(root, &path, into);
             continue;
         }
@@ -484,6 +488,36 @@ mod tests {
                 "{attempt:?} was not refused"
             );
         }
+    }
+
+    #[test]
+    fn a_directory_reached_through_a_symlink_is_still_walked() {
+        // tzdata ships `Europe` as a symlink to `posix/Europe`. DirEntry::file_type does
+        // not follow symlinks, so the first version of this reported "Europe" as a
+        // timezone and never found Europe/Warsaw -- on the appliance only, because the
+        // build host's tzdata uses real directories and every test agreed with the bug.
+        let root = std::env::temp_dir().join("plexos-zones-symlink");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("posix/Europe")).unwrap();
+        std::fs::write(root.join("posix/Europe/Warsaw"), b"tz").unwrap();
+        std::os::unix::fs::symlink("posix/Europe", root.join("Europe")).unwrap();
+
+        let zones = available_timezones(&root);
+
+        assert!(
+            zones.contains(&"Europe/Warsaw".to_owned()),
+            "a zone behind a symlinked directory must be found: {zones:?}"
+        );
+        assert!(
+            !zones.contains(&"Europe".to_owned()),
+            "and the directory itself must not be offered as a zone: {zones:?}"
+        );
+        assert!(
+            !zones.iter().any(|z| z.starts_with("posix")),
+            "the posix/ duplicates stay out: {zones:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
