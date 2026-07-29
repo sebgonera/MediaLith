@@ -415,6 +415,14 @@ does not work. Images are unsigned, so Secure Boot must be off.
   audio happened not to need it. Third instance of the same shape after `/usr` and
   `/run`: a deny-by-default policy missing something nobody listed, found only when
   something finally asked for it.
+- **No render node and no graphics card look identical through `/sys/class/drm`.** A
+  `renderD*` node appears only after a kernel driver binds, so a machine whose card the
+  kernel cannot drive enumerates as zero GPUs — exactly like a machine with none. The
+  report said "No graphics device found" and advised enabling the integrated GPU in
+  firmware, to somebody running a discrete RTX 5060 in a system that has no integrated
+  graphics. `plexos_gpu::display_devices` reads the PCI bus so the three states are told
+  apart: nothing there, something there with no driver, and a driver bound that produced
+  no render node.
 - **A wrong remedy is worse than none.** `could not bind :80` first suggested "pass a
   higher port", which is right for `EACCES` and actively misleading for `EADDRINUSE`,
   where the port is fine and something else holds it. Match the remedy to the error
@@ -450,6 +458,21 @@ does not work. Images are unsigned, so Secure Boot must be off.
   the manifest instead tests the updater's parser and proves nothing about ADR-0005.
   `tools/break-bundle.sh` does the former, and `veritysetup verify` will confirm the
   premise on the build host before anything is sent to a machine.
+
+## Other hardware it has been tried on
+
+A machine with **no integrated graphics and an RTX 5060** (`10de:2d05`, Blackwell). It
+boots, serves the console, and transcodes on the CPU. No kernel driver binds to the card:
+this kernel builds `i915` and nothing else, so `/sys/class/drm` holds only `version` and
+`/dev/dri` never exists.
+
+Supporting it is not a kernel option away. Plex reaches NVDEC and NVENC through NVIDIA's
+own userspace libraries, which need the matching kernel module, and for Blackwell that is
+the *open* module from driver 570 or newer. Buildroot's `nvidia-driver` package is pinned
+at **390.151**, a legacy branch for Kepler-era cards, so it is no help — a new package
+would have to build NVIDIA's open modules against this kernel and install the userspace
+beside them. That is a real piece of work and an open question for an immutable image,
+not a missing checkbox.
 
 ## Reference hardware
 

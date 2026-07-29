@@ -146,6 +146,63 @@ fn parse_hex_id(raw: &str) -> Option<u16> {
     u16::from_str_radix(digits, 16).ok()
 }
 
+/// Where the kernel lists every PCI device, driver bound or not.
+const PCI_DEVICES: &str = "/sys/bus/pci/devices";
+
+/// A display controller as PCI sees it, whether or not the kernel can drive it.
+///
+/// This exists because [`discover`] cannot see one. Render nodes only appear once a
+/// kernel driver has bound, so a machine whose graphics card the kernel has no driver
+/// for looks, through `/sys/class/drm`, exactly like a machine with no graphics card at
+/// all — and those two states have completely different remedies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayDevice {
+    /// PCI address, e.g. `0000:01:00.0`.
+    pub slot: String,
+    /// Who made it.
+    pub vendor: Vendor,
+    /// PCI device ID.
+    pub device_id: u16,
+    /// The kernel driver bound to it, if any.
+    pub kernel_driver: Option<String>,
+}
+
+/// Every PCI display controller, including ones nothing is driving.
+///
+/// Class `0x03xxxx` is "display controller" in the PCI specification: `0x030000` is VGA
+/// compatible, `0x038000` is "other display". Matching on the top byte rather than on
+/// the whole value is deliberate — a card that reports itself as 3D-only rather than
+/// VGA-compatible is still the thing somebody is asking about.
+pub fn display_devices(env: &impl Environment) -> Vec<DisplayDevice> {
+    let Ok(entries) = env.list_dir(Path::new(PCI_DEVICES)) else {
+        return Vec::new();
+    };
+
+    let mut found: Vec<DisplayDevice> = entries
+        .iter()
+        .filter_map(|entry| {
+            let class = env.read(&entry.join("class")).ok()?;
+            if !class.trim().starts_with("0x03") {
+                return None;
+            }
+
+            Some(DisplayDevice {
+                slot: entry.file_name()?.to_string_lossy().into_owned(),
+                vendor: Vendor::from_pci_id(parse_hex_id(&env.read(&entry.join("vendor")).ok()?)?),
+                device_id: parse_hex_id(&env.read(&entry.join("device")).ok()?)?,
+                // No symlink means nothing is bound, which is the whole point of looking.
+                kernel_driver: env
+                    .read_link(&entry.join("driver"))
+                    .ok()
+                    .and_then(|t| t.file_name().map(|n| n.to_string_lossy().into_owned())),
+            })
+        })
+        .collect();
+
+    found.sort_by(|a, b| a.slot.cmp(&b.slot));
+    found
+}
+
 /// Discovers every render-capable GPU on the system.
 ///
 /// Render nodes rather than card nodes: `renderD*` is what an unprivileged process

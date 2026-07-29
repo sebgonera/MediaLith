@@ -95,7 +95,10 @@ impl Report {
         let mut findings = Vec::new();
 
         let Some(primary) = gpu::select_primary(&gpus).cloned() else {
-            findings.push(no_usable_gpu_finding(&gpus));
+            findings.push(no_usable_gpu_finding(
+                &gpus,
+                &crate::gpu::display_devices(env),
+            ));
             return Self {
                 health: Health::Unavailable,
                 gpus,
@@ -156,15 +159,95 @@ impl Report {
     }
 }
 
-fn no_usable_gpu_finding(gpus: &[Gpu]) -> Finding {
-    if gpus.is_empty() {
+/// Why there is no render node, told apart from what PCI actually shows.
+///
+/// The distinction this makes is the whole reason [`crate::gpu::display_devices`] exists.
+/// A render node appears only once a kernel driver has bound, so through `/sys/class/drm`
+/// a machine whose graphics card the kernel cannot drive is indistinguishable from a
+/// machine with no graphics card — and the remedies are opposite.
+///
+/// This was found the way the trap list says these things are found: on a machine. The
+/// previous version of this said "No graphics device found" and advised enabling the
+/// integrated GPU in firmware, to somebody running a discrete RTX card in a system with
+/// no integrated graphics at all. A remedy for the wrong machine sends a person to look
+/// for a BIOS setting that does not exist.
+fn nothing_to_render_with(present: &[crate::gpu::DisplayDevice]) -> Finding {
+    let Some(device) = present.first() else {
         return Finding::new(
             Severity::Critical,
-            "No graphics device found",
+            "No graphics device found, on the PCI bus or anywhere else",
             "Check that the integrated GPU is enabled in firmware setup. Some BIOSes \
              disable it automatically when no display is attached — look for a setting \
-             such as \"iGPU Multi-Monitor\" or \"Primary Display\" and force it on.",
+             such as \"iGPU Multi-Monitor\" or \"Primary Display\" and force it on. \
+             This report looked at the PCI bus as well, and there is genuinely no \
+             display controller there.",
         );
+    };
+
+    if let Some(driver) = &device.kernel_driver {
+        return Finding::new(
+            Severity::Critical,
+            format!(
+                "{:?} device {:04x} at {} is driven by {driver}, but exposes no render node",
+                device.vendor, device.device_id, device.slot
+            ),
+            "The kernel bound a driver and no `renderD*` node appeared, which is what \
+             an unprivileged process needs. Usually this means the driver loaded in a \
+             display-only mode because firmware it wanted was missing — check the boot \
+             messages for that driver.",
+        );
+    }
+
+    let remedy = match device.vendor {
+        crate::gpu::Vendor::Nvidia => {
+            "This image has no NVIDIA driver. Its kernel builds `i915` for Intel \
+             graphics and nothing else, so nothing binds to this card and `/dev/dri` is \
+             never created. NVIDIA is not a matter of enabling a kernel option: Plex \
+             reaches NVDEC and NVENC through NVIDIA's own userspace libraries, which \
+             need the matching kernel module — and for this generation that is the open \
+             module from driver 570 or newer, which this image does not carry. Until \
+             that exists, transcoding on this machine runs on the CPU. An Intel \
+             integrated GPU, or a card the kernel can drive, is the supported path today."
+        }
+        crate::gpu::Vendor::Amd => {
+            "This image has no AMD driver. Its kernel builds `i915` for Intel graphics \
+             and nothing else, so nothing binds to this card. `amdgpu` and its firmware \
+             would have to be added to the kernel and the initramfs before this card \
+             could be used; until then, transcoding runs on the CPU."
+        }
+        crate::gpu::Vendor::Intel => {
+            "An Intel device the kernel did not bind to. `i915` is built in, so this is \
+             most likely a generation newer than this kernel supports — check the boot \
+             messages. The `xe` driver covers the newest Intel graphics and is not in \
+             this image."
+        }
+        crate::gpu::Vendor::Other(id) => {
+            return Finding::new(
+                Severity::Critical,
+                format!(
+                    "Display device {:04x}:{:04x} at {} has no kernel driver",
+                    id, device.device_id, device.slot
+                ),
+                "Nothing in this image binds to it, so there is no render node and \
+                 transcoding runs on the CPU. This kernel carries `i915` for Intel \
+                 graphics only.",
+            );
+        }
+    };
+
+    Finding::new(
+        Severity::Critical,
+        format!(
+            "{:?} device {:04x} at {} has no kernel driver bound",
+            device.vendor, device.device_id, device.slot
+        ),
+        remedy,
+    )
+}
+
+fn no_usable_gpu_finding(gpus: &[Gpu], present: &[crate::gpu::DisplayDevice]) -> Finding {
+    if gpus.is_empty() {
+        return nothing_to_render_with(present);
     }
     let vendors: Vec<String> = gpus
         .iter()
@@ -367,6 +450,58 @@ mod tests {
                 "/sys/kernel/debug/dri/0/gt0/uc/huc_info",
                 "HuC authenticated: yes\n",
             )
+    }
+
+    #[test]
+    fn a_card_with_no_driver_is_not_reported_as_no_card() {
+        // Found on hardware: PlexOS was moved to a machine with an RTX card and no
+        // integrated graphics. No kernel driver bound, so no render node, so the report
+        // said "No graphics device found" and advised enabling the integrated GPU in
+        // firmware -- on a machine that has none. A remedy for the wrong machine sends
+        // somebody looking for a BIOS setting that does not exist.
+        let present = [crate::gpu::DisplayDevice {
+            slot: "0000:01:00.0".to_owned(),
+            vendor: crate::gpu::Vendor::Nvidia,
+            device_id: 0x2d05,
+            kernel_driver: None,
+        }];
+
+        let finding = nothing_to_render_with(&present);
+        assert!(finding.summary.contains("0000:01:00.0"), "{finding:?}");
+        assert!(finding.summary.contains("no kernel driver"), "{finding:?}");
+        assert!(
+            !finding.remedy.contains("iGPU Multi-Monitor"),
+            "the firmware advice must not be given to a machine with a discrete card"
+        );
+        assert!(finding.remedy.contains("NVIDIA"), "{finding:?}");
+    }
+
+    #[test]
+    fn an_empty_pci_bus_still_gets_the_firmware_advice() {
+        // The case the original message was written for, and it is still right there:
+        // an integrated GPU switched off in firmware really does vanish from PCI.
+        let finding = nothing_to_render_with(&[]);
+        assert!(finding.remedy.contains("iGPU Multi-Monitor"), "{finding:?}");
+        assert!(
+            finding.remedy.contains("PCI bus"),
+            "and says it checked, so the reader knows the difference was considered"
+        );
+    }
+
+    #[test]
+    fn a_bound_driver_with_no_render_node_is_a_third_thing() {
+        // Distinct from both: the driver loaded and produced nothing usable, which is
+        // what a missing firmware blob looks like.
+        let present = [crate::gpu::DisplayDevice {
+            slot: "0000:00:02.0".to_owned(),
+            vendor: crate::gpu::Vendor::Intel,
+            device_id: 0x3ea0,
+            kernel_driver: Some("i915".to_owned()),
+        }];
+
+        let finding = nothing_to_render_with(&present);
+        assert!(finding.summary.contains("i915"), "{finding:?}");
+        assert!(finding.remedy.contains("firmware"), "{finding:?}");
     }
 
     #[test]
