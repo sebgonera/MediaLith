@@ -567,6 +567,13 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
   partitions are written the disk holds exactly two versions of `/usr`**, and an entry
   naming any other version is guaranteed not to boot. Prune before installing, not after,
   because the failure being prevented is running out of room during the install.
+- **A shared scratch path makes two passing tests into one flaky pair.** Rust runs tests as
+  threads in one process, so a fixed temp file is a race: one test deletes what another is
+  reading and they fail in whichever order the scheduler picked. Hit twice in one day —
+  once written fresh in the TLS tests, once suspected in `plexos-plex`'s `mkfs` stub, which
+  writes and then executes a script at a fixed path and failed once under load and never
+  again. Same shape as the `waitpid(-1)` collision below: the hazard is the shared process,
+  not the code under test.
 - **The console is one inline script, so a syntax error anywhere stops the entire page.**
   Every section sits on "Loading..." while the API answers perfectly, which reads as a dead
   machine and is a dead *page*. It shipped from a second `const signature` inside a

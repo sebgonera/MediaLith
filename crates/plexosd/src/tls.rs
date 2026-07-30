@@ -352,4 +352,92 @@ mod tests {
         server_config(&identity).expect("rustls accepts it");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Runs `openssl x509` over a certificate, or `None` when there is no openssl here.
+    ///
+    /// `name` makes the scratch file unique per test. Tests run as threads in one process
+    /// and a shared path is a race: one test deletes the file the other is reading, and
+    /// the pair fails in whichever order the scheduler picked. Found by writing it that
+    /// way first.
+    fn inspect(name: &str, der: &[u8], args: &[&str]) -> Option<String> {
+        let file = std::env::temp_dir().join(format!("plexos-tls-inspect-{name}.der"));
+        std::fs::write(&file, der).ok()?;
+        let out = std::process::Command::new("openssl")
+            .args(["x509", "-inform", "DER", "-noout", "-in"])
+            .arg(&file)
+            .args(args)
+            .output()
+            .ok()?;
+        let _ = std::fs::remove_file(&file);
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    #[test]
+    fn an_address_is_an_ip_san_and_not_a_name() {
+        // Browsers will not accept a certificate for https://192.168.2.102/ unless the
+        // address is an *IP* SAN; the same string as a DNS entry is ignored. Getting this
+        // wrong produces a certificate that looks correct in every field a person would
+        // read and that no browser will take -- on the one change where the cost of being
+        // wrong is the console itself.
+        let dir = scratch("sans");
+        let identity =
+            load_or_create(&dir, &names_for(&["192.168.2.102".to_owned()], "plexos")).unwrap();
+
+        let Some(sans) = inspect("sans", &identity.certificate, &["-ext", "subjectAltName"]) else {
+            println!("skip: no openssl on this host, so the SAN types were not checked");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+
+        assert!(sans.contains("IP Address:192.168.2.102"), "{sans}");
+        assert!(sans.contains("IP Address:127.0.0.1"), "{sans}");
+        assert!(sans.contains("DNS:plexos"), "{sans}");
+        assert!(
+            !sans.contains("DNS:192.168.2.102"),
+            "an address recorded as a name is one no browser will match: {sans}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_certificate_does_not_depend_on_the_clock_being_right() {
+        // This appliance has an RTC and no time synchronisation, and plexos_update::clock
+        // exists because its clock can be arbitrarily wrong. A certificate valid from
+        // "now" would be *not yet valid* on a machine whose battery died, which a browser
+        // refuses exactly as hard as an expired one -- and the console is how you would
+        // have found out.
+        let dir = scratch("dates");
+        let identity = load_or_create(&dir, &names()).unwrap();
+
+        let Some(dates) = inspect("dates", &identity.certificate, &["-dates"]) else {
+            println!("skip: no openssl on this host, so the validity was not checked");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+
+        // Parsed loosely on purpose: what matters is that the window is absurdly wide,
+        // not which particular years rcgen picked.
+        let before = dates
+            .lines()
+            .find_map(|l| l.strip_prefix("notBefore="))
+            .expect("a notBefore");
+        let after = dates
+            .lines()
+            .find_map(|l| l.strip_prefix("notAfter="))
+            .expect("a notAfter");
+        let year = |line: &str| -> i32 {
+            line.split_whitespace()
+                .nth(3)
+                .and_then(|y| y.parse().ok())
+                .unwrap_or(0)
+        };
+
+        assert!(year(before) <= 2000, "valid from {before}");
+        assert!(year(after) >= 2100, "valid until {after}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
