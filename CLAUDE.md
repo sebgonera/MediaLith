@@ -100,59 +100,69 @@ the hardware alone months before Plex existed on the machine.
 
 Next, in order:
 
-1. **Installer and first-boot wizard** (ADR-0016, in progress). The only installs so far
-   were `dd` onto a disk by somebody who wrote the image; a machine handed to anybody else
-   needs both. The installer is a mode of the same image and writes **the system that is
-   running** to a chosen disk — no second artefact to build, sign or keep in step, and what
-   lands is what dm-verity already verified and this hardware already booted.
-
-   **Done:** `plexos_types::gpt`, which turns ADR-0003's frozen layout into the bytes of a
-   partition table. No new package in the image, because "a program in the image is not a
-   program that can do the job" has cost this project three evenings and the most
-   destructive operation in the system is a poor place for a fourth. What makes writing it
-   defensible is that the tests hand the result to `sgdisk` and `sfdisk` on the build host:
-   both read back six partitions at the right offsets, aligned, and — the part that matters
-   — *meaning* the right things, `Linux /usr (x86-64)` and `Linux variable data` from the
-   Discoverable Partitions Specification rather than sixteen bytes that merely parse.
-
-   **Also done:** enumerating disks and refusing the wrong one; copying the running system
-   across; making `/var`; the `/api/install` route and the console section. The ESP, `/usr`
-   and the verity tree are copied **byte for byte**, which is possible because both disks
-   have the same frozen layout — so no `mkfs.vfat` and **no new package in the image at
-   all**. Every copy is verified by digesting both devices afterwards.
-
-   Two refusals are structural. The disk the installer runs from is never offered, found by
-   resolving the running ESP back to its whole disk rather than by trusting `removable` —
-   which describes the enclosure and says yes for an internal card reader. And a disk must
-   have its name typed, because a confirmation that can be clicked through is one that gets
-   clicked through.
-
-   **It has run.** The reference laptop's internal 465 GiB Kingston — which had Windows on
-   it — was partitioned, written and booted: `/api/install` listed it as `EFI system
-   partition, Microsoft reserved partition, Basic data partition` so there was no mistaking
-   whose disk it was, all five refusals were exercised against the real machine first, and
-   the install took under two minutes. The machine now boots PlexOS from its internal disk
-   with an empty `/var`, which means a new device token, a new TLS key, and Plex reported as
-   not provisioned — a fresh appliance, exactly as ADR-0016 intended.
-
-   **The label-ambiguity defect the install exposed is fixed**, in both halves and both
-   proven on the machine — see the first two entries in the trap list.
-
-   **Left:** the first-boot flow. The machine is sitting in exactly the state it is for,
-   which is the best moment to build it: freshly installed, newly claimed, no Plex.
-
-2. **`xe` firmware is not in the image at all**, only `i915/`. Found while fixing the
+1. **`xe` firmware is not in the image at all**, only `i915/`. Found while fixing the
    GuC/HuC list. `CONFIG_DRM_XE=y`, so Arc parts bind — but a driver without its firmware
-   is the thing that just cost an evening, and the claim that current Arc works today is
-   softer than it looked.
+   is the thing that cost an evening, and the claim that current Arc works today is softer
+   than it looked. Cheap, and unverifiable here: there is no Arc hardware.
+
+2. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
+   asked for and both are deferred: an 83 MB upload has to stream to disk, and
+   `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
 
 3. **NVIDIA (ADR-0015).** Planned in detail, deliberately unscheduled. The blocker is
    `CONFIG_MODULES=n`, not the driver. Steps 1 and 2 of that ADR are about half a day and
-   answer most of the risk.
+   answer most of the risk — and there is an RTX 5060 desktop, so it is the one remaining
+   item that could actually be verified on hardware.
 
-4. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
-   asked for and both are deferred: an 83 MB upload has to stream to disk, and
-   `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
+## Done, and proven on the machine (ADR-0016)
+
+**The installer and the first-boot flow.** The only installs so far
+were `dd` onto a disk by somebody who wrote the image; a machine handed to anybody else
+needs both. The installer is a mode of the same image and writes **the system that is
+running** to a chosen disk — no second artefact to build, sign or keep in step, and what
+lands is what dm-verity already verified and this hardware already booted.
+
+**Done:** `plexos_types::gpt`, which turns ADR-0003's frozen layout into the bytes of a
+partition table. No new package in the image, because "a program in the image is not a
+program that can do the job" has cost this project three evenings and the most
+destructive operation in the system is a poor place for a fourth. What makes writing it
+defensible is that the tests hand the result to `sgdisk` and `sfdisk` on the build host:
+both read back six partitions at the right offsets, aligned, and — the part that matters
+— *meaning* the right things, `Linux /usr (x86-64)` and `Linux variable data` from the
+Discoverable Partitions Specification rather than sixteen bytes that merely parse.
+
+**Also done:** enumerating disks and refusing the wrong one; copying the running system
+across; making `/var`; the `/api/install` route and the console section. The ESP, `/usr`
+and the verity tree are copied **byte for byte**, which is possible because both disks
+have the same frozen layout — so no `mkfs.vfat` and **no new package in the image at
+all**. Every copy is verified by digesting both devices afterwards.
+
+Two refusals are structural. The disk the installer runs from is never offered, found by
+resolving the running ESP back to its whole disk rather than by trusting `removable` —
+which describes the enclosure and says yes for an internal card reader. And a disk must
+have its name typed, because a confirmation that can be clicked through is one that gets
+clicked through.
+
+**It has run.** The reference laptop's internal 465 GiB Kingston — which had Windows on
+it — was partitioned, written and booted: `/api/install` listed it as `EFI system
+partition, Microsoft reserved partition, Basic data partition` so there was no mistaking
+whose disk it was, all five refusals were exercised against the real machine first, and
+the install took under two minutes. The machine now boots PlexOS from its internal disk
+with an empty `/var`, which means a new device token, a new TLS key, and Plex reported as
+not provisioned — a fresh appliance, exactly as ADR-0016 intended.
+
+**The label-ambiguity defect the install exposed is fixed**, in both halves and both
+proven on the machine — see the first two entries in the trap list.
+
+**The first-boot flow is done too**, and was built while the laptop sat in exactly the
+state it is for. It computes rather than remembers: each step is derived from the thing
+it is about, so it cannot drift from the machine and cannot be completed by something
+that did not happen. Exactly one step is ever "next"; naming the machine and mounting a
+share are suggestions, offered in their turn — before Plex, because Plex registers itself
+under the name the machine has at the time. Watched moving on its own: writing a
+configuration turned one step green and made the next one current, with nothing stored.
+
+**ADR-0016 is Accepted and complete.**
 
 **Hardware transcoding works.** `/api/gpu` on the reference laptop reports H.264 and
 HEVC Main and Main10 decode *and* encode, plus VP9 decode, with GuC and HuC running —
