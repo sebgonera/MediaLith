@@ -211,7 +211,27 @@ the machine**: 14:07:11 to 14:14:00, three restarts, ending on `0.1.0.2026073013
 record left on `/var` carries `tries_left: 0` — the value `rollback.rs` describes as "the
 one that changed slots" and that no machine had ever written.
 
-Still unproven: revocation, which has tests and no history. **Kernel images are still unsigned, so Secure
+**Revocation has run too, and with it every part of ADR-0006.** No image was rebuilt: the
+code shipped with signing and this was the first time anything used it.
+
+`plexos-sign revoke <root-key> 1 plexos-signing-dev` published beside the manifest. The
+appliance fetched it, verified it against the root key, stored it on `/var`, and then
+refused the manifest it had accepted an hour earlier — *"signed by plexos-signing-dev,
+which has been revoked… this update must not be installed even though its signature is
+valid"*.
+
+Then the half that makes it a rotation rather than a brick: a second signing key, certified
+by the same root, was used to re-sign the same bundle and **the appliance accepted it with
+no OS update**. That is what the two tiers are for, and it had never been demonstrated.
+
+And the counter: an older list — genuinely root-signed, counter 0, revoking nothing —
+served in place of the real one changed nothing. The revoked key stayed refused. Replaying
+a pre-revocation list is the obvious attack the moment revocation exists, and it does not
+work.
+
+`/var/lib/plexos/update/` now holds `accepted_sequence`, `revocations.json` and
+`rollback.json`, all three written by the machine itself. None of the three is a constant
+without callers any more, which is where two of them started. **Kernel images are still unsigned, so Secure
 Boot must be off** — that is ADR-0004 and separate from update signing.
 
 ## Known traps
