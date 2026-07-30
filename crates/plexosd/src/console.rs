@@ -70,6 +70,7 @@ pub fn respond(
     job: &std::sync::Arc<crate::provision::Job>,
     plex: &std::sync::Arc<crate::plex::Handle>,
     update: &std::sync::Arc<crate::update::Job>,
+    install: &std::sync::Arc<crate::install::Job>,
 ) -> Response {
     match (request.method.as_str(), request.path.as_str()) {
         // Starting an installation. Returns as soon as the work is handed to a thread:
@@ -113,6 +114,19 @@ pub fn respond(
             Ok(json) => Response::json(json),
             Err(error) => Response::text(500, format!("could not serialise progress: {error}\n")),
         },
+
+        // Putting PlexOS on a disk (ADR-0016). The most destructive route here, and the
+        // only one whose refusals are the point rather than the edge cases.
+        ("GET" | "HEAD", "/api/install") => {
+            match serde_json::to_string(&install.snapshot(env, running_disk().as_deref())) {
+                Ok(json) => Response::json(json),
+                Err(error) => {
+                    Response::text(500, format!("could not serialise the disks: {error}\n"))
+                }
+            }
+        }
+
+        ("POST", "/api/install") => begin_install(request, env, install),
 
         // Network shares: the library lives on a NAS, and without one there is nothing
         // to play.
@@ -732,11 +746,12 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     });
 
     let served_job = std::sync::Arc::clone(&job);
+    let installer = std::sync::Arc::new(crate::install::Job::new());
     http::serve_tls(
         &listener,
         &tls,
         credential,
-        move |request| respond(request, &System, &served_job, &plex, &update),
+        move |request| respond(request, &System, &served_job, &plex, &update, &installer),
         log,
     )
 }
@@ -763,6 +778,67 @@ fn bind(address: SocketAddr) -> io::Result<TcpListener> {
             format!("could not bind {address}: {error}. {remedy}"),
         )
     })
+}
+
+/// Vets an install request and, if it survives, hands it to a thread.
+///
+/// Split out of [`respond`] because every line of it is a refusal, and a route table is
+/// the wrong place to read them: the decision about erasing somebody's disk should be one
+/// function somebody can look at whole.
+fn begin_install(
+    request: &Request,
+    env: &impl Environment,
+    install: &std::sync::Arc<crate::install::Job>,
+) -> Response {
+    let (disk, confirm) = crate::install::request_in(&request.body);
+    let source_disk = running_disk();
+
+    let disks = match crate::install::candidates(env, source_disk.as_deref()) {
+        Ok(disks) => disks,
+        Err(error) => return Response::text(500, format!("could not read the disks: {error}\n")),
+    };
+
+    // Vetted before the job is claimed, so a refused request leaves the console exactly as
+    // it found it rather than in a state somebody has to clear.
+    let target = match crate::install::vet(&disks, &disk, &confirm) {
+        Ok(target) => target.clone(),
+        Err(refusal) => return Response::text(400, format!("{refusal}\n")),
+    };
+
+    let source = match crate::install::Source::resolve(crate::update::running_slot()) {
+        Ok(source) => source,
+        Err(error) => {
+            return Response::text(
+                500,
+                format!(
+                    "this system's own partitions could not be found ({error}), so there \
+                     is nothing to copy. This is not a PlexOS disk.\n"
+                ),
+            );
+        }
+    };
+
+    if !install.begin() {
+        return Response::text(
+            409,
+            "An install is already running. Watch it at GET /api/install.\n",
+        );
+    }
+    crate::install::spawn(install, target, source);
+    Response::json(format!("{{\"disk\":\"{disk}\"}}"))
+}
+
+/// The disk this system booted from, so the installer never offers it.
+///
+/// Resolved through the ESP's partition label and then walked back to the whole disk by
+/// trimming the partition suffix. Deliberately not the `removable` flag: that describes the
+/// enclosure, and says yes for an internal card reader and for a USB disk somebody runs
+/// their whole system from.
+fn running_disk() -> Option<String> {
+    let esp = plexos_sys::device::by_partlabel(plexos_types::partition::LABEL_ESP).ok()?;
+    let name = esp.strip_prefix("/dev/")?;
+    let stem = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    Some(stem.trim_end_matches('p').to_owned())
 }
 
 /// Waits for the interface to get an address, and reports where the console is.
@@ -855,6 +931,7 @@ mod tests {
             &std::sync::Arc::new(crate::provision::Job::new()),
             &std::sync::Arc::new(crate::plex::Handle::new()),
             &std::sync::Arc::new(crate::update::Job::new()),
+            &std::sync::Arc::new(crate::install::Job::new()),
         )
     }
 
@@ -971,6 +1048,7 @@ mod tests {
                 &std::sync::Arc::new(crate::provision::Job::new()),
                 &std::sync::Arc::new(crate::plex::Handle::new()),
                 &std::sync::Arc::new(crate::update::Job::new()),
+                &std::sync::Arc::new(crate::install::Job::new()),
             );
             assert_eq!(response.status, 400, "{body:?}");
         }
@@ -1067,6 +1145,27 @@ mod tests {
     }
 
     #[test]
+    fn the_page_says_what_installing_destroys_before_it_offers_to_do_it() {
+        // The only control on this page that erases data which was never PlexOS's. The
+        // warning is part of the markup rather than something a render function might skip
+        // in some state, and the confirmation is a text field because a checkbox is a
+        // thing people tick.
+        assert!(PAGE.contains("\"/api/install\""));
+        assert!(
+            PAGE.contains("This erases the disk you choose, completely."),
+            "the destruction has to be stated before the button, not after"
+        );
+        assert!(
+            PAGE.contains("Type the name of the disk to confirm"),
+            "a typed confirmation, not a tick"
+        );
+        assert!(
+            PAGE.contains("not offered"),
+            "and it must say that the disk it is running from is excluded"
+        );
+    }
+
+    #[test]
     fn the_page_offers_a_way_to_stop_that_is_not_the_power_button() {
         // The machine has no keyboard worth using and no shell anybody is expected to
         // reach. Holding the power button for five seconds cuts power mid-write.
@@ -1127,6 +1226,7 @@ mod tests {
                 &job,
                 &std::sync::Arc::new(crate::plex::Handle::new()),
                 &std::sync::Arc::new(crate::update::Job::new()),
+                &std::sync::Arc::new(crate::install::Job::new()),
             );
             assert_ne!(response.status, 404, "{method} {path}");
         }
@@ -1270,6 +1370,7 @@ mod tests {
             &job,
             &std::sync::Arc::new(crate::plex::Handle::new()),
             &std::sync::Arc::new(crate::update::Job::new()),
+            &std::sync::Arc::new(crate::install::Job::new()),
         );
         assert_eq!(response.status, 409);
         assert!(

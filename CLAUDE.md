@@ -115,9 +115,20 @@ Next, in order:
    — *meaning* the right things, `Linux /usr (x86-64)` and `Linux variable data` from the
    Discoverable Partitions Specification rather than sixteen bytes that merely parse.
 
-   **Left:** enumerating disks and refusing the wrong one, making the filesystems, copying
-   the running system, installing the boot entry, and the first-boot flow. Nothing writes
-   to a disk yet.
+   **Also done:** enumerating disks and refusing the wrong one; copying the running system
+   across; making `/var`; the `/api/install` route and the console section. The ESP, `/usr`
+   and the verity tree are copied **byte for byte**, which is possible because both disks
+   have the same frozen layout — so no `mkfs.vfat` and **no new package in the image at
+   all**. Every copy is verified by digesting both devices afterwards.
+
+   Two refusals are structural. The disk the installer runs from is never offered, found by
+   resolving the running ESP back to its whole disk rather than by trusting `removable` —
+   which describes the enclosure and says yes for an internal card reader. And a disk must
+   have its name typed, because a confirmation that can be clicked through is one that gets
+   clicked through.
+
+   **Left:** the first-boot flow, and running the thing on hardware. **No disk has been
+   written yet.**
 
 2. **`xe` firmware is not in the image at all**, only `i915/`. Found while fixing the
    GuC/HuC list. `CONFIG_DRM_XE=y`, so Arc parts bind — but a driver without its firmware

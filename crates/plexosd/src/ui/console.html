@@ -179,6 +179,14 @@
   }
   .empty { color: var(--muted); }
 
+  /* Disks, in the install section. Each row has to read as a piece of hardware
+     somebody owns rather than as a device name. */
+  .disks { list-style: none; margin: .9rem 0 0; padding: 0; display: grid; gap: .7rem; }
+  .disks li { padding: .7rem .85rem; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+  .disks li.usable { border-color: var(--accent); }
+  .disks label { display: flex; gap: .5rem; align-items: baseline; cursor: pointer; }
+  .disks .hint { margin: .35rem 0 0; color: var(--muted); font-size: .88rem; }
+
   /* The Plex section: the one part of this page that does something. */
   .plex { margin: 1.5rem 0; }
   .plex .row { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-top: .8rem; }
@@ -425,6 +433,11 @@
     <p class="empty">Loading…</p>
   </section>
 
+  <section class="card plex" id="install" aria-live="polite">
+    <h3>Install to a disk</h3>
+    <p class="empty">Loading…</p>
+  </section>
+
   <section class="card power" id="power">
     <h3>Power</h3>
     <p class="hint" id="power-note">Stopping this way closes Plex's database and flushes
@@ -464,6 +477,7 @@ const TOKEN_KEY = "plexos-device-token";
 // and not a secret -- it is an address on the local network.
 const SOURCE_KEY = "plexos-update-source";
 const UPDATE_ENDPOINT = "/api/update";
+const INSTALL_ENDPOINT = "/api/install";
 const SHARES_ENDPOINT = "/api/shares";
 
 function token() { return sessionStorage.getItem(TOKEN_KEY) || ""; }
@@ -1521,6 +1535,113 @@ async function tick() {
   }
 }
 
+let lastInstallRendered = null;
+
+/** The install-to-disk section: the only part of this page that erases somebody's data. */
+function renderInstall(report) {
+  const phase = report.phase || "idle";
+  const busy = ["partitioning", "copying", "formatting"].includes(phase);
+  const disks = report.disks || [];
+
+  const typing = document.activeElement && document.activeElement.id === "install-confirm";
+  const rendered = JSON.stringify([phase, report.detail, report.error, disks, (report.log || []).length]);
+  if (rendered === lastInstallRendered && !busy) return;
+  if (typing) return;
+  lastInstallRendered = rendered;
+
+  const usable = disks.filter(d => !d.refusal);
+  const row = disk => `
+    <li class="${disk.refusal ? "" : "usable"}">
+      <label>
+        ${disk.refusal ? "" : `<input type="radio" name="install-disk" value="${esc(disk.name)}">`}
+        <strong class="mono">${esc(disk.name)}</strong> — ${esc(disk.model)}, ${esc(human(disk.bytes))}${disk.removable ? ", removable" : ""}
+      </label>
+      ${(disk.contents || []).length
+        ? `<div class="hint">Already holds: ${(disk.contents || []).map(esc).join(", ")}</div>`
+        : `<div class="hint">Nothing on it.</div>`}
+      ${disk.refusal ? `<div class="hint"><strong>Cannot be used.</strong> ${esc(disk.refusal)}</div>` : ""}
+    </li>`;
+
+  const progress = (report.log || []).length
+    ? `<div class="progress ${phase === "failed" ? "failed" : ""}">
+         <span class="now">${esc(report.detail || phase)}</span>
+         <div class="log">${esc((report.log || []).join("\n"))}</div>
+       </div>`
+    : "";
+
+  document.getElementById("install").innerHTML = `
+    <h3>Install to a disk</h3>
+    <p class="warn"><strong>This erases the disk you choose, completely.</strong> PlexOS
+      copies the system it is running now onto it. The disk this console is running from is
+      not offered, and anything else you pick loses everything it holds.</p>
+    <ul class="disks">${disks.map(row).join("")}</ul>
+    ${usable.length === 0
+      ? `<p class="hint">No disk here can be installed onto. Attach one and reload.</p>`
+      : `<div class="field">
+           <label for="install-confirm">Type the name of the disk to confirm</label>
+           <input type="text" id="install-confirm" autocomplete="off" spellcheck="false"
+                  placeholder="${esc(usable[0].name)}">
+         </div>
+         <div class="row">
+           <button id="install-go" ${busy ? "disabled" : ""}>Erase that disk and install</button>
+         </div>`}
+    ${progress}`;
+
+  const go = document.getElementById("install-go");
+  if (go) go.addEventListener("click", startInstall);
+}
+
+/** Sizes, the same way the server renders them. */
+function human(bytes) {
+  const GIB = 1024 * 1024 * 1024;
+  if (bytes >= GIB) return (Math.round(bytes / GIB * 10) / 10).toFixed(1) + " GiB";
+  return Math.floor(bytes / (1024 * 1024)) + " MiB";
+}
+
+/** Asks the appliance to install itself onto the chosen disk. */
+async function startInstall() {
+  const value = token();
+  if (!value) {
+    sectionError("install", "The device token is needed to install. Enter it in the Device token box at the top of this page.");
+    return;
+  }
+  const chosen = document.querySelector('input[name="install-disk"]:checked');
+  if (!chosen) {
+    sectionError("install", "Choose a disk first.");
+    return;
+  }
+  const confirm_ = (document.getElementById("install-confirm").value || "").trim();
+  if (!confirm(`Erase ${chosen.value} completely and install PlexOS onto it?`)) return;
+
+  try {
+    const response = await fetch(INSTALL_ENDPOINT, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
+      body: JSON.stringify({ disk: chosen.value, confirm: confirm_ }),
+    });
+    if (!response.ok) {
+      sectionError("install", (await response.text()).trim() || ("HTTP " + response.status));
+      return;
+    }
+    lastInstallRendered = null;
+    tickInstall();
+  } catch (error) {
+    sectionError("install", error.message || error);
+  }
+}
+
+/** Polls the install section. */
+async function tickInstall() {
+  try {
+    const response = await fetch(INSTALL_ENDPOINT, { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    renderInstall(await response.json());
+  } catch (error) {
+    sectionError("install", error.message || error);
+  }
+}
+
 /** Stops or restarts the appliance, once. */
 async function power(action, label) {
   const value = token();
@@ -1599,7 +1720,9 @@ document.getElementById("restart").addEventListener("click", () => power("restar
 }
 
 tick();
+tickInstall();
 setInterval(tick, REFRESH_MS);
+setInterval(tickInstall, REFRESH_MS);
 
 // Fetched once, and re-fetched only after a save. Polling settings would overwrite
 // whatever somebody was halfway through typing into them, which is the one thing a
