@@ -100,37 +100,24 @@ the hardware alone months before Plex existed on the machine.
 
 Next, in order:
 
-1. **Finish proving the other rollback path.** Half done, and it found a defect. A bundle
-   that booted with a Plex that could not start (a deliberately missing `losetup`, which is
-   the failure this project has had three times for real) was installed and watched: the
-   gate restarted to spend a try, twice, and the record on `/var` was written correctly —
-   both halves that had never executed. Then it **stopped one restart short**, parked on the
-   broken slot, and reported that the slot was permanent. See the trap below; the fix makes
-   the gate ask which entry booted rather than infer it, and adds `Trial::Spent`.
-
-   What remains is to run the same experiment against the fixed gate and see three restarts
-   end on the working slot, and a rollback record carrying `tries_left: 0` — the value
-   `rollback.rs` documents as "the one that changed slots" and that no machine has ever
-   written.
-
-2. **Installer and first-boot wizard.** Never started, and the reason it has not mattered
+1. **Installer and first-boot wizard.** Never started, and the reason it has not mattered
    is that the only installs so far were `dd` onto a disk by somebody who wrote the image.
    A machine handed to anybody else needs both.
 
-3. **`xe` firmware is not in the image at all**, only `i915/`. Found while fixing the
+2. **`xe` firmware is not in the image at all**, only `i915/`. Found while fixing the
    GuC/HuC list. `CONFIG_DRM_XE=y`, so Arc parts bind — but a driver without its firmware
    is the thing that just cost an evening, and the claim that current Arc works today is
    softer than it looked.
 
-4. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
+3. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
    asked for and both are deferred: an 83 MB upload has to stream to disk, and
    `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
 
-5. **NVIDIA (ADR-0015).** Planned in detail, deliberately unscheduled. The blocker is
+4. **NVIDIA (ADR-0015).** Planned in detail, deliberately unscheduled. The blocker is
    `CONFIG_MODULES=n`, not the driver. Steps 1 and 2 of that ADR are about half a day and
    answer most of the risk.
 
-6. **TLS on the console (ADR-0014).** Sequenced after update signing and now due: with the
+5. **TLS on the console (ADR-0014).** Sequenced after update signing and now due: with the
    update path closed, the console's root shell over plain HTTP is the widest opening left.
 
 **Hardware transcoding works.** `/api/gpu` on the reference laptop reports H.264 and
@@ -207,8 +194,24 @@ so the process `plexosd` spawns exits at once and the resident client is its chi
 a comment in `net.rs` said it stayed resident and there was nothing to wait for. One leaked
 process per `plexosd` start, invisible until something else started counting.
 
-Still unproven: revocation, which has tests and no history, and the half of rollback where
-the image boots but the system does not work. **Kernel images are still unsigned, so Secure
+**And the other half of rollback has now run too — the one where the image boots and the
+system does not work.** A bundle whose Plex could not start (a deliberately missing
+`losetup`, the failure this project has had three times for real) was installed twice, and
+the two runs are the point:
+
+The first, against the gate as written, restarted to spend a try **twice** and then stopped
+— parked on the broken slot announcing that the slot was permanent, with the working system
+one restart away and nothing going to ask for it. The bootloader spends a try *to* boot an
+entry, so the third boot runs an entry that is already exhausted, and the gate had inferred
+which entry booted from the shape of the set rather than asking.
+
+The second, against a gate that asks the running version which entry is its own, went
+`+2-1`, `+1-2`, `+0-3`, restart, and came back on the previous slot **with nobody touching
+the machine**: 14:07:11 to 14:14:00, three restarts, ending on `0.1.0.202607301330`. The
+record left on `/var` carries `tries_left: 0` — the value `rollback.rs` describes as "the
+one that changed slots" and that no machine had ever written.
+
+Still unproven: revocation, which has tests and no history. **Kernel images are still unsigned, so Secure
 Boot must be off** — that is ADR-0004 and separate from update signing.
 
 ## Known traps
