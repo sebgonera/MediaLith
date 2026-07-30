@@ -589,16 +589,22 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
   enumerated first, and it is used by the updater to choose the partition to *write*, by
   `esp::with_esp_mounted` to choose the ESP to install a boot entry on, and by `plexos-init`
   to choose what to mount as `/usr` and `/var` at boot. An update installed in that state
-  went to a disk nothing in the code chose. It happened to be the right one; nothing made it
-  so. **Label resolution has to be scoped to the disk the running system is on**, and until
+  went to a disk nothing in the code chose, and the evidence is on the ESPs: the machine was
+  running from the USB stick, and both the `/usr` write *and* the boot entry landed on the
+  internal disk. The stick's ESP never saw the new entry. It was harmless and it was not a
+  decision. **Label resolution has to be scoped to the disk the running system is on**, and until
   it is, a machine with two PlexOS disks attached is a machine whose updates land somewhere
   arbitrary. **Fixed** by `by_partlabel_on(disk, label)` and a running-disk lookup that goes
   through dm-verity's `slaves` rather than through a label — in the updater's partition
   writes, the boot-entry install, the installer's own source resolution, and the health
   gate, which clears the try counter and would otherwise have cleared it on another disk's
   ESP: a working machine rolling back three boots later for no reason it could report.
-  `plexos-init` still resolves by label at boot, and cannot use the same trick because
-  dm-verity is what it is in the middle of setting up.
+  **Proven on the machine**: with both disks attached, an update written from the internal
+  system landed on the internal disk and the stick's ESP was left exactly as it was —
+  where the same operation an hour earlier had written the other disk. `plexos-init` still
+  resolves by label at boot, and cannot use the same trick because dm-verity is what it is
+  in the middle of setting up; the answer there is the root hash on the kernel command
+  line, which identifies the right partition by definition.
 - **Partition labels are not unique across disks, and an installer is what makes that
   true.** The console found the disk it was running from by resolving the ESP's partition
   label. That worked until the first successful install, at which point the machine had two
