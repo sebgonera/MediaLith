@@ -109,26 +109,13 @@ Next, in order:
    is the thing that just cost an evening, and the claim that current Arc works today is
    softer than it looked.
 
-3. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
-   asked for and both are deferred: an 83 MB upload has to stream to disk, and
-   `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
-
-4. **NVIDIA (ADR-0015).** Planned in detail, deliberately unscheduled. The blocker is
+3. **NVIDIA (ADR-0015).** Planned in detail, deliberately unscheduled. The blocker is
    `CONFIG_MODULES=n`, not the driver. Steps 1 and 2 of that ADR are about half a day and
    answer most of the risk.
 
-5. **Prove TLS on a machine.** Written and **never served to a browser**. The console now
-   listens on 443 only and 80 answers a 308; the certificate is issued by the appliance
-   itself with a key that outlives it, so the fingerprint survives a DHCP move. rustls
-   rather than the image's OpenSSL, because `plexosd` is a static binary whose install step
-   refuses a dynamic one — and because the image has the SSL *libraries* and no `openssl`
-   binary at all.
-
-   The handshake is exercised in `cargo test` against curl, which is an independent client
-   and the same reasoning that pins the verity digest against `sha256sum`. What has not
-   happened is a browser, on the reference laptop, over a real network. **This is the one
-   change where getting it wrong costs the console itself** — the way back is the attached
-   screen or three power cycles into ADR-0005.
+4. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
+   asked for and both are deferred: an 83 MB upload has to stream to disk, and
+   `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
 
 **Hardware transcoding works.** `/api/gpu` on the reference laptop reports H.264 and
 HEVC Main and Main10 decode *and* encode, plus VP9 decode, with GuC and HuC running —
@@ -220,6 +207,21 @@ The second, against a gate that asks the running version which entry is its own,
 the machine**: 14:07:11 to 14:14:00, three restarts, ending on `0.1.0.202607301330`. The
 record left on `/var` carries `tries_left: 0` — the value `rollback.rs` describes as "the
 one that changed slots" and that no machine had ever written.
+
+**The console is on TLS, and `http://` no longer serves anything.** The appliance issues
+its own certificate — there is no CA and no domain name — and 80 answers a 308 to 443 and
+nothing else. Proved on the reference laptop: the certificate it presents carries
+`IP Address:192.168.2.102` (an address recorded as a DNS name is one no browser matches),
+is valid 1975 to 4096 so a dead RTC cannot make it not-yet-valid, and the fingerprint at
+`/api/status` is the same key `openssl s_client` sees on the wire — computed two
+independent ways and compared.
+
+Two things it does not claim. It stops anyone *listening*; against an active middle a
+self-signed certificate proves nothing until somebody compares the fingerprint, and the
+only place to do that the first time is the attached screen — which is what this console
+exists to stop needing. ADR-0014 called that unresolved and it stays unresolved. And the
+choice to serve TLS *only* was taken knowing the cost: if TLS ever fails to start, the
+console is gone and the ways back are the screen or three power cycles.
 
 **Revocation has run too, and with it every part of ADR-0006.** No image was rebuilt: the
 code shipped with signing and this was the first time anything used it.
