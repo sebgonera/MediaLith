@@ -664,6 +664,16 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
   writes and then executes a script at a fixed path and failed once under load and never
   again. Same shape as the `waitpid(-1)` collision below: the hazard is the shared process,
   not the code under test.
+- **A script that addresses an element nothing creates is a silent hole, and no assertion
+  about text can see it.** The setup section shipped with its markup never added: the script
+  called `getElementById` for it, got `null`, threw, and the throw was swallowed by the
+  poll's own error handling — endpoint fine, page fine, feature simply absent. The tests
+  passed because they asserted that strings appear in the page and those strings were in the
+  *script*. Second time in one day that a page change reached a machine unverified, in a
+  weaker disguise. `every_element_the_script_reaches_for_exists_in_the_markup` compares
+  every `getElementById` against the markup, and found two more instances the moment it was
+  written — both legitimate, created by `element.id = …`, which is now part of what it
+  accepts.
 - **The console is one inline script, so a syntax error anywhere stops the entire page.**
   Every section sits on "Loading..." while the API answers perfectly, which reads as a dead
   machine and is a dead *page*. It shipped from a second `const signature` inside a

@@ -1157,6 +1157,48 @@ mod tests {
     }
 
     #[test]
+    fn every_element_the_script_reaches_for_exists_in_the_markup() {
+        // Written after shipping a section whose markup was never added. The script called
+        // getElementById for it, got null, threw, and the throw was swallowed by the poll's
+        // own error handling -- so the endpoint worked, the page rendered, and the feature
+        // was simply absent. The tests passed because they asserted that strings appear in
+        // the page, and those strings were in the *script*.
+        //
+        // This is the general form: a page whose script addresses an element that is not
+        // there is a page with a silent hole in it, and no assertion about text can see it.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+
+        let mut missing = Vec::new();
+        for (index, _) in script.match_indices("getElementById(\"") {
+            let rest = &script[index + "getElementById(\"".len()..];
+            let Some((id, _)) = rest.split_once('"') else {
+                continue;
+            };
+            // Three ways an element legitimately comes to exist: written in the markup,
+            // written by a render function into innerHTML, or created and given an id in
+            // code. The last was not in the first version of this test and produced two
+            // false alarms immediately -- which is the right way round for a check whose
+            // job is to be believed.
+            let in_markup = PAGE.contains(&format!("id=\"{id}\""));
+            let assigned = script.contains(&format!(".id = \"{id}\""))
+                || script.contains(&format!(".id=\"{id}\""));
+            if !in_markup && !assigned {
+                missing.push(id);
+            }
+        }
+        missing.sort_unstable();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "the script addresses elements that nothing creates: {missing:?}"
+        );
+    }
+
+    #[test]
     fn the_page_leads_a_new_appliance_through_setup_and_then_stops() {
         // A machine five minutes old used to show exactly the page one running for a year
         // showed. The section has to exist, has to be driven by the endpoint rather than by
@@ -1164,6 +1206,10 @@ mod tests {
         // must be dismissed is one people dismiss before reading.
         assert!(PAGE.contains("\"/api/setup\""));
         assert!(PAGE.contains("This appliance has just been installed"));
+        assert!(
+            PAGE.contains("id=\"setup\""),
+            "the section has to exist in the markup, not only in the script that fills it"
+        );
         assert!(
             PAGE.contains("report.complete"),
             "the section's visibility comes from the machine's own state"
