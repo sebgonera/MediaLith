@@ -15,13 +15,17 @@
 //! ordinary call in an ordinary process, so the whole sequence can be run by hand from a
 //! shell.
 //!
-//! # What this is not
+//! # Keeping it running
 //!
-//! It is not a supervisor. It starts Plex once and notices whether the child is still
-//! alive; nothing restarts one that dies, and replacing a running Plex with a
-//! newly-provisioned one needs a reboot. That is item 8 on the list in CLAUDE.md, and
-//! pretending otherwise here would produce a console that reports a version it is not
-//! running.
+//! [`supervise`] restarts a Plex that exits. What it watches is deliberately not "is my
+//! child alive": a `plexosd` that was itself restarted holds no child while a perfectly
+//! good Plex, orphaned onto PID 1, serves away — and the reverse happens too, a child
+//! alive and not yet answering during the twenty seconds Plex takes to open its port.
+//! Both signals are consulted, and neither alone is trusted.
+//!
+//! A deliberate stop is not a fault. [`Handle::stop`] records that Plex is *meant* to be
+//! down, so the supervisor does not race the shutdown sequence and start a server on a
+//! machine that is powering off — which would be the first thing it did, every time.
 //!
 //! # What has run
 //!
@@ -261,6 +265,12 @@ pub fn is_provisioned(mount: &Path) -> bool {
 #[derive(Debug, Default)]
 pub struct Handle {
     child: Mutex<Option<std::process::Child>>,
+    /// Whether Plex is meant to be running.
+    ///
+    /// The difference between "Plex is down" and "Plex was stopped", which look identical
+    /// from outside and take opposite actions. Without it the supervisor would restart the
+    /// server that [`crate::power`] has just stopped in order to turn the machine off.
+    wanted: Mutex<bool>,
     /// What the confined child said, bounded.
     ///
     /// An `Arc` because the draining threads outlive the call that started them. Without
@@ -299,13 +309,10 @@ impl Handle {
             match running.try_wait() {
                 Ok(None) => {
                     log("Plex is already running");
+                    self.want(true);
                     return;
                 }
-                Ok(Some(status)) => log(&format!(
-                    "Plex exited with {status}. Nothing restarts it yet, so this is a \
-                     start rather than a restart -- see the supervisor item in \
-                     CLAUDE.md."
-                )),
+                Ok(Some(status)) => log(&format!("Plex exited with {status}; starting another")),
                 Err(error) => log(&format!("could not tell whether Plex is running: {error}")),
             }
         }
@@ -315,6 +322,10 @@ impl Handle {
         // database.
         if is_answering() {
             log("Plex is already answering on loopback; not starting another");
+            // Wanted, even though this process did not start it. A Plex orphaned onto
+            // PID 1 by a restarted plexosd is still the Plex this appliance is meant to be
+            // running, and if it dies something has to notice.
+            self.want(true);
             return;
         }
 
@@ -330,6 +341,7 @@ impl Handle {
         match start(log) {
             Ok(mut child) => {
                 log(&format!("Plex started as pid {}", child.id()));
+                self.want(true);
 
                 // Drained on threads so the child cannot block on a full pipe, and so
                 // whatever it says is readable over the network rather than only on the
@@ -358,6 +370,10 @@ impl Handle {
             .child
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // First, and before anything can fail: a stop that is interrupted must still have
+        // said that Plex is not wanted, or the supervisor starts another one behind it.
+        drop(self.wanted.lock().map(|mut w| *w = false));
 
         let Some(child) = held.as_mut() else {
             log("no Plex was started from here, so there is nothing to stop");
@@ -430,6 +446,39 @@ impl Handle {
         });
     }
 
+    /// Records whether Plex is meant to be running.
+    fn want(&self, wanted: bool) {
+        *self
+            .wanted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = wanted;
+    }
+
+    /// Whether Plex is meant to be running.
+    #[must_use]
+    pub fn is_wanted(&self) -> bool {
+        *self
+            .wanted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether this process holds a child that has not exited.
+    ///
+    /// Distinct from [`Handle::is_running`], which asks Plex. A child can be alive and not
+    /// yet answering — Plex takes about twenty seconds to open its port — and a Plex can be
+    /// answering while this process holds nothing, which is what a restarted `plexosd`
+    /// finds.
+    #[must_use]
+    pub fn holds_live_child(&self) -> bool {
+        let mut held = self
+            .child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+    }
+
     /// Whether Plex is up.
     ///
     /// Answers the question by asking Plex, not by asking whether this process holds a
@@ -449,19 +498,63 @@ impl Handle {
 /// `--mount-plex` did nothing, and without this the administrator would have to reboot
 /// the appliance to use the Plex they just installed.
 ///
-/// An *already mounted* image is left alone and said so. Replacing one under a running
-/// Plex needs the running Plex stopped first, which is the supervisor's job and does not
-/// exist yet; doing half of it here would leave the console reporting a version it is not
-/// running.
+/// An *already mounted* image means an upgrade rather than a first install, and is handed
+/// to [`swap`].
 pub fn mount_and_start(handle: &Handle, log: &mut dyn FnMut(&str)) {
     let mount = Path::new(paths::PLEX_MOUNT);
 
     if is_provisioned(mount) {
-        log(
-            "an app image is already mounted, so the version just installed is not the \
-             one running. Nothing stops and restarts Plex yet: reboot the appliance to \
-             pick it up.",
-        );
+        swap(handle, log);
+        return;
+    }
+
+    let outcome = crate::appmount::mount_current(Path::new(paths::PLEX_APPS), mount, log);
+    log(&outcome.to_string());
+    if matches!(outcome, crate::appmount::Outcome::Refused(_)) {
+        return;
+    }
+
+    handle.ensure_started(mount, log);
+}
+
+/// How long Plex is given to exit before an upgrade gives up on it.
+///
+/// Longer than the shutdown sequence allows, and for the same reason it exists at all:
+/// Plex keeps its library in `SQLite`, and being killed mid-write is the damage this is
+/// avoiding. An upgrade is not urgent, so it can afford to wait.
+pub const SWAP_GRACE: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Replaces a running Plex with the version that was just installed.
+///
+/// Stop, unmount, mount what `current` now points at, start. The order is the whole of it:
+/// the image cannot be unmounted while Plex holds files open on it, and mounting the new
+/// one over the old would leave the console reporting a version that is not running.
+///
+/// Reports each step, because this is minutes of a machine deliberately serving nothing
+/// and a person watching a page needs to see it is not stuck.
+///
+/// # What this does not do
+///
+/// It does not put the old version back if the new one fails to start. The app images are
+/// both still on `/var` and `current` still points at the new one, so the remedy is a
+/// reboot or another install — not a rollback this code performs badly under pressure.
+/// ADR-0005 covers the operating system; nothing covers Plex, and pretending otherwise
+/// here would be the third design in this repository that was complete, tested and wrong.
+pub fn swap(handle: &Handle, log: &mut dyn FnMut(&str)) {
+    let mount = Path::new(paths::PLEX_MOUNT);
+
+    log("a new version is installed; stopping the running Plex to swap it in");
+    handle.stop(SWAP_GRACE, log);
+
+    let removal = crate::appmount::unmount_current(mount, log);
+    log(&removal.to_string());
+    if matches!(removal, crate::appmount::Removal::Failed(_)) {
+        // Deliberately started again. The unmount failed, so the *old* image is still
+        // mounted and still whole; leaving Plex stopped would turn a failed upgrade into
+        // an appliance with no media server, which is strictly worse than an appliance
+        // running last week's version.
+        log("putting the running version back, since nothing was replaced");
+        handle.ensure_started(mount, log);
         return;
     }
 
@@ -529,6 +622,123 @@ pub fn become_plex(log: &mut dyn FnMut(&str)) -> io::Result<std::convert::Infall
 
     let group = Path::new(plexos_plex::cgroup::CGROUP_ROOT).join(plexos_plex::cgroup::PLEX_CGROUP);
     plexos_plex::run::confine_and_exec(&spec, &grants, Some(&group), log)
+}
+
+/// How often the supervisor looks.
+///
+/// Five seconds. Plex takes about twenty to start answering, so a shorter interval would
+/// only ask the same question more often, and a much longer one is time an appliance
+/// spends serving nothing while somebody refreshes a page.
+pub const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Delay before each successive restart of Plex.
+///
+/// Longer than PID 1's, because starting Plex is not cheap — it mounts nothing but it
+/// forks, builds a Landlock policy and opens a database — and because a Plex that cannot
+/// start will not start on the fourth attempt either. The last figure is five minutes: an
+/// appliance that has given up trying quickly is still trying, and somebody who fixes the
+/// cause does not have to know that.
+pub const RESTART_BACKOFF: &[std::time::Duration] = &[
+    std::time::Duration::from_secs(0),
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(15),
+    std::time::Duration::from_secs(60),
+    std::time::Duration::from_secs(300),
+];
+
+/// What the supervisor can see of the machine.
+///
+/// Only observations. Whether Plex is *meant* to be running is a separate argument to
+/// [`restart_reason`], and separate because it is a different kind of fact: everything here
+/// is read off the machine, and that is read off an intention somebody expressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Presence {
+    /// Whether this process holds a child that has not exited.
+    pub holds_live_child: bool,
+    /// Whether something is answering Plex's port on loopback.
+    pub answering: bool,
+    /// Whether there is an app image to start.
+    pub provisioned: bool,
+}
+
+/// Why Plex should be started again, or `None` if it should not.
+///
+/// Every branch that declines is a case that looks like a dead Plex and is not, and each
+/// one would produce a different wrong action:
+///
+/// - **not wanted**: the shutdown sequence has stopped it. Starting another here is a
+///   server brought up on a machine that is powering off, every time.
+/// - **a live child**: Plex is starting. It takes about twenty seconds to answer, and a
+///   supervisor that watched only the port would start a second one into the same
+///   database during that window.
+/// - **answering**: something is serving, and it is not this process's child — a Plex
+///   orphaned onto PID 1 when `plexosd` was restarted. It is doing its job.
+/// - **not provisioned**: there is nothing installed to start, which is a state to report
+///   once rather than to retry for ever.
+#[must_use]
+pub fn restart_reason(wanted: bool, seen: &Presence) -> Option<&'static str> {
+    if !wanted {
+        return None;
+    }
+    if seen.holds_live_child {
+        return None;
+    }
+    if seen.answering {
+        return None;
+    }
+    if !seen.provisioned {
+        return None;
+    }
+    Some("Plex is not running and is not answering")
+}
+
+/// Restarts Plex when it exits, for the life of the daemon.
+///
+/// Never returns. Spawned on a thread by the console, because the console has to stay
+/// usable on precisely the machine where Plex will not start.
+pub fn supervise(handle: &Handle, mount: &Path, log: &mut dyn FnMut(&str)) -> ! {
+    let mut failures = 0usize;
+    let mut next_attempt = std::time::Instant::now();
+
+    loop {
+        std::thread::sleep(WATCH_INTERVAL);
+
+        let seen = Presence {
+            holds_live_child: handle.holds_live_child(),
+            answering: is_answering(),
+            provisioned: is_provisioned(mount),
+        };
+
+        if restart_reason(handle.is_wanted(), &seen).is_none() {
+            // Healthy, or deliberately down. Either way the history is forgiven: the next
+            // failure should be treated as the first one, not as the fifth.
+            failures = 0;
+            continue;
+        }
+
+        if std::time::Instant::now() < next_attempt {
+            continue;
+        }
+
+        let delay = RESTART_BACKOFF[failures.min(RESTART_BACKOFF.len() - 1)];
+        log(&format!(
+            "Plex is not running; starting it again{}",
+            if delay.is_zero() {
+                String::new()
+            } else {
+                format!(
+                    " (attempt {}, then waiting {}s)",
+                    failures + 1,
+                    delay.as_secs()
+                )
+            }
+        ));
+        handle.ensure_started(mount, log);
+
+        failures = failures.saturating_add(1);
+        next_attempt =
+            std::time::Instant::now() + RESTART_BACKOFF[failures.min(RESTART_BACKOFF.len() - 1)];
+    }
 }
 
 #[cfg(test)]
@@ -606,5 +816,112 @@ mod tests {
             PathBuf::from(paths::PLEX_TRANSCODE_DIR),
         ];
         assert_eq!(spec.owned_directories, prepared);
+    }
+
+    /// What a healthy, running Plex looks like from outside.
+    fn healthy() -> Presence {
+        Presence {
+            holds_live_child: true,
+            answering: true,
+            provisioned: true,
+        }
+    }
+
+    #[test]
+    fn a_plex_that_exited_is_started_again() {
+        // The gap this closes. A Plex that died stayed dead on a machine with no keyboard
+        // anybody is expected to use, so the remedy was a reboot.
+        let dead = Presence {
+            holds_live_child: false,
+            answering: false,
+            ..healthy()
+        };
+        assert!(restart_reason(true, &dead).is_some());
+    }
+
+    #[test]
+    fn a_deliberate_stop_is_not_a_fault() {
+        // Otherwise the first thing the supervisor does during a shutdown is start a
+        // server on a machine that is powering off, every single time.
+        let dead = Presence {
+            holds_live_child: false,
+            answering: false,
+            ..healthy()
+        };
+        assert_eq!(restart_reason(false, &dead), None);
+    }
+
+    #[test]
+    fn a_plex_that_is_still_starting_is_left_alone() {
+        // Plex takes about twenty seconds to open its port. A supervisor watching only the
+        // port would start a second server into the same database inside that window,
+        // which is the one failure worse than no supervisor at all.
+        let starting = Presence {
+            holds_live_child: true,
+            answering: false,
+            ..healthy()
+        };
+        assert_eq!(restart_reason(true, &starting), None);
+    }
+
+    #[test]
+    fn a_plex_this_process_does_not_own_is_left_alone() {
+        // What a restarted plexosd finds: its predecessor's Plex, orphaned onto PID 1 and
+        // serving perfectly well. Owning nothing is not the same as nothing running, and
+        // this is exactly why is_running asks Plex rather than asking the handle.
+        let orphaned = Presence {
+            holds_live_child: false,
+            answering: true,
+            ..healthy()
+        };
+        assert_eq!(restart_reason(true, &orphaned), None);
+    }
+
+    #[test]
+    fn an_appliance_with_no_plex_installed_is_not_a_restart_loop() {
+        // Every appliance is in this state until somebody installs Plex from the console.
+        let empty = Presence {
+            holds_live_child: false,
+            answering: false,
+            provisioned: false,
+        };
+        assert_eq!(restart_reason(true, &empty), None);
+    }
+
+    #[test]
+    fn the_restart_delays_are_ordered_and_end_somewhere_a_person_can_wait() {
+        assert!(RESTART_BACKOFF.windows(2).all(|w| w[0] <= w[1]));
+        assert!(RESTART_BACKOFF[0].is_zero(), "the first retry is immediate");
+        assert!(
+            *RESTART_BACKOFF.last().unwrap() <= std::time::Duration::from_secs(600),
+            "an appliance that has given up trying quickly must still be trying, so that \
+             fixing the cause does not also require knowing to reboot"
+        );
+        assert!(
+            WATCH_INTERVAL <= RESTART_BACKOFF[1],
+            "a watch slower than the first backoff makes the backoff decorative: the \
+             interval would be doing the waiting"
+        );
+    }
+
+    #[test]
+    fn a_fresh_handle_does_not_want_plex_running() {
+        // Nothing has asked for it yet, and a supervisor that assumed otherwise would try
+        // to start Plex on an appliance where none is installed, before the console has
+        // even said so.
+        let handle = Handle::new();
+        assert!(!handle.is_wanted());
+        assert!(!handle.holds_live_child());
+    }
+
+    #[test]
+    fn stopping_records_that_plex_is_not_wanted_even_with_nothing_to_stop() {
+        // The order matters: `stop` returns early when it holds no child, and the flag has
+        // to have been written before that -- otherwise a shutdown on a machine whose Plex
+        // was started by an earlier plexosd leaves the supervisor free to start another.
+        let handle = Handle::new();
+        let mut log = |_: &str| {};
+        handle.stop(std::time::Duration::from_millis(1), &mut log);
+        assert!(!handle.is_wanted());
     }
 }

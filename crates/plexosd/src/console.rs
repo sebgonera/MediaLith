@@ -672,6 +672,23 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     // costs nothing.
     plex.ensure_started(std::path::Path::new(plexos_types::paths::PLEX_MOUNT), log);
 
+    // Started after the first attempt above, so that the supervisor's first look sees
+    // either a live child or a machine with nothing installed, rather than racing the
+    // start it would otherwise duplicate.
+    //
+    // On a thread of its own and not folded into the gate's: the gate runs once and this
+    // runs for ever, and a supervisor that stopped when the gate finished would keep Plex
+    // alive for exactly as long as nobody needed it to.
+    let watched = std::sync::Arc::clone(&plex);
+    std::thread::spawn(move || {
+        let mut log = |line: &str| println!("plexosd: plex: {line}");
+        crate::plex::supervise(
+            &watched,
+            std::path::Path::new(plexos_types::paths::PLEX_MOUNT),
+            &mut log,
+        )
+    });
+
     // ARCHITECTURE.md §2 step 7, and it has to be here: the gate asks whether Plex is
     // answering, and this is the process that starts Plex. It ran before, in plexos-init,
     // and therefore always failed on a provisioned machine -- the counter was never

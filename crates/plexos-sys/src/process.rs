@@ -225,11 +225,20 @@ mod tests {
         // ECHILD is the ordinary state of a supervisor between spawns. Reporting it as a
         // failure would make a supervisor log an error five times a second while behaving
         // perfectly correctly.
-        assert_eq!(reap().unwrap(), None);
+        //
+        // Not asserting `None`: waitpid(-1) is process-wide and another test may have a
+        // child in flight. That it does not *error* is the whole claim.
+        let _serialised = crate::CHILD_PROCESS_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(reap().is_ok());
     }
 
     #[test]
     fn a_child_that_exits_is_collected_with_its_status() {
+        let _serialised = crate::CHILD_PROCESS_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let child = std::process::Command::new("/bin/sh")
             .args(["-c", "exit 3"])
             .spawn()
@@ -263,6 +272,9 @@ mod tests {
         // The two have to be told apart: a service killed by the OOM killer and one that
         // exited with a code are different problems, and a supervisor that logged "exited
         // with 0" for the first would hide it completely.
+        let _serialised = crate::CHILD_PROCESS_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let child = std::process::Command::new("/bin/sh")
             .args(["-c", "kill -9 $$"])
             .spawn()

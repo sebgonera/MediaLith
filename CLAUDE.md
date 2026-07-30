@@ -42,8 +42,8 @@ Everything else is cheap to revise. Prefer revising it.
 | `crates/plexos-update` | Which slot an update goes to, writing a partition and reading it back, the ADR-0006 trust chain, the anti-rollback sequence, root-signed revocation, boot-entry/slot agreement, and `plexos-sign` as the publisher's half. 65 tests. **Has updated the reference laptop four times, alternating slots — and one of those updates was deliberately unbootable and was rolled back.** All four were unsigned, through an improvised `update.json` this crate no longer parses. **Nothing signed has yet reached a machine.** |
 | `crates/plexos-gpu` | 46 tests, and it has now answered the question it was written for — on four machines, three of which it was wrong about until they were tried. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
 | `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, `reboot(2)`, `sethostname(2)`, PTY allocation for the console terminal, and reaping children for PID 1. 86 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
-| `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role mounts the Plex app image, then keeps the console and a shell running: it reaps orphans, restarts what dies with a widening delay, and never exits. 62 tests, none of them on hardware yet. |
-| `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates, the configuration model actually applied (ADR-0008), and the terminal session (ADR-0014), and the updater on the signed manifest. 242 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
+| `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role mounts the Plex app image, then keeps the console and a shell running: it reaps orphans, restarts what dies with a widening delay, and never exits. 62 tests. **The supervisor has never booted.** |
+| `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates, the configuration model actually applied (ADR-0008), and the terminal session (ADR-0014), the updater on the signed manifest, and a supervisor that restarts Plex and swaps a newly-installed version in without a reboot. 251 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
 | `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 104 tests. Provisioning now runs end to end **on the appliance**, driven from a browser: download, signature, manifest, build, publish, mount, confine, start. |
 | `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. |
 | `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 47 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree. |
@@ -100,19 +100,21 @@ the hardware alone months before Plex existed on the machine.
 
 Next, in order:
 
-1. **A supervisor.** Half done and **unproven on hardware**. `plexos-init` no longer execs
-   a shell: it stays alive as PID 1, reaps orphans, restarts a service that dies with a
-   widening delay, and respawns the console shell like a getty. What is left is the other
-   half — `plexosd` supervising Plex, so that a Plex which exits comes back and a
-   newly-provisioned version replaces a running one without a reboot. `plexosd::plex` says
-   so rather than pretending. This is the largest piece of missing *function*, as opposed
-   to missing trust.
+1. **Prove the supervisor.** Written, tested and **never booted**. `plexos-init` no longer
+   execs a shell: it stays alive as PID 1, reaps orphans, restarts a service that dies with
+   a widening delay, and respawns the console shell like a getty. `plexosd` watches Plex on
+   a thread and restarts one that exits — consulting both whether it holds a live child and
+   whether anything answers on loopback, because a restarted `plexosd` owns no child while a
+   perfectly good orphaned Plex serves away, and a child can be alive for the twenty seconds
+   before Plex opens its port. A deliberate stop is recorded, so the supervisor does not
+   start a server on a machine that is powering off. And a newly-provisioned version now
+   replaces a running one without a reboot: stop, unmount, mount what `current` points at,
+   start.
 
-   **Changing PID 1 is the riskiest edit in this repository**, and the next image is the
-   one that finds out: a supervisor that exits panics the kernel, and there is no console
-   to read the reason on if the thing that failed is the one that starts the console. There
-   is a way back — the other slot still holds `0.1.0.202607291945` — but it costs the
-   three boots ADR-0005 charges.
+   **Changing PID 1 is the riskiest edit in this repository**, and the next image is what
+   finds out: a supervisor that exits panics the kernel, and if the thing that fails is what
+   starts the console there is nothing to read the reason on. The way back is slot B, which
+   holds `0.1.0.202607291945`, at the cost of the three boots ADR-0005 charges.
 
 2. **Prove the other rollback path.** The unbootable-image branch has run (below). What
    has not is the one where the image boots and the system does not work — the gate
@@ -505,6 +507,19 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
   verdict and the version string with it, and the system that comes back is the older one,
   which cannot tell it is a replacement. `/var` is the only surface that survives, and it
   survives because of the rule that makes it awkward everywhere else.
+- **`waitpid(-1)` is process-wide, so only PID 1 may reap.** It collects *any* child,
+  including one something else in the same process is waiting for. The first thing it broke
+  was the test suite: Rust runs tests as threads in one process, so the new reaping tests
+  stole the PTY tests' children and each failed depending on the scheduler. The same hazard
+  applies to any library that reaps indiscriminately inside a process that also uses
+  `Command::status()` — that call then hangs, or reports a status belonging to something
+  else. `plexos-sys` serialises the tests that spawn and says why in `CHILD_PROCESS_TESTS`.
+- **A supervisor that watches one signal watches the wrong one.** "Is my child alive" is
+  false for a perfectly good Plex orphaned onto PID 1 when `plexosd` restarted; "is the port
+  answering" is false for twenty seconds every time Plex starts. Watching either alone
+  produces a specific disaster — the second server started into the same `SQLite` database
+  — so `restart_reason` consults both, plus whether Plex is *meant* to be running, which is
+  what stops it fighting the shutdown sequence.
 - **Two outcomes that both do nothing still need different words.** A check that found a
   newer release and a check that found none took the same `Ok(None)` out of the updater, so
   the page said "already up to date" directly underneath a line naming the version it had

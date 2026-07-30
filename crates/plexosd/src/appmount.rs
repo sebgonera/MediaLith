@@ -115,6 +115,137 @@ pub fn mount_current(apps: &Path, target: &Path, log: &mut dyn FnMut(&str)) -> O
     }
 }
 
+/// Where the kernel lists what is mounted.
+const PROC_MOUNTS: &str = "/proc/mounts";
+
+/// What happened when the app image was taken down.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Removal {
+    /// Nothing was mounted there, which is not a failure.
+    NotMounted,
+    /// Unmounted, and the loop device that backed it detached.
+    Removed {
+        /// The device that was released, if it was a loop device.
+        device: Option<String>,
+    },
+    /// It is still mounted, and this says why.
+    Failed(String),
+}
+
+impl std::fmt::Display for Removal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotMounted => write!(f, "no app image was mounted"),
+            Self::Removed { device: Some(d) } => {
+                write!(f, "the app image was unmounted and {d} released")
+            }
+            Self::Removed { device: None } => write!(f, "the app image was unmounted"),
+            Self::Failed(why) => write!(
+                f,
+                "the app image could not be unmounted: {why}. Remedy: something still has \
+                 a file open on it -- Plex itself, most likely, which has to be stopped \
+                 first. The version that was running is still running, which is the safe \
+                 half of this failing."
+            ),
+        }
+    }
+}
+
+/// The device mounted at `target`, according to the kernel's own list.
+///
+/// Read rather than remembered. `plexosd` can be restarted while an image stays mounted,
+/// so a device recorded in this process is a device this process may never have attached —
+/// and detaching the wrong loop device would pull the floor out from under something else.
+///
+/// Fields are separated by single spaces and paths escape space, tab, newline and
+/// backslash as octal. Only the space matters here in practice, and all four are handled
+/// because handling three of them is the kind of thing that works until a media directory
+/// is named with a tab in it.
+#[must_use]
+pub fn device_at(mounts: &str, target: &Path) -> Option<String> {
+    mounts.lines().find_map(|line| {
+        let mut fields = line.split(' ');
+        let device = fields.next()?;
+        let mounted_on = unescape(fields.next()?);
+        (Path::new(&mounted_on) == target).then(|| unescape(device))
+    })
+}
+
+/// Decodes the octal escapes the kernel writes into `/proc/mounts`.
+fn unescape(field: &str) -> String {
+    let mut out = String::with_capacity(field.len());
+    let mut bytes = field.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte != b'\\' {
+            out.push(char::from(byte));
+            continue;
+        }
+        let digits: String = bytes.by_ref().take(3).map(char::from).collect();
+        if let Ok(decoded) = u8::from_str_radix(&digits, 8) {
+            out.push(char::from(decoded));
+        } else {
+            // Not an escape after all. Put back what was read rather than dropping it: a
+            // path this cannot decode must not silently become a different path.
+            out.push('\\');
+            out.push_str(&digits);
+        }
+    }
+    out
+}
+
+/// Unmounts the app image and releases the loop device behind it.
+///
+/// Plex has to be stopped first. This does not stop it — the caller owns that decision,
+/// and an unmount that killed the running server to get its way would be a worse thing
+/// than a failed unmount.
+pub fn unmount_current(target: &Path, log: &mut dyn FnMut(&str)) -> Removal {
+    let mounts = std::fs::read_to_string(PROC_MOUNTS).unwrap_or_default();
+    let Some(device) = device_at(&mounts, target) else {
+        return Removal::NotMounted;
+    };
+
+    if let Err(error) = plexos_sys::mount::unmount(&target.to_string_lossy()) {
+        return Removal::Failed(error.to_string());
+    }
+    log(&format!("{} unmounted", target.display()));
+
+    // Only a loop device is detached, and only after the unmount succeeded. The kernel
+    // pre-creates eight of them, so leaking one per swap gives an appliance that stops
+    // being able to mount an app image after the eighth Plex update -- with an error about
+    // loop devices, months later, on a machine whose owner changed nothing.
+    if !device.starts_with("/dev/loop") {
+        return Removal::Removed { device: None };
+    }
+
+    let Ok(tools) = tools::MountTools::on_this_system() else {
+        return Removal::Removed { device: None };
+    };
+    match std::process::Command::new(&tools.losetup)
+        .arg("-d")
+        .arg(&device)
+        .output()
+    {
+        Ok(output) if output.status.success() => Removal::Removed {
+            device: Some(device),
+        },
+        Ok(output) => {
+            // Not a failure of the unmount, which has already happened. Reported and
+            // survived: the image is down, and one leaked loop device out of eight is a
+            // thing to notice rather than a thing to stop for.
+            log(&format!(
+                "{device} could not be detached ({}), so one of the eight loop devices \\
+                 stays in use until the next reboot",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+            Removal::Removed { device: None }
+        }
+        Err(error) => {
+            log(&format!("{device} could not be detached ({error})"));
+            Removal::Removed { device: None }
+        }
+    }
+}
+
 /// SHA256 of a file, via the tool the image carries.
 fn sha256(tools: &tools::MountTools, path: &Path) -> Option<String> {
     let output = std::process::Command::new(&tools.sha256sum)
@@ -222,5 +353,71 @@ mod tests {
         );
         assert!(message.contains("will not be mounted"), "{message}");
         let _ = std::fs::remove_dir_all(&apps);
+    }
+
+    /// Lines copied from a real `/proc/mounts`, not composed here.
+    ///
+    /// The rule this project keeps relearning: a fixture you imagined is a test that agrees
+    /// with your code and not with the machine. `resolv.conf` was parsed with guessed
+    /// comment rules and the parser was wrong on the appliance while its test passed.
+    const REAL_MOUNTS: &str = "\
+/dev/loop0 /snap/core24/1587 squashfs ro,nodev,relatime,errors=continue,threads=single 0 0
+/dev/loop3 /snap/desktop-security-center/151 squashfs ro,nodev,relatime,errors=continue,threads=single 0 0
+/dev/mapper/ubuntu--vg-ubuntu--lv / ext4 rw,relatime 0 0
+/dev/sda2 /boot ext4 rw,relatime 0 0
+";
+
+    #[test]
+    fn the_device_behind_a_mount_point_is_read_from_the_kernels_own_list() {
+        assert_eq!(
+            device_at(REAL_MOUNTS, Path::new("/snap/core24/1587")).as_deref(),
+            Some("/dev/loop0")
+        );
+        assert_eq!(
+            device_at(REAL_MOUNTS, Path::new("/")).as_deref(),
+            Some("/dev/mapper/ubuntu--vg-ubuntu--lv")
+        );
+        assert_eq!(device_at(REAL_MOUNTS, Path::new("/run/plexos/plex")), None);
+    }
+
+    #[test]
+    fn a_mount_point_with_a_space_in_it_is_matched_rather_than_truncated() {
+        // The kernel escapes it as \040. A parser that split on whitespace would see the
+        // mount point as "/var/media/My" and never match -- and the consequence here is
+        // not a bad message, it is detaching the wrong loop device.
+        let mounts = "/dev/loop4 /var/media/My\\040Films erofs ro 0 0\n";
+        assert_eq!(
+            device_at(mounts, Path::new("/var/media/My Films")).as_deref(),
+            Some("/dev/loop4")
+        );
+    }
+
+    #[test]
+    fn something_that_is_not_an_escape_survives_unchanged() {
+        // A path must never silently become a different path. `\0` here is not a valid
+        // three-digit octal escape and has to come back out as it went in.
+        assert_eq!(unescape("/a\\0b"), "/a\\0b");
+        assert_eq!(unescape("/plain/path"), "/plain/path");
+        assert_eq!(unescape("/tab\\011here"), "/tab\there");
+    }
+
+    #[test]
+    fn unmounting_nothing_is_not_a_failure() {
+        // Every appliance is in this state until Plex is installed, and a swap on one that
+        // was never mounted must proceed to the mount rather than stopping.
+        let outcome = unmount_current(&scratch("nothing").join("nowhere"), &mut |_| {});
+        assert_eq!(outcome, Removal::NotMounted);
+    }
+
+    #[test]
+    fn a_failed_unmount_says_what_is_holding_it_and_that_plex_still_runs() {
+        // The likely cause by far, and the half of it worth saying: the version that was
+        // running is still running. A message that only said "busy" would read as a
+        // machine that had lost its Plex.
+        let failed = Removal::Failed("Device or resource busy".to_owned());
+        let message = failed.to_string();
+        assert!(message.contains("Remedy:"), "{message}");
+        assert!(message.contains("stopped first"), "{message}");
+        assert!(message.contains("still running"), "{message}");
     }
 }

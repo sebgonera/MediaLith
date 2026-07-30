@@ -57,3 +57,16 @@ pub mod verity;
 
 pub use device::{Partition, by_partlabel, wait_for_partlabel};
 pub use verity::{VerityError, VeritySuperblock};
+
+/// Serialises the tests that create child processes.
+///
+/// [`process::reap`] calls `waitpid(-1)`, which is process-wide: it collects *any* child,
+/// including one another test is waiting for. Rust runs tests as threads in one process,
+/// so without this the reaping tests and the PTY tests steal each other's children and
+/// fail in whichever order the scheduler happens to pick.
+///
+/// The hazard is not confined to tests, and this is the cheapest place to write it down:
+/// **only PID 1 may call `reap`.** A library that reaps indiscriminately inside a process
+/// that also uses `Command::status()` will make that call hang or report the wrong child.
+#[cfg(test)]
+pub(crate) static CHILD_PROCESS_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());

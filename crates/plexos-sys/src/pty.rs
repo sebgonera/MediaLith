@@ -386,6 +386,9 @@ mod tests {
     fn a_finished_child_is_reaped_exactly_once() {
         // plexosd never exits, so a session that is not reaped is a zombie for the life
         // of the daemon.
+        let _serialised = crate::CHILD_PROCESS_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let terminal =
             spawn("/bin/sh", &["sh", "-c", "exit 3"], WindowSize::default()).expect("spawns");
 
