@@ -117,14 +117,7 @@ pub fn respond(
 
         // Putting PlexOS on a disk (ADR-0016). The most destructive route here, and the
         // only one whose refusals are the point rather than the edge cases.
-        ("GET" | "HEAD", "/api/install") => {
-            match serde_json::to_string(&install.snapshot(env, running_disk().as_deref())) {
-                Ok(json) => Response::json(json),
-                Err(error) => {
-                    Response::text(500, format!("could not serialise the disks: {error}\n"))
-                }
-            }
-        }
+        ("GET" | "HEAD", "/api/install") => report_disks(env, install),
 
         ("POST", "/api/install") => begin_install(request, env, install),
 
@@ -780,6 +773,15 @@ fn bind(address: SocketAddr) -> io::Result<TcpListener> {
     })
 }
 
+/// The disks on this machine, with the one PlexOS runs from marked.
+fn report_disks(env: &impl Environment, install: &std::sync::Arc<crate::install::Job>) -> Response {
+    let source = crate::install::running_disk(env);
+    match serde_json::to_string(&install.snapshot(env, source.as_deref())) {
+        Ok(json) => Response::json(json),
+        Err(error) => Response::text(500, format!("could not serialise the disks: {error}\n")),
+    }
+}
+
 /// Vets an install request and, if it survives, hands it to a thread.
 ///
 /// Split out of [`respond`] because every line of it is a refusal, and a route table is
@@ -791,9 +793,21 @@ fn begin_install(
     install: &std::sync::Arc<crate::install::Job>,
 ) -> Response {
     let (disk, confirm) = crate::install::request_in(&request.body);
-    let source_disk = running_disk();
 
-    let disks = match crate::install::candidates(env, source_disk.as_deref()) {
+    // Refused outright when the running disk cannot be identified, rather than proceeding
+    // with nothing excluded. "I do not know which disk I am running from" and "no disk is
+    // excluded" are the same value and opposite meanings, and taking the second one erases
+    // the running system.
+    let Some(source_disk) = crate::install::running_disk(env) else {
+        return Response::text(
+            500,
+            "this machine's own disk could not be identified, so no disk can safely be \
+             erased. Remedy: none from the console -- PlexOS finds its own disk behind the \
+             verified /usr, and not finding it means this is not a booted PlexOS system.\n",
+        );
+    };
+
+    let disks = match crate::install::candidates(env, Some(&source_disk)) {
         Ok(disks) => disks,
         Err(error) => return Response::text(500, format!("could not read the disks: {error}\n")),
     };
@@ -826,19 +840,6 @@ fn begin_install(
     }
     crate::install::spawn(install, target, source);
     Response::json(format!("{{\"disk\":\"{disk}\"}}"))
-}
-
-/// The disk this system booted from, so the installer never offers it.
-///
-/// Resolved through the ESP's partition label and then walked back to the whole disk by
-/// trimming the partition suffix. Deliberately not the `removable` flag: that describes the
-/// enclosure, and says yes for an internal card reader and for a USB disk somebody runs
-/// their whole system from.
-fn running_disk() -> Option<String> {
-    let esp = plexos_sys::device::by_partlabel(plexos_types::partition::LABEL_ESP).ok()?;
-    let name = esp.strip_prefix("/dev/")?;
-    let stem = name.trim_end_matches(|c: char| c.is_ascii_digit());
-    Some(stem.trim_end_matches('p').to_owned())
 }
 
 /// Waits for the interface to get an address, and reports where the console is.

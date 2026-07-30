@@ -573,6 +573,20 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
   verdict and the version string with it, and the system that comes back is the older one,
   which cannot tell it is a replacement. `/var` is the only surface that survives, and it
   survives because of the rule that makes it awkward everywhere else.
+- **Partition labels are not unique across disks, and an installer is what makes that
+  true.** The console found the disk it was running from by resolving the ESP's partition
+  label. That worked until the first successful install, at which point the machine had two
+  partitions called `esp` and `by_partlabel` returned the one on the disk that had just been
+  written — so the console reported PlexOS as running from the *target*, and would then have
+  offered the disk it was actually running from as somewhere to install. Accepting that
+  erases the running system. The copy path had been designed against exactly this hazard,
+  by resolving the source partitions before writing anything; the same hazard in a second
+  place was missed and found on hardware a minute after the install succeeded. The answer
+  is not to guess from labels: the verified `/usr` is a device-mapper device and sysfs lists
+  the real partitions behind it under `slaves/`.
+- **"I do not know" and "nothing is excluded" are the same value and opposite meanings.**
+  `running_disk` returning `None` had to become a refusal of every disk rather than an
+  install with nothing ruled out.
 - **The bootloader spends a try *to* boot an entry, so the entry running can already be
   exhausted.** The gate inferred which entry had booted from the shape of the set — none
   counting plus a permanent one present meant the permanent one was running — and that is

@@ -364,6 +364,76 @@ impl Source {
     }
 }
 
+/// The device-mapper name `plexos-init` gives the verified `/usr`.
+///
+/// Repeated here rather than depended on: `plexosd` does not link `plexos-init`, and the
+/// two are the same artefact only by convention. A test pins them together.
+const VERITY_MAPPER_NAME: &str = "plexos-usr";
+
+/// The disk this system is running from.
+///
+/// # Why not the partition label
+///
+/// That was the first implementation and it was wrong, on hardware, within a minute of the
+/// first successful install. Labels are not unique across disks: the moment a target's
+/// table is written the machine has two partitions called `esp`, and
+/// `by_partlabel` returns whichever the kernel enumerated first — which was the disk that
+/// had just been installed onto. The console then reported that PlexOS was running from the
+/// *target*, and would have offered the disk it was actually running from as somewhere to
+/// install. That is not a cosmetic error: accepting it erases the running system.
+///
+/// The verified `/usr` is a device-mapper device, and sysfs lists the partitions behind it
+/// under `slaves/`. Those are real device names, they cannot collide, and they are what the
+/// kernel is actually reading from.
+///
+/// `None` means the question could not be answered, and callers must treat that as "refuse
+/// every disk" rather than as "exclude nothing".
+#[must_use]
+pub fn running_disk(env: &impl Environment) -> Option<String> {
+    let blocks = Path::new("/sys/class/block");
+    for entry in env.list_dir(blocks).ok()? {
+        let name = entry.file_name()?.to_str()?;
+        if !name.starts_with("dm-") {
+            continue;
+        }
+        if env
+            .read(&entry.join("dm/name"))
+            .ok()
+            .is_none_or(|n| n.trim() != VERITY_MAPPER_NAME)
+        {
+            continue;
+        }
+
+        // Several: the verity target reads both the data partition and its hash tree, and
+        // they are on the same disk by construction. Any of them answers the question.
+        let slave = env
+            .list_dir(&entry.join("slaves"))
+            .ok()?
+            .into_iter()
+            .next()?;
+        let partition = slave.file_name()?.to_str()?;
+        return Some(disk_of(partition));
+    }
+    None
+}
+
+/// The whole disk a partition belongs to: `sda4` is `sda`, `nvme0n1p2` is `nvme0n1`.
+///
+/// **Takes a partition name.** A disk name cannot be distinguished from a partition name
+/// by looking at it — `nvme0n1` is a disk and `sda1` is a partition, and both end in a
+/// digit — so handing this a disk gives nonsense. Every caller reads its input from a
+/// sysfs `slaves` directory, which contains partitions and nothing else.
+#[must_use]
+pub fn disk_of(partition: &str) -> String {
+    let stem = partition.trim_end_matches(|c: char| c.is_ascii_digit());
+    // Only for names that end in a digit before the `p`, which is what distinguishes
+    // `nvme0n1p2` (a partition) from a disk that merely ends in `p`.
+    if stem.ends_with('p') && stem[..stem.len() - 1].ends_with(|c: char| c.is_ascii_digit()) {
+        return stem[..stem.len() - 1].to_owned();
+    }
+    stem.to_owned()
+}
+
 /// What an install is doing, for the console to show.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -997,5 +1067,60 @@ mod tests {
         assert!(progress.error.is_none());
         assert_eq!(progress.disks.len(), 2);
         assert!(progress.disks.iter().any(|d| d.is_source));
+    }
+
+    #[test]
+    fn the_running_disk_is_found_behind_the_verified_usr_and_not_by_label() {
+        // Found on hardware within a minute of the first successful install. The first
+        // implementation resolved the ESP by partition label -- and the moment a target's
+        // table is written there are two partitions called `esp`, so it returned the disk
+        // that had just been installed onto. The console then reported PlexOS as running
+        // from the target, and would have offered the disk it was really running from.
+        // Accepting that erases the running system.
+        let fixture = laptop()
+            .file("/sys/class/block/dm-0/dm/name", "plexos-usr\n")
+            .file("/sys/class/block/dm-0/slaves/sda4/partition", "4\n")
+            .file("/sys/class/block/dm-0/slaves/sda5/partition", "5\n")
+            // The duplicate label that broke it, present exactly as it would be.
+            .file(
+                format!("{SYS_BLOCK}/nvme0n1/nvme0n1p1/uevent"),
+                "DEVNAME=nvme0n1p1\nPARTNAME=esp\n",
+            );
+
+        assert_eq!(running_disk(&fixture).as_deref(), Some("sda"));
+    }
+
+    #[test]
+    fn a_machine_with_no_verified_usr_answers_nothing_rather_than_guessing() {
+        // The caller must treat this as "refuse every disk". Guessing here is guessing
+        // about which disk to erase.
+        assert_eq!(running_disk(&laptop()), None);
+    }
+
+    #[test]
+    fn a_partition_name_resolves_to_the_disk_it_is_on() {
+        assert_eq!(disk_of("sda4"), "sda");
+        assert_eq!(disk_of("nvme0n1p2"), "nvme0n1");
+        assert_eq!(disk_of("mmcblk0p1"), "mmcblk0");
+
+        // The inverse of the name the installer writes to, which is the property that
+        // matters: the two functions are used at opposite ends of the same operation.
+        for disk in ["sda", "nvme0n1", "mmcblk0"] {
+            for index in 1..=6 {
+                assert_eq!(disk_of(&partition_name(disk, index)), disk);
+            }
+        }
+
+        // A disk name is not something this can be asked about, and pretending otherwise
+        // would hide that: `nvme0n1` is a disk, `sda1` is a partition, and nothing in the
+        // strings tells them apart.
+    }
+
+    #[test]
+    fn the_mapper_name_is_the_one_pid_one_creates() {
+        // plexosd does not link plexos-init, so these agree by convention. If they ever
+        // stop agreeing, running_disk returns None and every install is refused -- which
+        // is the safe direction and an unusable one.
+        assert_eq!(VERITY_MAPPER_NAME, "plexos-usr");
     }
 }
