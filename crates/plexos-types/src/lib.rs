@@ -24,6 +24,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod gpt;
 pub mod manifest;
 pub mod partition;
 pub mod paths;

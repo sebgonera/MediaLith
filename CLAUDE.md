@@ -100,9 +100,24 @@ the hardware alone months before Plex existed on the machine.
 
 Next, in order:
 
-1. **Installer and first-boot wizard.** Never started, and the reason it has not mattered
-   is that the only installs so far were `dd` onto a disk by somebody who wrote the image.
-   A machine handed to anybody else needs both.
+1. **Installer and first-boot wizard** (ADR-0016, in progress). The only installs so far
+   were `dd` onto a disk by somebody who wrote the image; a machine handed to anybody else
+   needs both. The installer is a mode of the same image and writes **the system that is
+   running** to a chosen disk — no second artefact to build, sign or keep in step, and what
+   lands is what dm-verity already verified and this hardware already booted.
+
+   **Done:** `plexos_types::gpt`, which turns ADR-0003's frozen layout into the bytes of a
+   partition table. No new package in the image, because "a program in the image is not a
+   program that can do the job" has cost this project three evenings and the most
+   destructive operation in the system is a poor place for a fourth. What makes writing it
+   defensible is that the tests hand the result to `sgdisk` and `sfdisk` on the build host:
+   both read back six partitions at the right offsets, aligned, and — the part that matters
+   — *meaning* the right things, `Linux /usr (x86-64)` and `Linux variable data` from the
+   Discoverable Partitions Specification rather than sixteen bytes that merely parse.
+
+   **Left:** enumerating disks and refusing the wrong one, making the filesystems, copying
+   the running system, installing the boot entry, and the first-boot flow. Nothing writes
+   to a disk yet.
 
 2. **`xe` firmware is not in the image at all**, only `i915/`. Found while fixing the
    GuC/HuC list. `CONFIG_DRM_XE=y`, so Arc parts bind — but a driver without its firmware
