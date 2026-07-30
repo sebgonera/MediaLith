@@ -543,16 +543,19 @@ fn write_slot(
     let device = plexos_sys::device::by_partlabel(plexos_types::partition::LABEL_ESP)?;
     let mut cleared = Vec::new();
     let installed = crate::esp::with_esp_mounted(&device, &mut |esp| {
-        // Before the install, and inside the same mount. A failed update leaves an
-        // exhausted 18 MB entry on an ESP sized for three, and nothing else ever removes
-        // it -- so without this the partition the machine cannot boot without fills up
-        // one bad update at a time. Found by causing a rollback rather than by reading.
-        cleared = crate::esp::remove_wreckage(esp, running);
+        // Before the install, and inside the same mount. Both partitions have been
+        // written by now, so the disk holds exactly two versions of /usr -- the running
+        // one and the one just written -- and every entry naming any other version points
+        // at a filesystem that has been overwritten. Leaving them cost a 511 MB ESP: 25
+        // entries, 100% full, and an install that ran out of room halfway through copying
+        // a kernel the bootloader would then have tried first.
+        cleared = crate::esp::remove_superseded(esp, running);
         crate::esp::install_entry(esp, &uki, version)
     })?;
     if !cleared.is_empty() {
         job.note(&format!(
-            "removed the boot {} of a previous failed update: {}",
+            "removed {} superseded boot {}: {}",
+            cleared.len(),
             if cleared.len() == 1 {
                 "entry"
             } else {

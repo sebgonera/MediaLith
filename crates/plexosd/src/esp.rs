@@ -101,9 +101,9 @@ pub fn mark_good(path: &Path, entry: &BootEntry) -> io::Result<Option<PathBuf>> 
 /// `plexos_update::plan` refuses a bundle whose version does not sort above the running
 /// one for exactly that reason.
 ///
-/// It does not remove the wreckage of a *failed* update either, which is a different
-/// thing and does need removing — see [`remove_wreckage`], which the update path calls
-/// alongside this one so that what it cleared can be reported.
+/// Nor does it remove anything else. [`remove_superseded`] does that, and the update path
+/// calls it first — first, because a partition with no room left is how this was found:
+/// the copy below failed halfway and left a truncated kernel carrying a try counter.
 ///
 /// # Errors
 /// If the entry directory cannot be created or the file cannot be written. A partial
@@ -126,28 +126,44 @@ pub fn install_entry(esp: &Path, source: &Path, version: &str) -> io::Result<Pat
     Ok(destination)
 }
 
-/// Removes boot entries the bootloader has given up on, except the one that is running.
+/// Removes every boot entry that no slot can boot, keeping only the running one.
 ///
-/// Found by causing a real rollback. A failed update leaves an exhausted entry — `+0-3` —
-/// on the ESP, and nothing ever removed it. ADR-0003 sized the ESP for three UKIs and
-/// each of these is 18 MB, so a handful of bad updates fills the one partition the
-/// machine cannot boot without. An exhausted entry is the safest thing on the ESP to
-/// delete, because it is the one entry that is definitely not a rollback target:
-/// `systemd-boot` sorts it below every other entry and will not choose it while anything
-/// else exists.
+/// # Why almost everything can go
 ///
-/// `running` guards the case where that reasoning fails. A machine can be *running* an
-/// exhausted entry — two bad updates in a row leave the bootloader with nothing else and
-/// it boots one anyway, which is ADR-0005's "no known-good slot left". Deleting that
-/// would remove the boot entry of the system executing the delete, turning an appliance
-/// somebody can still reach into one that needs recovery media. So the entry whose
-/// version is the running one survives, however dead its counter looks.
+/// There are two slots. Called from the update path this runs *after* both partitions
+/// have been written, so at that moment the disk holds exactly two versions of `/usr`: the
+/// one running, and the one just written. An entry naming any other version points at a
+/// filesystem that has been overwritten — choosing it means a dm-verity failure at boot,
+/// three tries burnt, and a fallback. Those entries are not merely wasteful; they are the
+/// only entries on the partition that are guaranteed not to work.
+///
+/// The entry for the version being installed is removed too, and then written fresh by
+/// [`install_entry`]. A stale one for the same version would differ only in its try
+/// counter, which is the one part of the name that decides whether the bootloader still
+/// believes in it.
+///
+/// # Why the running entry survives, whatever its counter says
+///
+/// It is the system executing this. A machine can be *running* an exhausted entry — two
+/// bad updates in a row leave the bootloader with nothing else and it boots one anyway,
+/// which is ADR-0005's "no known-good slot left". Deleting that turns an appliance
+/// somebody can still reach into one that needs recovery media.
+///
+/// # What this cost before it existed
+///
+/// [`install_entry`] never removes the entry that works, which is right, and nothing
+/// removed the ones before it, which was not. **The reference laptop reached 25 entries
+/// and a 511 MB ESP that was 100% full**, on a partition ADR-0003 sized for three. The
+/// update that found it failed with `ENOSPC` while copying, leaving a truncated 664 KB
+/// file called `plexos-0.1.0.202607301319+3.efi` — the highest version on the partition,
+/// with a full try counter, so `systemd-boot` would have chosen it first and spent three
+/// boots discovering it was not a kernel.
 ///
 /// Returns what it removed, so the update log can say so. Every failure is swallowed:
 /// this is housekeeping alongside an update, and refusing an update because a dead file
 /// would not delete is a worse bargain than a full ESP.
 #[must_use]
-pub fn remove_wreckage(esp: &Path, running: &str) -> Vec<String> {
+pub fn remove_superseded(esp: &Path, running: &str) -> Vec<String> {
     let running_stem = format!("plexos-{running}");
     let mut removed = Vec::new();
 
@@ -156,7 +172,7 @@ pub fn remove_wreckage(esp: &Path, running: &str) -> Vec<String> {
     };
 
     for (path, entry) in entries {
-        if entry.is_exhausted() && entry.stem != running_stem && fs::remove_file(&path).is_ok() {
+        if entry.stem != running_stem && fs::remove_file(&path).is_ok() {
             removed.push(entry.to_string());
         }
     }
@@ -272,12 +288,12 @@ mod tests {
         let source = esp.join("new.efi");
         fs::write(&source, b"the new kernel").unwrap();
 
-        let cleared = remove_wreckage(&esp, "0.1.0");
+        let cleared = remove_superseded(&esp, "0.1.0");
         install_entry(&esp, &source, "0.1.0.2").unwrap();
 
         assert_eq!(cleared, ["plexos-0.1.0.1+0-3.efi"]);
         assert!(!dead.exists(), "the bootloader has given up on this one");
-        assert!(good.exists(), "the rollback target must survive");
+        assert!(good.exists(), "the entry that is running must survive");
 
         let _ = fs::remove_dir_all(&esp);
     }
@@ -293,7 +309,7 @@ mod tests {
         let running = esp.join(ENTRY_DIR).join("plexos-0.1.0.9+0-3.efi");
         fs::write(&running, b"exhausted, and the only thing that booted").unwrap();
 
-        let cleared = remove_wreckage(&esp, "0.1.0.9");
+        let cleared = remove_superseded(&esp, "0.1.0.9");
 
         assert!(cleared.is_empty(), "nothing was safe to remove");
         assert!(
@@ -305,29 +321,44 @@ mod tests {
     }
 
     #[test]
-    fn wreckage_removal_reports_what_it_removed_and_leaves_healthy_entries() {
-        let esp = scratch("wreckage-report");
+    fn everything_but_the_running_entry_goes_however_healthy_it_looks() {
+        // Including the one that looks most alive. `plexos-0.1.0.5+2.efi` is on trial with
+        // two tries left, so under the old rule it survived as "a live candidate" -- but by
+        // the time this runs, the update has already written both partitions, and the slot
+        // that held 0.1.0.5 is the slot it just overwrote. The entry is a candidate for a
+        // filesystem that no longer exists: choosing it fails dm-verity and burns two
+        // boots.
+        //
+        // Counting is what made this matter. 25 entries filled a 511 MB ESP on the
+        // reference laptop, and the update that found it ran out of room mid-copy.
+        let esp = scratch("superseded");
         for name in [
-            "plexos-0.1.0.efi",     // permanent
-            "plexos-0.1.0.5+2.efi", // on trial, still counting
+            "plexos-0.1.0.efi",     // running
+            "plexos-0.1.0.5+2.efi", // staged, and its slot has just been overwritten
             "plexos-0.1.0.1+0-3.efi",
             "plexos-0.1.0.2+0-3.efi",
         ] {
             fs::write(esp.join(ENTRY_DIR).join(name), b"x").unwrap();
         }
 
-        let mut removed = remove_wreckage(&esp, "0.1.0");
+        let mut removed = remove_superseded(&esp, "0.1.0");
         removed.sort();
         assert_eq!(
             removed,
-            ["plexos-0.1.0.1+0-3.efi", "plexos-0.1.0.2+0-3.efi"]
+            [
+                "plexos-0.1.0.1+0-3.efi",
+                "plexos-0.1.0.2+0-3.efi",
+                "plexos-0.1.0.5+2.efi",
+            ]
         );
 
-        assert!(esp.join(ENTRY_DIR).join("plexos-0.1.0.efi").exists());
-        assert!(
-            esp.join(ENTRY_DIR).join("plexos-0.1.0.5+2.efi").exists(),
-            "an entry with tries left is a live candidate, not wreckage"
+        assert_eq!(
+            fs::read_dir(esp.join(ENTRY_DIR)).unwrap().count(),
+            1,
+            "one slot is running and the other is about to be written; nothing else can \
+             boot, so nothing else may stay"
         );
+        assert!(esp.join(ENTRY_DIR).join("plexos-0.1.0.efi").exists());
 
         let _ = fs::remove_dir_all(&esp);
     }

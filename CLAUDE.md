@@ -506,6 +506,17 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
   verdict and the version string with it, and the system that comes back is the older one,
   which cannot tell it is a replacement. `/var` is the only surface that survives, and it
   survives because of the rule that makes it awkward everywhere else.
+- **Every successful update left its predecessor's boot entry, and 25 of them filled the
+  ESP.** `install_entry` never removes the entry that works — right, it is the way back —
+  and nothing removed the ones before it. The reference laptop reached 25 entries on a
+  511 MB partition at 100% full, and the update that found it failed with `ENOSPC` halfway
+  through copying a kernel, leaving a truncated 664 KB file named `+3`: the highest version
+  on the partition with a full try counter, so the bootloader would have chosen it first
+  and spent three boots discovering it was not a kernel. The rule that fixes it comes from
+  the architecture rather than from a retention count: **there are two slots, so after the
+  partitions are written the disk holds exactly two versions of `/usr`**, and an entry
+  naming any other version is guaranteed not to boot. Prune before installing, not after,
+  because the failure being prevented is running out of room during the install.
 - **The console is one inline script, so a syntax error anywhere stops the entire page.**
   Every section sits on "Loading..." while the API answers perfectly, which reads as a dead
   machine and is a dead *page*. It shipped from a second `const signature` inside a
