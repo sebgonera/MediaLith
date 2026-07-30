@@ -41,9 +41,9 @@ Everything else is cheap to revise. Prefer revising it.
 | `crates/plexos-types` | Done. Formats and the layout emitter, 50 tests. The ADR-0006 manifest schema was reconciled with the artefacts PlexOS actually builds — one UKI per slot, and a `release` string `OsVersion` cannot express — which was the last moment that was an edit rather than a migration. |
 | `crates/plexos-update` | Which slot an update goes to, writing a partition and reading it back, the ADR-0006 trust chain, the anti-rollback sequence, root-signed revocation, boot-entry/slot agreement, and `plexos-sign` as the publisher's half. 65 tests. **Has updated the reference laptop four times, alternating slots — and one of those updates was deliberately unbootable and was rolled back.** All four were unsigned, through an improvised `update.json` this crate no longer parses. **Nothing signed has yet reached a machine.** |
 | `crates/plexos-gpu` | 46 tests, and it has now answered the question it was written for — on four machines, three of which it was wrong about until they were tried. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
-| `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, `reboot(2)`, `sethostname(2)`, and PTY allocation for the console terminal. 83 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
-| `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role runs the health gate, spawns the status console, and then starts a shell. 53 tests. |
-| `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates, the configuration model actually applied (ADR-0008), and the terminal session (ADR-0014), and the updater on the signed manifest. 239 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
+| `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, `reboot(2)`, `sethostname(2)`, PTY allocation for the console terminal, and reaping children for PID 1. 86 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
+| `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role mounts the Plex app image, then keeps the console and a shell running: it reaps orphans, restarts what dies with a widening delay, and never exits. 62 tests, none of them on hardware yet. |
+| `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates, the configuration model actually applied (ADR-0008), and the terminal session (ADR-0014), and the updater on the signed manifest. 242 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
 | `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 104 tests. Provisioning now runs end to end **on the appliance**, driven from a browser: download, signature, manifest, build, publish, mount, confine, start. |
 | `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. |
 | `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 47 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree. |
@@ -100,52 +100,45 @@ the hardware alone months before Plex existed on the machine.
 
 Next, in order:
 
-1. **Prove signing on a machine.** The chain is written, tested and *unproven*: a
-   development root key is baked into `ROOT_KEYS`, `plexos-sign` makes keys, certificates,
-   signatures and revocation lists, `tools/sign-bundle.sh` turns a built bundle into a
-   signed manifest and then verifies it with the appliance's own code, and `plexosd`
-   refuses anything that does not chain to that key. **No appliance has installed a signed
-   manifest.** The reference laptop is running an image whose updater reads the old
-   `update.json`, so the first signed update has to be installed by the *old* updater —
-   after which nothing on that machine will ever take an unsigned bundle again. That is the
-   one-way door in this list, and it is why proving it comes before anything else.
+1. **A supervisor.** Half done and **unproven on hardware**. `plexos-init` no longer execs
+   a shell: it stays alive as PID 1, reaps orphans, restarts a service that dies with a
+   widening delay, and respawns the console shell like a getty. What is left is the other
+   half — `plexosd` supervising Plex, so that a Plex which exits comes back and a
+   newly-provisioned version replaces a running one without a reboot. `plexosd::plex` says
+   so rather than pretending. This is the largest piece of missing *function*, as opposed
+   to missing trust.
 
-   Two things remain undone rather than unproven. The root key's private half is a file on
-   this build host, which is what `development: true` says out loud; making it an offline
-   secret is a custody decision, not a coding one. And nothing has ever published a
-   revocation list, so that path has tests and no history.
+   **Changing PID 1 is the riskiest edit in this repository**, and the next image is the
+   one that finds out: a supervisor that exits panics the kernel, and there is no console
+   to read the reason on if the thing that failed is the one that starts the console. There
+   is a way back — the other slot still holds `0.1.0.202607291945` — but it costs the
+   three boots ADR-0005 charges.
 
-2. **A supervisor.** `plexos-init` still prints "no supervisor yet" and hands over to a
-   shell. Nothing restarts a service that dies — and `plexosd::plex` says so rather than
-   pretending: a Plex that exits stays exited, and a newly provisioned version does not
-   replace a running one without a reboot. This is the largest piece of missing
-   *function*, as opposed to missing trust.
-
-3. **Prove the other rollback path.** The unbootable-image branch has run (below). What
+2. **Prove the other rollback path.** The unbootable-image branch has run (below). What
    has not is the one where the image boots and the system does not work — the gate
    restarting to spend a try, and the record it leaves on `/var`. That code is written and
    tested and has never executed on hardware. Staging it needs a bundle that boots but
    whose Plex cannot start, which is a realistic bad update and not obviously easy to
    build deliberately.
 
-4. **Installer and first-boot wizard.** Never started, and the reason it has not mattered
+3. **Installer and first-boot wizard.** Never started, and the reason it has not mattered
    is that the only installs so far were `dd` onto a disk by somebody who wrote the image.
    A machine handed to anybody else needs both.
 
-5. **`xe` firmware is not in the image at all**, only `i915/`. Found while fixing the
+4. **`xe` firmware is not in the image at all**, only `i915/`. Found while fixing the
    GuC/HuC list. `CONFIG_DRM_XE=y`, so Arc parts bind — but a driver without its firmware
    is the thing that just cost an evening, and the claim that current Arc works today is
    softer than it looked.
 
-6. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
+5. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
    asked for and both are deferred: an 83 MB upload has to stream to disk, and
    `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
 
-7. **NVIDIA (ADR-0015).** Planned in detail, deliberately unscheduled. The blocker is
+6. **NVIDIA (ADR-0015).** Planned in detail, deliberately unscheduled. The blocker is
    `CONFIG_MODULES=n`, not the driver. Steps 1 and 2 of that ADR are about half a day and
    answer most of the risk.
 
-8. **TLS on the console (ADR-0014).** Sequenced after update signing and now due: with the
+7. **TLS on the console (ADR-0014).** Sequenced after update signing and now due: with the
    update path closed, the console's root shell over plain HTTP is the widest opening left.
 
 **Hardware transcoding works.** `/api/gpu` on the reference laptop reports H.264 and
@@ -186,18 +179,30 @@ first real run: udhcpc writes the interface as a trailing comment, so the namese
 came back as `8.8.8.8 # eth0`, while a test whose fixture was imagined rather than
 captured passed throughout.
 
-**Updates are signed now, and nothing has yet installed one.** ADR-0006 is implemented end
-to end on the build host: `tools/sign-bundle.sh` writes the manifest and its detached
-signature and then verifies both with the appliance's own verifier, so a bundle that will
-not install is caught before it is served. The appliance refuses a manifest that does not
-chain to the root key in its `/usr`, one whose sequence is below what it has already
-accepted, one signed by a revoked key, and one whose boot entry belongs to the other slot.
-The root key is a development key: its private half is on the build host, and every place
-that reports a signature says so.
+**Updates are signed, and the appliance has proved it on hardware.** `0.1.0.202607301205`
+was installed over the network by the *old* unsigned updater — the last bundle that will
+ever be accepted that way — booted on slot A, and the health gate then made the slot
+permanent (`+2-1` renamed to no counter). The image it brought up refuses everything it
+should, checked against a real machine rather than against a test:
 
-Still unproven: all of the above on a machine, and the half of rollback where the image
-boots but the system does not work. **Kernel images are still unsigned, so Secure Boot must
-be off** — that is ADR-0004 and separate from update signing.
+- an **unsigned** bundle: refused, naming `tools/sign-bundle.sh` as the remedy;
+- a **tampered** manifest, one field changed after signing: refused, and the message names
+  reformatting as the likely innocent cause, which is the mistake a person actually makes;
+- a **replayed** older release, correctly signed by the real key: **the signature verifies**
+  — the console shows the key and the root that certified it — **and the update is refused
+  anyway**, because sequence 202607010000 is below the 202607301205 already accepted. That
+  is the one case the counter exists for, and it is the one no signature check can catch.
+
+The anti-rollback floor came from the running image's own build stamp, with nothing
+recorded on `/var` yet — the path that protects a machine installed by `dd`, which is all
+of them.
+
+The root key is a development key: its private half is on the build host, and every place
+that reports a signature says so, including the appliance's own log line.
+
+Still unproven: revocation, which has tests and no history, and the half of rollback where
+the image boots but the system does not work. **Kernel images are still unsigned, so Secure
+Boot must be off** — that is ADR-0004 and separate from update signing.
 
 ## Known traps
 
@@ -500,6 +505,13 @@ be off** — that is ADR-0004 and separate from update signing.
   verdict and the version string with it, and the system that comes back is the older one,
   which cannot tell it is a replacement. `/var` is the only surface that survives, and it
   survives because of the rule that makes it awkward everywhere else.
+- **Two outcomes that both do nothing still need different words.** A check that found a
+  newer release and a check that found none took the same `Ok(None)` out of the updater, so
+  the page said "already up to date" directly underneath a line naming the version it had
+  just found. Both are true statements about the machine and only one answers the question
+  that was asked. Found in the first minute of driving the signed path on the appliance,
+  having survived every test, because a test asserts what a function returns and this was a
+  defect in what the return *meant*.
 - **A schema written before the artefact exists describes an artefact that does not
   exist.** `plexos-types::manifest` had one `uki` field and one `os_version` of the form
   `MAJOR.MINOR.PATCH`. PlexOS builds two UKIs, because `plexos.slot=` is on the command

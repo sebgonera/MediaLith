@@ -41,7 +41,9 @@ pub mod cmdline;
 pub mod execute;
 pub mod plan;
 pub mod state;
+pub mod supervise;
 
 pub use cmdline::BootArgs;
 pub use plan::{BootStep, boot_plan};
 pub use state::StateAction;
+pub use supervise::{Service, Supervisor};

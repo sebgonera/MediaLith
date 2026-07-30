@@ -291,15 +291,20 @@ impl Job {
     }
 
     /// Records the outcome.
-    pub fn finish(&self, outcome: Result<Option<String>, String>) {
+    pub fn finish(&self, outcome: Result<Outcome, String>) {
         self.with(|state| match outcome {
-            Ok(Some(version)) => {
+            Ok(Outcome::Written(version)) => {
                 state.phase = Phase::Ready;
                 state.detail = format!("{version} is written and will be tried on restart");
                 push(&mut state.log, state.detail.clone());
                 state.staged = Some(version);
             }
-            Ok(None) => {
+            Ok(Outcome::Available(version)) => {
+                state.phase = Phase::Idle;
+                state.detail = format!("{version} is available, and nothing has been written");
+                push(&mut state.log, state.detail.clone());
+            }
+            Ok(Outcome::UpToDate) => {
                 state.phase = Phase::Idle;
                 "already up to date".clone_into(&mut state.detail);
                 push(&mut state.log, state.detail.clone());
@@ -348,6 +353,22 @@ pub fn source_in(body: &[u8]) -> String {
         .unwrap_or_else(|| DEFAULT_SOURCE.to_owned())
 }
 
+/// How a run ended, when it ended well.
+///
+/// Three outcomes and not two. A check that finds a newer release and a check that finds
+/// nothing both do the same thing — nothing — and reporting them the same way produced a
+/// page that said "already up to date" directly underneath a line naming the version it
+/// had just found. Seen on the appliance the first time this was driven end to end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// Written to the inactive slot; the version is waiting for a restart.
+    Written(String),
+    /// A newer version exists and was not asked for.
+    Available(String),
+    /// This appliance runs the newest release offered.
+    UpToDate,
+}
+
 /// Runs an update in a new thread, reporting into `job`.
 pub fn spawn(job: &Arc<Job>, source: String, install: bool) {
     let job = Arc::clone(job);
@@ -363,11 +384,7 @@ pub fn spawn(job: &Arc<Job>, source: String, install: bool) {
 /// Anything that stops the update. Nothing here can damage the running system: every
 /// write goes to the slot that is not running, and the boot entry that works is never
 /// touched.
-pub fn run(
-    job: &Job,
-    source: &str,
-    install: bool,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
+pub fn run(job: &Job, source: &str, install: bool) -> Result<Outcome, Box<dyn std::error::Error>> {
     if source.is_empty() {
         return Err(
             "no update source was given, and there is no default: paste the \
@@ -388,7 +405,7 @@ pub fn run(
     let (target, version) = match plexos_update::plan(slot, &running, &manifest)? {
         Decision::UpToDate { running } => {
             job.note(&format!("this appliance already runs {running}"));
-            return Ok(None);
+            return Ok(Outcome::UpToDate);
         }
         Decision::Install { target, version } => (target, version),
     };
@@ -397,11 +414,11 @@ pub fn run(
         "running {running} on slot {slot}; {version} would go to slot {target}"
     ));
     if !install {
-        return Ok(None);
+        return Ok(Outcome::Available(version));
     }
 
     write_slot(job, &curl, source, &manifest, target, &version, &running)?;
-    Ok(Some(version))
+    Ok(Outcome::Written(version))
 }
 
 /// Fetches the manifest and returns it only if this appliance may act on it.
@@ -815,7 +832,7 @@ mod tests {
         // there is one waiting, even after asking whether there is a newer one.
         let job = Job::new();
         job.begin();
-        job.finish(Ok(Some("0.1.0.2".to_owned())));
+        job.finish(Ok(Outcome::Written("0.1.0.2".to_owned())));
         assert_eq!(job.snapshot().staged.as_deref(), Some("0.1.0.2"));
 
         job.begin();
@@ -830,10 +847,25 @@ mod tests {
     fn being_up_to_date_is_not_a_failure() {
         let job = Job::new();
         job.begin();
-        job.finish(Ok(None));
+        job.finish(Ok(Outcome::UpToDate));
         let progress = job.snapshot();
         assert_eq!(progress.phase, Phase::Idle);
         assert!(progress.error.is_none());
+
+        // And the other way a run ends without writing anything. These were one outcome
+        // until the appliance reported "already up to date" under a line naming the
+        // version it had just found.
+        job.begin();
+        job.finish(Ok(Outcome::Available("0.1.0.9".to_owned())));
+        let progress = job.snapshot();
+        assert_eq!(progress.phase, Phase::Idle);
+        assert!(progress.error.is_none());
+        assert!(
+            progress.detail.contains("0.1.0.9")
+                && progress.detail.contains("nothing has been written"),
+            "a check that found an update must not read as one that found none: {}",
+            progress.detail
+        );
     }
 
     #[test]

@@ -20,15 +20,42 @@ use std::process::ExitCode;
 
 use plexos_init::cmdline::BootArgs;
 use plexos_init::execute::Log as _;
+use plexos_init::supervise::{self, Service};
 use plexos_init::{execute, plan, state};
 use plexos_types::paths;
 use plexos_types::version::STATE_LAYOUT_VERSION;
 
-/// Started by [`supervise_system`] until there is a real supervisor.
-const DEBUG_SHELL: &str = "/bin/sh";
-
 /// The health gate. Nothing else may declare a boot good (ADR-0005).
 const PLEXOSD: &str = "/usr/bin/plexosd";
+
+/// What PID 1 keeps running, in the order it starts them.
+///
+/// The console first, because it is what somebody reaches for when the shell below is not
+/// enough — and on the reference laptop, reading a diagnostic off a 2160x1440 panel is
+/// exactly the thing this project keeps trying not to have to do.
+///
+/// The shell is a service rather than the thing PID 1 turns into. Exiting it used to be a
+/// kernel panic; it now gives another shell, like a getty.
+static SERVICES: &[Service] = &[
+    Service {
+        name: "the status console",
+        program: PLEXOSD,
+        args: &["--serve"],
+        // PID 1 gets the environment the kernel provides, which is empty, and everything
+        // it spawns inherits that. glibc's execvp then falls back to `/bin:/usr/bin`
+        // while busybox installs `ip` and `udhcpc` into `/sbin` and `/usr/sbin`, so a
+        // program invoked by name fails with a bare ENOENT while the same name typed at
+        // the shell works. plexosd resolves those two by absolute path and no longer
+        // depends on this; anything added later would walk into it again.
+        env: &[("PATH", "/sbin:/usr/sbin:/bin:/usr/bin")],
+    },
+    Service {
+        name: "the console shell",
+        program: "/bin/sh",
+        args: &[],
+        env: &[("PATH", "/sbin:/usr/sbin:/bin:/usr/bin"), ("HOME", "/root")],
+    },
+];
 
 const USAGE: &str = "\
 plexos-init — PlexOS PID 1
@@ -158,34 +185,16 @@ fn supervise_system() -> ExitCode {
     //
     // Its failure is not this function's business. A machine with no cable still
     // boots, and still has a console on the screen saying so.
-    // PATH is set explicitly because this process has none. PID 1 gets the environment
-    // the kernel provides, which is empty, and glibc's execvp then falls back to
-    // `/bin:/usr/bin` — while busybox installs `ip` and `udhcpc` into `/sbin` and
-    // `/usr/sbin`. plexosd resolves those two by absolute path and no longer depends on
-    // this, but anything spawned here in future would inherit the same empty
-    // environment and fail the same way, with an ENOENT that names the program and
-    // explains nothing.
-    match std::process::Command::new(PLEXOSD)
-        .arg("--serve")
-        .env("PATH", "/sbin:/usr/sbin:/bin:/usr/bin")
-        .spawn()
-    {
-        Ok(_) => log.line("status console starting; it will print its URL when the link is up"),
-        Err(error) => log.line(&format!(
-            "could not start the status console: {error}. The system is otherwise \
-             unaffected — the shell below is the whole diagnostic surface without it."
-        )),
-    }
+    log.line("supervising: the status console, then a shell on this screen");
 
-    log.line("no supervisor yet: starting a shell (ARCHITECTURE.md section 2, step 6)");
-
-    match plexos_sys::process::exec(DEBUG_SHELL, &[]) {
-        Ok(never) => match never {},
-        Err(error) => fail(&format!(
-            "could not start {DEBUG_SHELL}: {error}. The system booted and /usr is \
-             mounted; only the shell is missing."
-        )),
-    }
+    // Never returns. PID 1 exiting is a kernel panic, so the only two acceptable ends for
+    // this function are looping forever and `fail`.
+    //
+    // What changed here is worth stating: this used to `exec` a shell, which made the
+    // shell PID 1 and left nothing that could restart anything or reap an orphan. Both
+    // gaps were invisible -- a crashed console had the power button for a remedy, and
+    // leaked zombies surface weeks later as `fork` failing somewhere unrelated.
+    supervise::run(SERVICES, &mut |line| log.line(line))
 }
 
 fn main() -> ExitCode {
