@@ -127,8 +127,16 @@ Next, in order:
    have its name typed, because a confirmation that can be clicked through is one that gets
    clicked through.
 
-   **Left:** the first-boot flow, and running the thing on hardware. **No disk has been
-   written yet.**
+   **It has run.** The reference laptop's internal 465 GiB Kingston — which had Windows on
+   it — was partitioned, written and booted: `/api/install` listed it as `EFI system
+   partition, Microsoft reserved partition, Basic data partition` so there was no mistaking
+   whose disk it was, all five refusals were exercised against the real machine first, and
+   the install took under two minutes. The machine now boots PlexOS from its internal disk
+   with an empty `/var`, which means a new device token, a new TLS key, and Plex reported as
+   not provisioned — a fresh appliance, exactly as ADR-0016 intended.
+
+   **Left:** the first-boot flow. And the label-ambiguity defect the install exposed, which
+   is the first entry in the trap list and is more urgent than the wizard.
 
 2. **`xe` firmware is not in the image at all**, only `i915/`. Found while fixing the
    GuC/HuC list. `CONFIG_DRM_XE=y`, so Arc parts bind — but a driver without its firmware
@@ -573,6 +581,18 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
   verdict and the version string with it, and the system that comes back is the older one,
   which cannot tell it is a replacement. `/var` is the only surface that survives, and it
   survives because of the rule that makes it awkward everywhere else.
+- **Everything in PlexOS resolves partitions by label, and an installer makes labels
+  ambiguous — including for the updater and for PID 1.** This is bigger than the console
+  bug below it and was found the same evening. With PlexOS installed to an internal disk and
+  the USB stick still plugged in, the machine has two partitions called `esp`, two called
+  `usr_a`, two called `var`. `plexos_sys::device::by_partlabel` returns whichever the kernel
+  enumerated first, and it is used by the updater to choose the partition to *write*, by
+  `esp::with_esp_mounted` to choose the ESP to install a boot entry on, and by `plexos-init`
+  to choose what to mount as `/usr` and `/var` at boot. An update installed in that state
+  went to a disk nothing in the code chose. It happened to be the right one; nothing made it
+  so. **Label resolution has to be scoped to the disk the running system is on**, and until
+  it is, a machine with two PlexOS disks attached is a machine whose updates land somewhere
+  arbitrary.
 - **Partition labels are not unique across disks, and an installer is what makes that
   true.** The console found the disk it was running from by resolving the ESP's partition
   label. That worked until the first successful install, at which point the machine had two
