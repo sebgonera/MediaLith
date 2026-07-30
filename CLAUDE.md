@@ -650,6 +650,13 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
   partitions are written the disk holds exactly two versions of `/usr`**, and an entry
   naming any other version is guaranteed not to boot. Prune before installing, not after,
   because the failure being prevented is running out of room during the install.
+- **There is an unreproduced flake in the suite, seen twice.** A single `cargo test
+  --workspace` failed once with `plexos-plex`'s `a_mkfs_without_the_compressor` and once
+  with nothing identifiable, and ten consecutive runs either side were clean both times. The
+  suspect is the shape below: that test writes a shell stub to a fixed path and then
+  executes it, which races with any other test in the same process that forks — `ETXTBSY` on
+  a file another thread holds open for writing. Recorded rather than guessed at, because a
+  speculative fix to a test that cannot be made to fail is a change nobody can check.
 - **A shared scratch path makes two passing tests into one flaky pair.** Rust runs tests as
   threads in one process, so a fixed temp file is a race: one test deletes what another is
   reading and they fail in whichever order the scheduler picked. Hit twice in one day —
