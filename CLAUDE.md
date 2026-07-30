@@ -506,6 +506,20 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
   verdict and the version string with it, and the system that comes back is the older one,
   which cannot tell it is a replacement. `/var` is the only surface that survives, and it
   survives because of the rule that makes it awkward everywhere else.
+- **The console is one inline script, so a syntax error anywhere stops the entire page.**
+  Every section sits on "Loading..." while the API answers perfectly, which reads as a dead
+  machine and is a dead *page*. It shipped from a second `const signature` inside a
+  function that already had one: a duplicate `const` is a **parse** error, so nothing ran
+  at all — not even the sections that had nothing to do with the change. Nothing in this
+  repository had ever parsed that file; the page's tests assert that strings appear in it,
+  which a completely broken script satisfies. `the_pages_script_parses` runs `node --check`
+  now, and announces a skip when no engine is installed, because a check nobody knows was
+  skipped is a check nobody has.
+- **A render cache keyed on the wrong fields hides the field you just added.** The update
+  section redraws only when one of a listed set of values changes, and a newly-verified
+  signature is the only thing that changes when a check runs — so the "Signed by" line
+  would have appeared on the next unrelated redraw and looked intermittent. Adding a field
+  to a page means adding it to whatever decides the page is stale.
 - **A daemon that spawns and never waits leaks a zombie per spawn, and only PID 1 reaping
   makes it visible.** `plexosd` starts `udhcpc` with `-b`, which forks — so the process it
   spawned exits at once and the resident client is a *grandchild*. The comment in `net.rs`

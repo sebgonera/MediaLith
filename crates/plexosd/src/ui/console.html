@@ -1352,13 +1352,17 @@ function renderUpdate(report) {
   const phase = report.phase || "idle";
   const busy = ["checking", "downloading", "writing", "activating"].includes(phase);
   const rollback = report.rollback;
-  const signature = JSON.stringify([
+  const signedWith = report.signature;
+  const rendered = JSON.stringify([
     phase, report.detail, report.error, report.running, report.slot,
     report.available, report.staged, report.gate, (report.log || []).length,
     rollback ? rollback.version : null,
+    // Part of the key, or a check that verifies a manifest would not redraw the section
+    // that says which key verified it: this is the only field that changes on its own.
+    signedWith ? signedWith.key_id : null,
   ]);
-  if (signature === lastUpdateRendered) return;
-  lastUpdateRendered = signature;
+  if (rendered === lastUpdateRendered) return;
+  lastUpdateRendered = rendered;
 
   const active = document.activeElement;
   const typing = active && active.id === "update-source";
@@ -1390,11 +1394,10 @@ function renderUpdate(report) {
   // Absent means nothing has been verified, which is not the same as unsigned and must
   // never render as reassurance. A development root key is reported by name: its private
   // half is on a build host, so "signed" alone would tell the reader something false.
-  const signature = report.signature;
-  const signedBy = signature
-    ? `<dt>Signed by</dt><dd class="mono">${esc(signature.key_id)} → ${esc(signature.root_key_id)}${signature.development ? " (development key)" : ""}</dd>`
+  const signedBy = signedWith
+    ? `<dt>Signed by</dt><dd class="mono">${esc(signedWith.key_id)} → ${esc(signedWith.root_key_id)}${signedWith.development ? " (development key)" : ""}</dd>`
     : "";
-  const developmentKey = signature && signature.development
+  const developmentKey = signedWith && signedWith.development
     ? "<strong>This update chain ends in a development root key</strong> — its private half is on a build host rather than offline, so it proves the bundle came from that build host and no more than that."
     : "";
 

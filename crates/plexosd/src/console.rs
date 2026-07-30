@@ -887,6 +887,57 @@ mod tests {
     }
 
     #[test]
+    fn the_pages_script_parses() {
+        // The console is one inline script, so **a syntax error anywhere in it stops the
+        // whole page**: every section stays on "Loading..." and the machine looks dead
+        // while its API answers perfectly. That is exactly what shipped once, from a
+        // second `const signature` in a function that already had one -- a duplicate
+        // `const` is a parse error, not a runtime one, so nothing rendered at all.
+        //
+        // Nothing else in this repository ever parsed this file. The tests below assert
+        // that strings are present in it, which a broken script satisfies completely.
+        //
+        // Skipped rather than failed when no JavaScript engine is installed: this must not
+        // make the suite unrunnable on a host that has no reason to carry one. A skip is
+        // announced, because a check nobody knows was skipped is a check nobody has.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has exactly one script block");
+
+        let engine = ["node", "deno", "qjs"].into_iter().find(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        });
+        let Some(engine) = engine else {
+            println!(
+                "skip: the console script was not parsed -- no node, deno or qjs on this \
+                 host. Install one, or a syntax error in the page will only be found by \
+                 loading it in a browser."
+            );
+            return;
+        };
+
+        let file = std::env::temp_dir().join("plexos-console-check.js");
+        std::fs::write(&file, script).expect("scratch is writable");
+        let checked = std::process::Command::new(engine)
+            .arg("--check")
+            .arg(&file)
+            .output()
+            .expect("the engine runs");
+        let _ = std::fs::remove_file(&file);
+
+        assert!(
+            checked.status.success(),
+            "the console's script does not parse, so no section of the page will render:\n{}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+    }
+
+    #[test]
     fn the_page_can_check_for_and_install_a_system_update() {
         assert!(
             PAGE.contains("\"/api/update\""),
