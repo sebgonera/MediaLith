@@ -94,6 +94,19 @@ pub enum Trial {
     /// ADR-0005 says two consecutive bad updates leave no known-good slot and need
     /// recovery media, and somebody has to be able to find that out.
     Exhausted,
+    /// This entry's last try was spent booting it, and another entry can still boot.
+    ///
+    /// The case ADR-0005 promised and never delivered. The bootloader chooses an entry
+    /// while it still has a try, decrements it, and boots it — so the third boot of a bad
+    /// update *runs* an entry that is exhausted by the time anything here looks. Nothing
+    /// restarts by itself after that, and `systemd-boot` sorts an exhausted entry below
+    /// every other, so the good slot is exactly one restart away and nothing will ask for
+    /// it. Watched happen: two restarts, then a machine sitting on a broken slot claiming
+    /// its slot was permanent.
+    Spent {
+        /// The entry that will win the next boot.
+        alternative: String,
+    },
     /// The ESP could not be read, so which of the others this is cannot be known.
     Unknown(String),
 }
@@ -141,7 +154,7 @@ impl Verdict {
         matches!(
             self,
             Self::Unhealthy {
-                trial: Trial::Counting { .. },
+                trial: Trial::Counting { .. } | Trial::Spent { .. },
                 ..
             }
         )
@@ -173,6 +186,13 @@ impl std::fmt::Display for Verdict {
                          try counter to spend and nothing rolls back. Restarting would \
                          loop forever and take away the console, so the machine stays up \
                          and this needs fixing by hand: {failures}"
+                    ),
+                    Trial::Spent { alternative } => write!(
+                        f,
+                        "NOT healthy, and this entry's last try was spent booting it, so \
+                         the machine restarts once more and {alternative} takes over -- \
+                         the bootloader sorts an entry with no tries left below every \
+                         other. That restart is the rollback: {failures}"
                     ),
                     Trial::Exhausted => write!(
                         f,
@@ -224,7 +244,7 @@ pub fn run(esp_device: Option<&str>, log: &mut dyn FnMut(&str)) -> Verdict {
                 .map(|c| format!("{}: {}", c.name, c.detail))
                 .collect(),
             trial: match &device {
-                Ok(device) => trial_state(device),
+                Ok(device) => trial_state(device, &crate::update::running_version()),
                 Err(error) => Trial::Unknown(error.clone()),
             },
         };
@@ -269,54 +289,35 @@ pub fn run_after_plex(
     run(esp_device, log)
 }
 
-/// Asks the ESP whether the bootloader is still counting this boot's tries.
+/// Asks the ESP what the bootloader thinks of the entry that booted.
 ///
-/// Read-only, and it answers a question about *this* boot from evidence about all the
-/// entries, which is only sound because of how few there are. Two slots, and an update
-/// puts exactly one entry on trial while leaving the other permanent — so a single entry
-/// on trial is the one that just booted. [`clear_counter`] leans on the same reasoning
-/// and refuses when more than one is on trial; this refuses in the same shape, because
-/// guessing here restarts a machine that had no reason to restart.
-fn trial_state(device: &str) -> Trial {
-    let mut found = Trial::Permanent;
+/// # It asks about *this* entry, by name
+///
+/// It used to infer which entry had booted from the shape of the set: one entry on trial
+/// meant that one had booted, none on trial plus a permanent one meant the permanent one
+/// had. The second half of that is wrong in the case it matters most. The bootloader picks
+/// an entry while it still has a try, decrements the counter, and boots it — so on the
+/// third boot of a bad update the running entry is *exhausted*, it is filtered out of the
+/// counting set, a good permanent entry exists, and the inference concluded that the good
+/// one was running. The machine then reported "this slot is already permanent" about a
+/// slot on trial, and stayed there.
+///
+/// That was watched happening on the reference laptop: two restarts, then a broken slot
+/// held for good with `plexos-<bad>+0-3.efi` and `plexos-<good>.efi` side by side on the
+/// ESP.
+///
+/// The running version names the entry exactly, so nothing has to be inferred. `os-release`
+/// is inside the `/usr` this boot mounted and dm-verity covers it, which makes it a
+/// stronger answer to "what booted" than anything on a FAT partition anybody can write.
+fn trial_state(device: &str, running: &str) -> Trial {
+    let mut found = Trial::Unknown("the ESP was not read".to_owned());
 
     let result = crate::esp::with_esp_mounted(device, &mut |esp_path| {
         let entries = crate::esp::entries(esp_path)?;
-
-        // Three sets, and the reason for three rather than two is a real rollback. An
-        // exhausted entry still carries its counter in the name, so `is_on_trial` is true
-        // for it -- and after one failed update the wreckage would have counted as a
-        // second entry on trial, making every later boot ambiguous and switching this off
-        // for good. The mechanism would have worked exactly once.
-        let counting: Vec<_> = entries
-            .iter()
-            .filter(|(_, e)| e.is_on_trial() && !e.is_exhausted())
-            .collect();
-        let exhausted = entries.iter().any(|(_, e)| e.is_exhausted());
-        let permanent = entries.iter().any(|(_, e)| !e.is_on_trial());
-
-        found = match counting.as_slice() {
-            [(_, entry)] => Trial::Counting {
-                // `is_on_trial` is exactly `tries_left.is_some()`, so this cannot be None
-                // here. Defaulted rather than unwrapped anyway: the cost of being wrong is
-                // a restart on a machine that had no counter to spend, and 0 reads as
-                // Exhausted's neighbour rather than as a licence to loop.
-                tries_left: entry.tries_left.unwrap_or(0),
-            },
-            // Nothing is being counted. Which entry booted then depends on whether a
-            // permanent one exists at all: systemd-boot sorts an exhausted entry below
-            // every good one, so if there is a good one, that is what we are running and
-            // the exhausted entry is somebody else's failure. If there is not, the
-            // bootloader had nothing but an entry it had already given up on -- and
-            // spending another try cannot change where the next boot lands.
-            [] if permanent => Trial::Permanent,
-            [] if exhausted => Trial::Exhausted,
-            [] => Trial::Permanent,
-            many => Trial::Unknown(format!(
-                "{} entries are on trial and there is no way to tell which one booted",
-                many.len()
-            )),
-        };
+        found = decide_trial(
+            &entries.iter().map(|(_, e)| e.clone()).collect::<Vec<_>>(),
+            running,
+        );
         Ok(())
     });
 
@@ -324,6 +325,53 @@ fn trial_state(device: &str) -> Trial {
         Ok(()) => found,
         Err(error) => Trial::Unknown(error.to_string()),
     }
+}
+
+/// What the entries on the ESP say about the boot that is running `running`.
+///
+/// Separated from the mount so it can be tested. The decision it makes ends in a reboot or
+/// in a machine left broken, and until this was pulled out the only way to exercise it was
+/// to install a bad update on real hardware — which is how the defect above was found, and
+/// is not a way to check the fix.
+#[must_use]
+pub fn decide_trial(entries: &[crate::bootcounter::BootEntry], running: &str) -> Trial {
+    let running_stem = format!("plexos-{running}");
+
+    let Some(booted) = entries.iter().find(|e| e.stem == running_stem) else {
+        // Not a state anything here produces, and not one to guess about: without the
+        // entry there is no counter to reason from, and staying up keeps the console.
+        return Trial::Unknown(format!(
+            "no boot entry on the ESP names {running}, which is the version running"
+        ));
+    };
+
+    if !booted.is_on_trial() {
+        return Trial::Permanent;
+    }
+
+    if !booted.is_exhausted() {
+        // `is_on_trial` is exactly `tries_left.is_some()`, so this cannot be None here.
+        // Defaulted rather than unwrapped anyway: the cost of being wrong is a restart on
+        // a machine that had no counter to spend.
+        return Trial::Counting {
+            tries_left: booted.tries_left.unwrap_or(0),
+        };
+    }
+
+    // Exhausted, and running. One restart reaches anything that still has a try or never
+    // had one, because systemd-boot orders entries with no tries left last -- read out of
+    // its source rather than assumed, in plexos_update's documentation.
+    entries
+        .iter()
+        .find(|e| e.stem != running_stem && !e.is_exhausted())
+        .map_or(
+            // Nothing else can boot. ADR-0005's "two bad updates leave no known-good
+            // slot": restarting would loop on the machine that most needs its console.
+            Trial::Exhausted,
+            |alternative| Trial::Spent {
+                alternative: alternative.to_string(),
+            },
+        )
 }
 
 /// Clears the try counter by renaming the entry on the ESP.
@@ -584,6 +632,139 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(5),
             "an unprovisioned machine must not wait: took {:?}",
             started.elapsed()
+        );
+    }
+
+    /// A boot entry as it appears on the ESP, from its filename.
+    fn entry(name: &str) -> crate::bootcounter::BootEntry {
+        crate::bootcounter::BootEntry::parse(name).expect("a well-formed entry name")
+    }
+
+    #[test]
+    fn the_last_try_being_spent_is_a_rollback_and_not_a_permanent_slot() {
+        // Watched on the reference laptop, and the reason this function exists. A bad
+        // update was installed, the gate restarted twice, and the third boot -- running an
+        // entry the bootloader had just spent the last try on -- reported "this slot is
+        // already permanent" and stayed there. The good system was one restart away and
+        // nothing was going to ask for it.
+        //
+        // The old inference: no entry is *counting* (the exhausted one is filtered out), a
+        // permanent entry exists, therefore the permanent one is what booted. It is not:
+        // the bootloader chose the bad entry while it still had a try, decremented it, and
+        // booted it.
+        let entries = [
+            entry("plexos-0.1.0.202607301330.efi"),
+            entry("plexos-0.1.0.202607301341+0-3.efi"),
+        ];
+
+        let trial = decide_trial(&entries, "0.1.0.202607301341");
+        assert!(
+            matches!(&trial, Trial::Spent { alternative } if alternative.contains("202607301330")),
+            "expected a rollback to the other entry, got {trial:?}"
+        );
+
+        let verdict = Verdict::Unhealthy {
+            failures: vec!["plex-http: installed but not answering".to_owned()],
+            trial,
+        };
+        assert!(
+            verdict.demands_restart(),
+            "the third restart is the rollback; without it ADR-0005 stops one boot short"
+        );
+        assert!(verdict.to_string().contains("takes over"), "{verdict}");
+    }
+
+    #[test]
+    fn a_boot_that_still_has_tries_counts_them_down() {
+        let entries = [
+            entry("plexos-0.1.0.202607301330.efi"),
+            entry("plexos-0.1.0.202607301341+2-1.efi"),
+        ];
+        assert_eq!(
+            decide_trial(&entries, "0.1.0.202607301341"),
+            Trial::Counting { tries_left: 2 }
+        );
+    }
+
+    #[test]
+    fn a_permanent_entry_is_recognised_as_the_one_running() {
+        // The healthy steady state, and the case the old inference got right.
+        let entries = [
+            entry("plexos-0.1.0.202607301330.efi"),
+            entry("plexos-0.1.0.202607301341+0-3.efi"),
+        ];
+        assert_eq!(
+            decide_trial(&entries, "0.1.0.202607301330"),
+            Trial::Permanent
+        );
+    }
+
+    #[test]
+    fn two_bad_updates_leave_nothing_to_fall_back_to_and_must_not_loop() {
+        // ADR-0005's genuine dead end. Both entries are spent, so a restart cannot reach
+        // anywhere new and would take away the console on the one machine that needs it.
+        let entries = [
+            entry("plexos-0.1.0.1+0-3.efi"),
+            entry("plexos-0.1.0.2+0-3.efi"),
+        ];
+        let trial = decide_trial(&entries, "0.1.0.2");
+        assert_eq!(trial, Trial::Exhausted);
+        assert!(
+            !Verdict::Unhealthy {
+                failures: vec!["x".to_owned()],
+                trial,
+            }
+            .demands_restart()
+        );
+    }
+
+    #[test]
+    fn an_esp_that_does_not_name_the_running_version_is_not_guessed_at() {
+        // Nothing here produces this, which is exactly why it must not be interpreted.
+        // Every other branch decides whether to reboot the machine.
+        let entries = [entry("plexos-0.1.0.202607301330.efi")];
+        let trial = decide_trial(&entries, "0.1.0.999");
+        assert!(
+            matches!(&trial, Trial::Unknown(why) if why.contains("0.1.0.999")),
+            "{trial:?}"
+        );
+        assert!(
+            !Verdict::Unhealthy {
+                failures: vec!["x".to_owned()],
+                trial,
+            }
+            .demands_restart(),
+            "an unknown state must stay up so it can be looked at"
+        );
+    }
+
+    #[test]
+    fn the_whole_three_boot_sequence_ends_back_on_the_working_slot() {
+        // The promise ADR-0005 makes, walked end to end: a bad update costs three reboots
+        // and lands on the system that was working. Each line is what the ESP holds when
+        // that boot's gate runs.
+        let good = "plexos-0.1.0.202607301330.efi";
+        let bad = "0.1.0.202607301341";
+
+        let restarts = [
+            "plexos-0.1.0.202607301341+2-1.efi",
+            "plexos-0.1.0.202607301341+1-2.efi",
+            "plexos-0.1.0.202607301341+0-3.efi",
+        ]
+        .into_iter()
+        .filter(|name| {
+            Verdict::Unhealthy {
+                failures: vec!["plex-http".to_owned()],
+                trial: decide_trial(&[entry(good), entry(name)], bad),
+            }
+            .demands_restart()
+        })
+        .count();
+
+        assert_eq!(
+            restarts, 3,
+            "every boot of a bad slot must end in a restart, including the last -- it is \
+             the last one that reaches the working system"
         );
     }
 }

@@ -100,12 +100,18 @@ the hardware alone months before Plex existed on the machine.
 
 Next, in order:
 
-1. **Prove the other rollback path.** The unbootable-image branch has run (below). What
-   has not is the one where the image boots and the system does not work — the gate
-   restarting to spend a try, and the record it leaves on `/var`. That code is written and
-   tested and has never executed on hardware. Staging it needs a bundle that boots but
-   whose Plex cannot start, which is a realistic bad update and not obviously easy to
-   build deliberately.
+1. **Finish proving the other rollback path.** Half done, and it found a defect. A bundle
+   that booted with a Plex that could not start (a deliberately missing `losetup`, which is
+   the failure this project has had three times for real) was installed and watched: the
+   gate restarted to spend a try, twice, and the record on `/var` was written correctly —
+   both halves that had never executed. Then it **stopped one restart short**, parked on the
+   broken slot, and reported that the slot was permanent. See the trap below; the fix makes
+   the gate ask which entry booted rather than infer it, and adds `Trial::Spent`.
+
+   What remains is to run the same experiment against the fixed gate and see three restarts
+   end on the working slot, and a rollback record carrying `tries_left: 0` — the value
+   `rollback.rs` documents as "the one that changed slots" and that no machine has ever
+   written.
 
 2. **Installer and first-boot wizard.** Never started, and the reason it has not mattered
    is that the only installs so far were `dd` onto a disk by somebody who wrote the image.
@@ -506,6 +512,17 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
   verdict and the version string with it, and the system that comes back is the older one,
   which cannot tell it is a replacement. `/var` is the only surface that survives, and it
   survives because of the rule that makes it awkward everywhere else.
+- **The bootloader spends a try *to* boot an entry, so the entry running can already be
+  exhausted.** The gate inferred which entry had booted from the shape of the set — none
+  counting plus a permanent one present meant the permanent one was running — and that is
+  wrong exactly once, on the third boot of a bad update. `systemd-boot` picked the bad entry
+  while it still had one try, decremented it to `+0-3`, and booted it; the gate then filtered
+  the exhausted entry out, saw the good permanent one, and announced "this slot is already
+  permanent" about a slot on trial. Two restarts, then a machine parked on a broken system
+  with the working one a single reboot away and nothing to ask for it. **The running version
+  names its own entry**, so nothing needs inferring: `os-release` is inside the dm-verity
+  `/usr` this boot mounted, which makes it a better answer to "what booted" than anything on
+  a FAT partition.
 - **Every successful update left its predecessor's boot entry, and 25 of them filled the
   ESP.** `install_entry` never removes the entry that works — right, it is the way back —
   and nothing removed the ones before it. The reference laptop reached 25 entries on a
