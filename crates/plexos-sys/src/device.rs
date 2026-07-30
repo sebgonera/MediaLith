@@ -35,6 +35,13 @@ pub struct Partition {
     pub devname: String,
     /// GPT partition label, e.g. `usr_a`.
     pub partname: String,
+    /// GPT unique partition GUID, lower case.
+    ///
+    /// The only identifier here that is unique across disks. Labels are not — an installed
+    /// PlexOS with its installer stick attached has two partitions called `esp` — and this
+    /// is what `systemd-boot` reports in `LoaderDevicePartUUID` to say which one the
+    /// firmware actually booted.
+    pub partuuid: String,
 }
 
 impl fmt::Display for Partition {
@@ -51,19 +58,24 @@ impl fmt::Display for Partition {
 pub fn parse_uevent(contents: &str) -> Option<Partition> {
     let mut devname = None;
     let mut partname = None;
+    let mut partuuid = String::new();
 
     for line in contents.lines() {
         if let Some(value) = line.strip_prefix("DEVNAME=") {
             devname = Some(value.trim().to_owned());
         } else if let Some(value) = line.strip_prefix("PARTNAME=") {
             partname = Some(value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("PARTUUID=") {
+            partuuid = value.trim().to_ascii_lowercase();
         }
     }
 
     match (devname, partname) {
-        (Some(devname), Some(partname)) if !partname.is_empty() => {
-            Some(Partition { devname, partname })
-        }
+        (Some(devname), Some(partname)) if !partname.is_empty() => Some(Partition {
+            devname,
+            partname,
+            partuuid,
+        }),
         _ => None,
     }
 }
@@ -104,6 +116,66 @@ pub fn disk_of(partition: &str) -> String {
         return stem[..stem.len() - 1].to_owned();
     }
     stem.to_owned()
+}
+
+/// Where the firmware records what it booted, once `efivarfs` is mounted.
+///
+/// The name is fixed by the Boot Loader Interface: the vendor GUID is systemd's and the
+/// variable is set by `systemd-boot` itself.
+pub const LOADER_DEVICE_PART_UUID: &str =
+    "LoaderDevicePartUUID-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
+
+/// Reads the partition GUID of the ESP the firmware booted from.
+///
+/// # The only authoritative answer at boot
+///
+/// Everything else PlexOS could ask is ambiguous once a machine has two PlexOS disks: the
+/// labels are duplicated, and the running system has not been assembled yet so there is no
+/// device-mapper device to work back from. `systemd-boot` knows, because it is the thing
+/// the firmware loaded, and it writes the answer here.
+///
+/// An EFI variable begins with four bytes of attributes; the value is UTF-16. Both are
+/// handled by taking every ASCII character after the first four bytes, which is enough for
+/// a GUID and refuses to be clever about anything else.
+///
+/// `None` when the variable is absent — booted by something other than `systemd-boot`, or
+/// `efivarfs` not mounted. Callers must fall back rather than fail: a machine with one disk
+/// has always booted correctly without this.
+#[must_use]
+pub fn booted_partuuid(efivars: &str) -> Option<String> {
+    let raw = fs::read(format!("{efivars}/{LOADER_DEVICE_PART_UUID}")).ok()?;
+    let text: String = raw
+        .get(4..)?
+        .iter()
+        .filter(|b| b.is_ascii_graphic())
+        .map(|b| char::from(*b))
+        .collect();
+
+    (text.len() == 36).then(|| text.to_ascii_lowercase())
+}
+
+/// The disk carrying the partition with this GUID.
+///
+/// # Errors
+/// If no partition carries it, which means the firmware booted something this kernel
+/// cannot see — a disk unplugged between the bootloader and now, most plausibly.
+pub fn disk_with_partuuid(partuuid: &str) -> io::Result<String> {
+    let wanted = partuuid.to_ascii_lowercase();
+    labelled_partitions()?
+        .iter()
+        .find(|p| p.partuuid == wanted)
+        .map(|p| disk_of(&p.devname))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "no partition has the GUID {wanted}, which is the one the boot loader \
+                     says it started from. Remedy: the disk it booted is not visible to \
+                     this kernel -- unplugged between the bootloader and now, or a \
+                     controller this kernel has no driver for."
+                ),
+            )
+        })
 }
 
 /// Resolves a label to a device, considering only partitions on `disk`.
@@ -263,9 +335,96 @@ pub fn wait_for_partlabel(
 ///
 /// If the path names a label that no partition carries.
 pub fn resolve(path: &str, log: &mut dyn FnMut(&str)) -> io::Result<String> {
-    match path.strip_prefix("/dev/disk/by-partlabel/") {
-        Some(label) => wait_for_partlabel(label, DEVICE_TIMEOUT, log),
-        None => Ok(path.to_owned()),
+    resolve_on(None, path, log)
+}
+
+/// [`resolve`], preferring partitions on `disk`.
+///
+/// `None` means "any disk", which is what a machine with one PlexOS disk has always meant
+/// and what this did before an installer existed.
+///
+/// # Errors
+/// As [`resolve`], and additionally if `disk` is given and carries no such label — which is
+/// a machine whose boot disk is missing a partition its own boot loader expected.
+pub fn resolve_on(disk: Option<&str>, path: &str, log: &mut dyn FnMut(&str)) -> io::Result<String> {
+    let Some(label) = path.strip_prefix("/dev/disk/by-partlabel/") else {
+        return Ok(path.to_owned());
+    };
+
+    // Waited for first, whatever the disk: enumeration is what is slow, and a USB stick
+    // that has not appeared yet has no partitions to prefer between.
+    let any = wait_for_partlabel(label, DEVICE_TIMEOUT, log)?;
+    let Some(disk) = disk else {
+        return Ok(any);
+    };
+
+    match by_partlabel_on(disk, label) {
+        Ok(scoped) => {
+            if scoped != any {
+                log(&format!(
+                    "{label} is on more than one disk; using {scoped} because the firmware \
+                     booted {disk}, not {any}"
+                ));
+            }
+            Ok(scoped)
+        }
+        // The boot disk has no such partition. Reported and then the unscoped answer is
+        // used: refusing here would turn a machine that boots today into one that does
+        // not, over a preference.
+        Err(error) => {
+            log(&format!(
+                "{error}. Falling back to {any}, which is what this did before the boot \
+                 disk could be identified."
+            ));
+            Ok(any)
+        }
+    }
+}
+
+/// Where `efivarfs` is mounted while the boot disk is being identified.
+const EFIVARS_MOUNT: &str = "/run/plexos-efivars";
+
+/// The disk the firmware booted from, if it can be established.
+///
+/// Mounts `efivarfs`, reads what `systemd-boot` left there, and unmounts it again. Done
+/// here rather than as a boot-plan step because it is a question, not a piece of the
+/// assembled system: nothing after this needs `efivarfs` and leaving it mounted would put
+/// the firmware's variable store inside a running appliance for no reason.
+///
+/// `None` for every failure, each logged. A machine with one PlexOS disk has always booted
+/// without this, and turning "I could not ask" into a failed boot would be a worse trade
+/// than the ambiguity it removes.
+#[must_use]
+pub fn booted_disk(log: &mut dyn FnMut(&str)) -> Option<String> {
+    if let Err(error) = fs::create_dir_all(EFIVARS_MOUNT) {
+        log(&format!("could not make {EFIVARS_MOUNT}: {error}"));
+        return None;
+    }
+
+    if let Err(error) = crate::mount::mount("efivarfs", EFIVARS_MOUNT, "efivarfs", "nosuid,nodev") {
+        log(&format!(
+            "efivarfs would not mount ({error}), so which disk the firmware booted is \
+             unknown. Partitions are resolved by label alone, which is what this did \
+             before."
+        ));
+        return None;
+    }
+
+    let found = booted_partuuid(EFIVARS_MOUNT);
+    let _ = crate::mount::unmount(EFIVARS_MOUNT);
+
+    let partuuid = found?;
+    match disk_with_partuuid(&partuuid) {
+        Ok(disk) => {
+            log(&format!(
+                "the firmware booted {disk} (partition {partuuid})"
+            ));
+            Some(disk)
+        }
+        Err(error) => {
+            log(&format!("{error}"));
+            None
+        }
     }
 }
 
@@ -291,8 +450,28 @@ mod tests {
             Some(Partition {
                 devname: "vda2".to_owned(),
                 partname: "usr_a".to_owned(),
+                partuuid: "8484680c-9521-48c6-9c11-b0720656f69e".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn a_partition_guid_is_read_from_the_same_uevent_as_the_label() {
+        // The fixture is a real one, and this is the field that makes a partition
+        // identifiable across disks when its label no longer is. No extra tool is needed
+        // for it -- which is the whole reason PID 1 can use it before anything is mounted.
+        let partition = parse_uevent(PARTITION).expect("a partition");
+        assert_eq!(partition.partuuid, "8484680c-9521-48c6-9c11-b0720656f69e");
+        assert_eq!(
+            partition.partuuid,
+            partition.partuuid.to_ascii_lowercase(),
+            "compared against an EFI variable that is upper case, so one side has to be \
+             normalised and it is this one"
+        );
+
+        // A disk whose GPT carries no names carries no GUID here either, and must not be
+        // mistaken for one with an empty GUID that could match an empty search.
+        assert_eq!(parse_uevent(UNNAMED), None);
     }
 
     #[test]
@@ -404,10 +583,12 @@ mod tests {
             Partition {
                 devname: "sda2".to_owned(),
                 partname: "usr_a".to_owned(),
+                partuuid: "07986889-de27-4a75-841a-274080495d3b".to_owned(),
             },
             Partition {
                 devname: "nvme0n1p2".to_owned(),
                 partname: "usr_a".to_owned(),
+                partuuid: "1ded502c-1540-504e-8a48-4974bd6de884".to_owned(),
             },
         ];
 

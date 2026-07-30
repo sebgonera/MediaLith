@@ -601,10 +601,14 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
   ESP: a working machine rolling back three boots later for no reason it could report.
   **Proven on the machine**: with both disks attached, an update written from the internal
   system landed on the internal disk and the stick's ESP was left exactly as it was —
-  where the same operation an hour earlier had written the other disk. `plexos-init` still
-  resolves by label at boot, and cannot use the same trick because dm-verity is what it is
-  in the middle of setting up; the answer there is the root hash on the kernel command
-  line, which identifies the right partition by definition.
+  where the same operation an hour earlier had written the other disk. **Both halves are now closed.**
+  `plexos-init` cannot use the same lookup — dm-verity is what it is in the middle of
+  setting up — so it asks the only thing that knows: `systemd-boot` writes the partition
+  GUID of the ESP the firmware loaded into `LoaderDevicePartUUID`, and the kernel already
+  puts `PARTUUID` in every partition's `uevent`. No extra tool, no GPT parsing, and the
+  answer is authoritative rather than inferred. Failing to establish it is *not* a failed
+  boot: it falls back to resolving by label, which is what every one-disk machine has always
+  done.
 - **Partition labels are not unique across disks, and an installer is what makes that
   true.** The console found the disk it was running from by resolving the ESP's partition
   label. That worked until the first successful install, at which point the machine had two

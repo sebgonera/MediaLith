@@ -198,7 +198,7 @@ pub fn bootstrap_proc() -> io::Result<()> {
 }
 
 /// Performs one step.
-fn perform(step: &BootStep, log: &mut dyn Log) -> io::Result<()> {
+fn perform(step: &BootStep, booted: Option<&str>, log: &mut dyn Log) -> io::Result<()> {
     match step {
         BootStep::MountPseudo {
             fstype,
@@ -236,8 +236,10 @@ fn perform(step: &BootStep, log: &mut dyn Log) -> io::Result<()> {
             // The plan names devices by GPT label, which is how ADR-0003 carries
             // slot identity. udev is what normally turns those into paths, and the
             // initrd has none, so resolve them here.
-            let data_device = plexos_sys::device::resolve(data_device, &mut |m| log.line(m))?;
-            let hash_device = plexos_sys::device::resolve(hash_device, &mut |m| log.line(m))?;
+            let data_device =
+                plexos_sys::device::resolve_on(booted, data_device, &mut |m| log.line(m))?;
+            let hash_device =
+                plexos_sys::device::resolve_on(booted, hash_device, &mut |m| log.line(m))?;
             let superblock = read_superblock(&hash_device)?;
             log.line(&format!(
                 "verity: {} blocks of {} bytes, {}",
@@ -261,7 +263,7 @@ fn perform(step: &BootStep, log: &mut dyn Log) -> io::Result<()> {
             fstype,
             options,
         } => {
-            let source = plexos_sys::device::resolve(source, &mut |m| log.line(m))?;
+            let source = plexos_sys::device::resolve_on(booted, source, &mut |m| log.line(m))?;
             mount::mount(&source, target, fstype, options)
         }
 
@@ -303,9 +305,21 @@ fn perform(step: &BootStep, log: &mut dyn Log) -> io::Result<()> {
 /// The first step that fails, with the step text included so the console says which
 /// one rather than only what the errno was.
 pub fn execute(steps: &[BootStep], log: &mut dyn Log) -> Result<Infallible, ExecError> {
+    // Asked once, before anything is resolved. A machine that has installed PlexOS onto a
+    // disk and still has the installer stick in it carries two partitions called `usr_a`
+    // and two called `var`, and a label alone cannot say which pair belongs to the system
+    // the firmware just booted. Mounting the wrong `/var` is the silent half of that: the
+    // machine comes up with another installation's media database, device token and
+    // certificate, and nothing reports anything wrong.
+    //
+    // `systemd-boot` knows, because it is what the firmware loaded, and it leaves the
+    // answer in an EFI variable. `None` is not a failure -- it is what every machine with
+    // one disk has always been, and the resolution falls back to what it did before.
+    let booted = plexos_sys::device::booted_disk(&mut |m| log.line(m));
+
     for (index, step) in steps.iter().enumerate() {
         log.line(&format!("{:>2}/{} {step}", index + 1, steps.len()));
-        perform(step, log).map_err(|source| ExecError {
+        perform(step, booted.as_deref(), log).map_err(|source| ExecError {
             step: step.to_string(),
             source,
         })?;
@@ -467,7 +481,11 @@ mod tests {
         let mut log = Collect(Vec::new());
         assert!(execute(&steps, &mut log).is_err());
         assert!(!Path::new("/should-never-be-created-by-tests").exists());
-        assert_eq!(log.0.len(), 1, "only the failing step should be announced");
+        assert_eq!(
+            announced(&log),
+            1,
+            "only the failing step should be announced"
+        );
     }
 
     #[test]
@@ -482,8 +500,21 @@ mod tests {
         }];
         let mut log = Collect(Vec::new());
         let _ = execute(&steps, &mut log);
-        assert_eq!(log.0.len(), 1);
-        assert!(log.0[0].starts_with(" 1/1 "), "{:?}", log.0[0]);
+        assert_eq!(announced(&log), 1);
+        assert!(log.0.iter().any(|l| l.starts_with(" 1/1 ")), "{:?}", log.0);
+    }
+
+    /// How many *steps* were announced.
+    ///
+    /// Counted rather than taking the whole log, because `execute` also reports what it
+    /// found out about the machine before it starts — which disk the firmware booted, or
+    /// why that could not be established. Asserting on the total made those two things one
+    /// number, and the first line of a boot log is not a step.
+    fn announced(log: &Collect) -> usize {
+        log.0
+            .iter()
+            .filter(|line| line.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+            .count()
     }
 
     #[test]
@@ -520,7 +551,7 @@ mod tests {
             options: "nosuid,nodev,noexec",
         };
         let mut log = Collect(Vec::new());
-        perform(&step, &mut log).expect("skipping an existing mount must succeed");
+        perform(&step, None, &mut log).expect("skipping an existing mount must succeed");
         assert!(
             log.0.iter().any(|l| l.contains("already mounted")),
             "the skip should be visible on the console: {:?}",
