@@ -135,8 +135,11 @@ Next, in order:
    with an empty `/var`, which means a new device token, a new TLS key, and Plex reported as
    not provisioned — a fresh appliance, exactly as ADR-0016 intended.
 
-   **Left:** the first-boot flow. And the label-ambiguity defect the install exposed, which
-   is the first entry in the trap list and is more urgent than the wizard.
+   **The label-ambiguity defect the install exposed is fixed**, in both halves and both
+   proven on the machine — see the first two entries in the trap list.
+
+   **Left:** the first-boot flow. The machine is sitting in exactly the state it is for,
+   which is the best moment to build it: freshly installed, newly claimed, no Plex.
 
 2. **`xe` firmware is not in the image at all**, only `i915/`. Found while fixing the
    GuC/HuC list. `CONFIG_DRM_XE=y`, so Arc parts bind — but a driver without its firmware
@@ -608,7 +611,9 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
   puts `PARTUUID` in every partition's `uevent`. No extra tool, no GPT parsing, and the
   answer is authoritative rather than inferred. Failing to establish it is *not* a failed
   boot: it falls back to resolving by label, which is what every one-disk machine has always
-  done.
+  done. **Proven with both disks attached and every label duplicated**: `plexos.slot=a`,
+  `/usr` backed by `nvme0n1p2` and `nvme0n1p3`, `/var` on `nvme0n1p6` — all on the disk the
+  firmware booted, where each of the three had previously been a coin toss.
 - **Partition labels are not unique across disks, and an installer is what makes that
   true.** The console found the disk it was running from by resolving the ESP's partition
   label. That worked until the first successful install, at which point the machine had two
