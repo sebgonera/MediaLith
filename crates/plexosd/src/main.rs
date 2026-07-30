@@ -27,7 +27,7 @@ OPTIONS:
     --serve          Bring the network up and serve the status console, staying in
                      the foreground. Does not run the gate: by the time this starts,
                      the gate has already returned its verdict.
-    --port <n>       Port for --serve (default: 80)
+    --port <n>       Port for --serve (default: 443, HTTPS)
     --mount-plex     Verify the provisioned Plex app image against its integrity
                      record and mount it (ADR-0007). Runs before the health gate,
                      because ARCHITECTURE.md step 6 starts services and step 7 is

@@ -59,6 +59,7 @@ pub mod settings;
 pub mod shares;
 pub mod status;
 pub mod terminal;
+pub mod tls;
 pub mod update;
 
 pub use bootcounter::BootEntry;

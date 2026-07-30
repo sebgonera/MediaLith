@@ -12,7 +12,7 @@
 #
 # The appliance then does the rest from its console page, or by hand:
 #
-#   curl -X POST http://<appliance>/api/update \
+#   curl -k -X POST https://<appliance>/api/update \
 #        -H "Authorization: Bearer <device token>" \
 #        -H 'Content-Type: application/json' \
 #        -d '{"install":true,"source":"http://<this host>:8080/plexos-update"}'

@@ -58,6 +58,14 @@ pub const REVOCATION_FILE: &str = "/var/lib/plexos/update/revocations.json";
 /// a note can outlive the thing it is about.
 pub const ROLLBACK_RECORD_FILE: &str = "/var/lib/plexos/update/rollback.json";
 
+/// The console's TLS identity: its key, its certificate, and what it was issued for.
+///
+/// On `/var` because the appliance issues its own certificate and the key must survive a
+/// reboot — and, more sharply, must survive an *update*. The fingerprint a person checked
+/// once is the fingerprint of this key; regenerating it on every boot would train them to
+/// ignore the one warning that matters.
+pub const TLS_DIR: &str = "/var/lib/plexos/tls";
+
 /// Pre-migration snapshots of small state (ADR-0009).
 pub const BACKUP: &str = "/var/lib/plexos/backup";
 
@@ -108,6 +116,7 @@ mod tests {
             UPDATE_STATE,
             ACCEPTED_SEQUENCE_FILE,
             REVOCATION_FILE,
+            TLS_DIR,
             BACKUP,
             PLEX_DATA,
             MEDIA,

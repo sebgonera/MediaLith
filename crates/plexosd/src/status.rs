@@ -57,6 +57,14 @@ pub struct Product {
     /// It holds no secret. Everything on it is readable by anyone with a shell, and
     /// two of its values were already published above.
     pub cmdline: Option<String>,
+    /// SHA-256 of the console's TLS public key, or `None` when it is not serving TLS.
+    ///
+    /// Here so the check is possible without the attached screen for anyone who has
+    /// *already* reached the console once: compare it against what the browser shows.
+    /// It is not a secret — it is a hash of a public key, and the browser shows it to
+    /// anyone who connects — and it cannot stand in for the first comparison, which has
+    /// nowhere to happen but the screen. ADR-0014 called that unresolved and it stays so.
+    pub tls_fingerprint: Option<String>,
 }
 
 /// An interface as the page shows it.
@@ -179,6 +187,7 @@ impl Status {
                 slot: cmdline_value(&cmdline, KEY_SLOT),
                 root_hash: cmdline_value(&cmdline, KEY_ROOTHASH),
                 cmdline: (!cmdline.trim().is_empty()).then(|| cmdline.trim().to_owned()),
+                tls_fingerprint: crate::tls::fingerprint(),
             },
             healthy: health.is_healthy(),
             health,

@@ -19,6 +19,8 @@ plexos-sys = { path = "../plexos-sys" }
 plexos-types = { path = "../plexos-types" }
 # Replacing /usr over the network: the slot decision, the writer, the bundle format.
 plexos-update = { path = "../plexos-update" }
+rcgen = { workspace = true }
+rustls = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
 serde_json = { workspace = true }

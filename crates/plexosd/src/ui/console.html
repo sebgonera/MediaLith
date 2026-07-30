@@ -982,9 +982,12 @@ function terminalCard() {
         <h3 style="margin:0">Terminal</h3>
         <span class="state" id="term-status">no session</span>
       </div>
-      <p class="warn"><strong>A root shell, over plain HTTP.</strong> The device token
-        stops a passer-by, not somebody reading the network. ADR-0014: this console is
-        for a trusted LAN and is not fit to expose beyond one.</p>
+      <p class="warn"><strong>A root shell.</strong> The connection is encrypted and the
+        device token stops a passer-by, but the certificate is one this machine issued
+        itself — so it proves nobody is <em>listening</em>, not that nobody is in the
+        middle. Compare the fingerprint below against the one your browser shows.
+        ADR-0014: this console is for a trusted LAN and is not fit to expose beyond
+        one.</p>
       <div class="row">
         <button id="term-open">Open a shell</button>
         <button id="term-close" class="ghost">Close</button>
@@ -1023,6 +1026,9 @@ function systemCard(status) {
         <dt>Slot</dt><dd class="mono">${esc(p.slot) || "unknown"}</dd>
         <dt>Version</dt><dd class="mono">${esc(p.version) || "unknown"}</dd>
         <dt>Root hash</dt><dd class="mono">${esc(p.root_hash) || "unknown"}</dd>
+        ${p.tls_fingerprint
+          ? `<dt>Certificate</dt><dd class="mono" style="word-break:break-all">${esc(p.tls_fingerprint)}<br><span class="hint">SHA-256 of this console's key. Compare it with what your browser shows for the certificate — they must match. It does not change when the machine's address does.</span></dd>`
+          : ""}
       </dl>
     </div>`;
 }

@@ -118,6 +118,12 @@ pub struct Response {
     pub content_type: &'static str,
     /// The body.
     pub body: Vec<u8>,
+    /// Where to send the client instead, for a redirect.
+    ///
+    /// Part of the type rather than a header a caller remembers to add: a 301 without a
+    /// `Location` is a status code that tells a browser to go somewhere and does not say
+    /// where, which browsers render as an error page about this machine.
+    pub location: Option<String>,
 }
 
 impl Response {
@@ -128,6 +134,7 @@ impl Response {
             status: 200,
             content_type: "text/html; charset=utf-8",
             body: body.into(),
+            location: None,
         }
     }
 
@@ -138,6 +145,7 @@ impl Response {
             status: 200,
             content_type: "application/json; charset=utf-8",
             body: body.into(),
+            location: None,
         }
     }
 
@@ -148,6 +156,23 @@ impl Response {
             status,
             content_type: "text/plain; charset=utf-8",
             body: body.into().into_bytes(),
+            location: None,
+        }
+    }
+
+    /// A permanent redirect to `target`.
+    ///
+    /// 308 rather than 301: it preserves the method and the body, and a `POST /api/update`
+    /// that arrived in clear must not be silently turned into a `GET` of the same path by
+    /// a browser following the older code. It will be sent again over TLS, which is the
+    /// whole point.
+    #[must_use]
+    pub fn redirect(target: &str) -> Self {
+        Self {
+            status: 308,
+            content_type: "text/plain; charset=utf-8",
+            body: format!("This console is served over HTTPS: {target}\n").into_bytes(),
+            location: Some(target.to_owned()),
         }
     }
 
@@ -156,6 +181,7 @@ impl Response {
     pub fn reason(&self) -> &'static str {
         match self.status {
             200 => "OK",
+            308 => "Permanent Redirect",
             400 => "Bad Request",
             404 => "Not Found",
             405 => "Method Not Allowed",
@@ -177,11 +203,15 @@ impl Response {
              Content-Length: {}\r\n\
              Cache-Control: no-store\r\n\
              Connection: close\r\n\
-             \r\n",
+             {}\r\n",
             self.status,
             self.reason(),
             self.content_type,
-            self.body.len()
+            self.body.len(),
+            match &self.location {
+                Some(target) => format!("Location: {target}\r\n"),
+                None => String::new(),
+            }
         )
         .into_bytes();
 
@@ -313,15 +343,20 @@ fn read_head(stream: &mut impl BufRead) -> io::Result<Result<String, ParseError>
 }
 
 /// Handles one connection, from parse to response.
-fn handle(
-    stream: &mut TcpStream,
+///
+/// Generic over the stream because the same code serves a plain socket and a TLS one, and
+/// the alternative -- a second copy of the request path behind TLS -- is two parsers that
+/// drift. The timeouts are set by the caller, which is the only place that still knows it
+/// is holding a `TcpStream`.
+fn handle<S: Read + Write>(
+    stream: &mut S,
     credential: &crate::auth::Credential,
     handler: &(impl Fn(&Request) -> Response + ?Sized),
 ) -> io::Result<()> {
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
-
-    let mut reader = BufReader::new(stream.try_clone()?);
+    // Scoped, so the borrow ends before the response is written. Anything the reader
+    // buffered past the body is discarded with it, which is already this server's
+    // behaviour: one request per connection, no keep-alive.
+    let mut reader = BufReader::new(&mut *stream);
     let (response, with_body) = match read_head(&mut reader)? {
         Err(error) => (error.response(), true),
         Ok(head) => match parse_request(&head) {
@@ -339,6 +374,7 @@ fn handle(
         },
     };
 
+    drop(reader);
     stream.write_all(&response.to_bytes(with_body))?;
     stream.flush()
 }
@@ -427,13 +463,134 @@ where
                 let handler = std::sync::Arc::clone(&handler);
                 std::thread::spawn(move || {
                     let credential = crate::auth::current();
-                    let _ = handle(&mut stream, &credential, handler.as_ref());
+                    if set_timeouts(&stream).is_ok() {
+                        let _ = handle(&mut stream, &credential, handler.as_ref());
+                    }
                 });
             }
             Err(error) => log(&format!("could not accept a connection: {error}")),
         }
     }
     Ok(())
+}
+
+/// Serves the console over TLS (ADR-0014).
+///
+/// The same handler and the same request path as [`serve`]; only the bytes on the wire
+/// differ. A handshake that fails is logged and the connection dropped — the commonest
+/// cause by far is somebody typing `http://` at this port, and the second is a browser
+/// refusing the self-signed certificate, neither of which is a fault of this machine.
+///
+/// # Errors
+/// If accepting fails in a way that ends the loop.
+pub fn serve_tls<F>(
+    listener: &TcpListener,
+    config: &std::sync::Arc<rustls::ServerConfig>,
+    credential: crate::auth::Credential,
+    handler: F,
+    log: &mut dyn FnMut(&str),
+) -> io::Result<()>
+where
+    F: Fn(&Request) -> Response + Send + Sync + 'static,
+{
+    let handler = std::sync::Arc::new(handler);
+    crate::auth::install(credential);
+
+    for incoming in listener.incoming() {
+        match incoming {
+            Ok(stream) => {
+                let handler = std::sync::Arc::clone(&handler);
+                let config = std::sync::Arc::clone(config);
+                std::thread::spawn(move || {
+                    let credential = crate::auth::current();
+                    if set_timeouts(&stream).is_err() {
+                        return;
+                    }
+                    // A failure here is not per-connection: the configuration was
+                    // accepted when the console started, or the console never started.
+                    if let Ok(connection) = rustls::ServerConnection::new(config) {
+                        let mut tls = rustls::StreamOwned::new(connection, stream);
+                        let _ = handle(&mut tls, &credential, handler.as_ref());
+                    }
+                });
+            }
+            Err(error) => log(&format!("could not accept a connection: {error}")),
+        }
+    }
+    Ok(())
+}
+
+/// Answers every request with a redirect to the same path over HTTPS.
+///
+/// The console listens on TLS only, so this exists to keep `http://<address>/` — which is
+/// what a person types and what every previous note in this repository tells them to type
+/// — from being a blank refusal.
+///
+/// It reads the request head to recover the `Host`, and nothing else. In particular it
+/// never looks at the body and never at the credential: a request that reaches this port
+/// has already been sent in clear, and the only useful thing left to do with it is to say
+/// where the encrypted door is.
+///
+/// # Errors
+/// If accepting fails in a way that ends the loop.
+pub fn serve_redirect(listener: &TcpListener, log: &mut dyn FnMut(&str)) -> io::Result<()> {
+    for incoming in listener.incoming() {
+        match incoming {
+            Ok(mut stream) => {
+                std::thread::spawn(move || {
+                    if set_timeouts(&stream).is_err() {
+                        return;
+                    }
+                    let mut reader = BufReader::new(match stream.try_clone() {
+                        Ok(clone) => clone,
+                        Err(_) => return,
+                    });
+                    let target = match read_head(&mut reader) {
+                        Ok(Ok(head)) => redirect_target(&head),
+                        _ => None,
+                    };
+                    let response = match target {
+                        Some(target) => Response::redirect(&target),
+                        None => Response::text(400, "This console speaks HTTPS. Try https://"),
+                    };
+                    let _ = stream.write_all(&response.to_bytes(true));
+                    let _ = stream.flush();
+                });
+            }
+            Err(error) => log(&format!("could not accept a connection: {error}")),
+        }
+    }
+    Ok(())
+}
+
+/// Where a cleartext request should be sent instead.
+///
+/// `None` when the request names no host, which a browser never does and a scanner often
+/// does — there is nowhere to send it, and inventing an address would be guessing at the
+/// one thing the client already knew.
+#[must_use]
+pub fn redirect_target(head: &str) -> Option<String> {
+    let request = parse_request(head).ok()?;
+    let host = request
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+        .map(|(_, value)| value.as_str())?;
+
+    // The port is dropped rather than translated. It is this listener's port -- the
+    // cleartext one -- and carrying it across would send the browser to https on the http
+    // port, which is a connection that hangs rather than one that fails.
+    let host = host.split(':').next().unwrap_or(host);
+    if host.is_empty() {
+        return None;
+    }
+    Some(format!("https://{host}{}", request.path))
+}
+
+/// Read and write deadlines, so one stuck client cannot hold a thread for ever.
+fn set_timeouts(stream: &TcpStream) -> io::Result<()> {
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))
 }
 
 #[cfg(test)]
@@ -709,5 +866,105 @@ mod tests {
             route(&get("/nope"), &crate::auth::Credential::Unset, &handler).status,
             404
         );
+    }
+
+    #[test]
+    fn a_cleartext_request_is_told_where_the_encrypted_door_is() {
+        // What a person gets for typing the address every note in this repository gave
+        // them. Without it the console is a refused connection on a machine that is
+        // working perfectly.
+        let head = "GET /api/status HTTP/1.1\r\nHost: 192.168.2.102\r\n";
+        assert_eq!(
+            redirect_target(head).as_deref(),
+            Some("https://192.168.2.102/api/status")
+        );
+    }
+
+    #[test]
+    fn the_cleartext_port_is_not_carried_across() {
+        // It is *this* listener's port. Carrying it over sends the browser to https on
+        // the http port, which hangs rather than failing -- the worse of the two.
+        let head = "GET / HTTP/1.1\r\nHost: 192.168.2.102:80\r\n";
+        assert_eq!(
+            redirect_target(head).as_deref(),
+            Some("https://192.168.2.102/")
+        );
+    }
+
+    #[test]
+    fn a_request_naming_no_host_is_not_sent_anywhere_invented() {
+        // Browsers always send Host; scanners often do not. There is nowhere to send it,
+        // and guessing an address would be guessing at the one thing the client knew.
+        assert_eq!(redirect_target("GET / HTTP/1.1\r\n"), None);
+        assert_eq!(redirect_target("GET / HTTP/1.1\r\nHost: \r\n"), None);
+    }
+
+    #[test]
+    fn a_redirect_carries_the_location_it_names() {
+        // A 308 without a Location is a status code that tells a browser to go somewhere
+        // and does not say where, which renders as an error page about this machine.
+        let bytes = Response::redirect("https://192.168.2.102/").to_bytes(true);
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.starts_with("HTTP/1.1 308 Permanent Redirect\r\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Location: https://192.168.2.102/\r\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_console_speaks_tls_to_a_client_that_is_not_this_code() {
+        // The check the console page taught this project to write. `cargo build` proves a
+        // TLS stack compiles; it does not prove a browser can talk to it, and the cost of
+        // finding that out on the appliance is an image that boots to no console at all.
+        //
+        // curl rather than a rustls client: an independent implementation, the same
+        // reason the verity digest is pinned against sha256sum rather than against
+        // another call to the same crate. `-k` because the certificate is self-signed by
+        // design -- what is under test is the handshake and the request path, not trust.
+        let curl = std::process::Command::new("curl").arg("--version").output();
+        if !curl.is_ok_and(|out| out.status.success()) {
+            println!("skip: no curl on this host, so the handshake was not exercised");
+            return;
+        }
+
+        let dir = std::env::temp_dir().join("plexos-tls-handshake");
+        let _ = std::fs::remove_dir_all(&dir);
+        let identity =
+            crate::tls::load_or_create(&dir, &["localhost".to_owned()]).expect("an identity");
+        let config = crate::tls::server_config(&identity).expect("a server config");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().unwrap().port();
+
+        std::thread::spawn(move || {
+            let mut log = |_: &str| {};
+            let _ = serve_tls(
+                &listener,
+                &config,
+                crate::auth::Credential::Unset,
+                |request| Response::text(200, format!("served {}", request.path)),
+                &mut log,
+            );
+        });
+
+        let out = std::process::Command::new("curl")
+            .args(["--silent", "--show-error", "--insecure", "--max-time", "20"])
+            .arg(format!("https://localhost:{port}/hello"))
+            .output()
+            .expect("curl runs");
+
+        let body = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "curl could not complete a handshake: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(body.trim(), "served /hello");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

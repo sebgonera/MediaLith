@@ -37,8 +37,19 @@ use crate::status::Status;
 /// The page itself. See the comment at the top of it for why it is embedded.
 pub const PAGE: &str = include_str!("ui/console.html");
 
-/// Default port. See the module documentation.
-pub const DEFAULT_PORT: u16 = 80;
+/// The port the console is served on.
+///
+/// TLS only. ADR-0014 deferred this while the update path was unsigned, on the grounds
+/// that closing the smaller opening first would imply a guarantee the system did not
+/// provide. ADR-0006 is finished and proven, so the guarantee is now real and the root
+/// shell no longer travels in clear.
+pub const HTTPS_PORT: u16 = 443;
+
+/// The port that redirects to it, and serves nothing else.
+pub const HTTP_PORT: u16 = 80;
+
+/// Default port: HTTPS, because that is the only thing this console serves (ADR-0014).
+pub const DEFAULT_PORT: u16 = HTTPS_PORT;
 
 /// Answers one request, against the machine described by `env`.
 ///
@@ -607,47 +618,40 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     };
 
     let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
-    let listener = TcpListener::bind(address).map_err(|error| {
-        // The remedy has to match the cause. "Try a higher port" is good advice for
-        // EACCES and actively misleading for EADDRINUSE, where the port is fine and
-        // something else is holding it.
-        let remedy = match error.kind() {
-            io::ErrorKind::PermissionDenied => {
-                "Ports below 1024 need root, and this is not running as root. Either \
-                 start it as root or pass --port with a number above 1024."
-                    .to_owned()
-            }
-            io::ErrorKind::AddrInUse => format!(
-                "Something is already listening on port {port}. Find it with \
-                 `netstat -tlnp | grep {port}`, or pass --port with a free one."
-            ),
-            _ => "Check that the address is one this machine can bind.".to_owned(),
-        };
-        io::Error::new(
-            error.kind(),
-            format!("could not bind {address}: {error}. {remedy}"),
-        )
-    })?;
-
+    let listener = bind(address)?;
     log(&format!("console listening on {address}"));
 
-    // After binding, so the socket exists as early as possible, and after configure
-    // rather than inside it, because udhcpc is spawned and never waited on. Printing
-    // the URL without this waiting step prints it before any lease can exist, which is
-    // to say never — the console worked and said nothing a person could act on.
-    if let Some(interface) = configured {
-        match net::wait_for_address(&System, &interface.name, net::LEASE_TIMEOUT, log) {
-            Some(found) => log(&format!("console at http://{}/", found.ip())),
-            None => log(&format!(
-                "{} is up but DHCP produced no address in {}s. The console is serving on \
-                 port {port} and unreachable until the interface has one. Check for a \
-                 DHCP server on this segment, or set an address by hand with \
-                 `ip addr add <a.b.c.d/nn> dev {}`.",
-                interface.name,
-                net::LEASE_TIMEOUT.as_secs(),
-                interface.name
-            )),
+    // Not fatal, and deliberately not the console. It exists so that `http://<address>/`
+    // -- what a person types, and what every note in this repository has told them to
+    // type -- lands on a redirect instead of a refused connection. A console on a high
+    // port is somebody testing, and taking port 80 as well is not something they asked
+    // for.
+    let cleartext = if port == HTTPS_PORT {
+        match bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, HTTP_PORT))) {
+            Ok(listener) => Some(listener),
+            Err(error) => {
+                log(&format!(
+                    "nothing will redirect http:// to https://: {error}"
+                ));
+                None
+            }
         }
+    } else {
+        None
+    };
+
+    let addresses = wait_for_addresses(configured, port, log);
+
+    // The certificate is issued here rather than before the wait, so that it names the
+    // address somebody is about to type. The socket is already bound, so a browser that
+    // arrives during this waits in the backlog instead of being refused.
+    let tls = identity_for(&addresses, log)?;
+
+    if let Some(cleartext) = cleartext {
+        std::thread::spawn(move || {
+            let mut log = |line: &str| println!("plexosd: {line}");
+            let _ = http::serve_redirect(&cleartext, &mut log);
+        });
     }
 
     // The credential is read once, here, and what it is decides how the console
@@ -728,12 +732,114 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     });
 
     let served_job = std::sync::Arc::clone(&job);
-    http::serve(
+    http::serve_tls(
         &listener,
+        &tls,
         credential,
         move |request| respond(request, &System, &served_job, &plex, &update),
         log,
     )
+}
+
+/// Binds a listener, with a remedy that matches the reason it failed.
+fn bind(address: SocketAddr) -> io::Result<TcpListener> {
+    let port = address.port();
+    TcpListener::bind(address).map_err(|error| {
+        // The remedy has to match the cause. "Try a higher port" is good advice for
+        // EACCES and actively misleading for EADDRINUSE, where the port is fine and
+        // something else is holding it.
+        let remedy = match error.kind() {
+            io::ErrorKind::PermissionDenied => {
+                "Ports below 1024 need root, and this is not running as root. Either                  start it as root or pass --port with a number above 1024."
+                    .to_owned()
+            }
+            io::ErrorKind::AddrInUse => format!(
+                "Something is already listening on port {port}. Find it with                  `netstat -tlnp | grep {port}`, or pass --port with a free one."
+            ),
+            _ => "Check that the address is one this machine can bind.".to_owned(),
+        };
+        io::Error::new(
+            error.kind(),
+            format!("could not bind {address}: {error}. {remedy}"),
+        )
+    })
+}
+
+/// Waits for the interface to get an address, and reports where the console is.
+///
+/// After binding, so the socket exists as early as possible, and after `configure` rather
+/// than inside it, because `udhcpc` is spawned and never waited on. Printing the URL
+/// without this waiting step prints it before any lease can exist, which is to say never
+/// — the console worked and said nothing a person could act on.
+fn wait_for_addresses(
+    configured: Option<net::Interface>,
+    port: u16,
+    log: &mut dyn FnMut(&str),
+) -> Vec<String> {
+    let mut addresses = Vec::new();
+    let Some(interface) = configured else {
+        return addresses;
+    };
+
+    match net::wait_for_address(&System, &interface.name, net::LEASE_TIMEOUT, log) {
+        Some(found) => {
+            addresses.push(found.ip().to_string());
+            log(&format!("console at https://{}/", found.ip()));
+        }
+        None => log(&format!(
+            "{} is up but DHCP produced no address in {}s. The console is serving on \
+             port {port} and unreachable until the interface has one. Check for a DHCP \
+             server on this segment, or set an address by hand with \
+             `ip addr add <a.b.c.d/nn> dev {}`.",
+            interface.name,
+            net::LEASE_TIMEOUT.as_secs(),
+            interface.name
+        )),
+    }
+    addresses
+}
+
+/// Issues or reloads the console's certificate and reports what a person has to check.
+fn identity_for(
+    addresses: &[String],
+    log: &mut dyn FnMut(&str),
+) -> io::Result<std::sync::Arc<rustls::ServerConfig>> {
+    let identity = crate::tls::load_or_create(
+        std::path::Path::new(plexos_types::paths::TLS_DIR),
+        &crate::tls::names_for(addresses, &hostname()),
+    )?;
+    crate::tls::remember(&identity.fingerprint);
+
+    // On the attached screen, which is the only place a fingerprint can be compared
+    // against what a browser shows before the first connection. ADR-0014 called that
+    // tension real and unresolved and it still is: this console exists so nobody needs
+    // the screen, and the one check that makes a self-signed certificate mean anything
+    // can happen nowhere else.
+    log(&format!(
+        "certificate fingerprint SHA256 {}",
+        identity.fingerprint
+    ));
+    if identity.key_is_new {
+        log(
+            "this is a new key, so a browser that trusted this console before will warn \
+             again. That is correct and worth reading: nothing else should have changed \
+             it.",
+        );
+    }
+
+    crate::tls::server_config(&identity)
+}
+
+/// This machine's host name, for the certificate.
+///
+/// Read from the kernel rather than from the configuration file: the configuration says
+/// what it should be and this says what it is, and a certificate has to name what a
+/// browser will actually be sent to.
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
 }
 
 #[cfg(test)]
