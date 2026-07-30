@@ -745,9 +745,10 @@ and its certificate — sign with the second one.
   partitions are written the disk holds exactly two versions of `/usr`**, and an entry
   naming any other version is guaranteed not to boot. Prune before installing, not after,
   because the failure being prevented is running out of room during the install.
-- **There is an unreproduced flake in the suite, seen twice.** A single `cargo test
-  --workspace` failed once with `plexos-plex`'s `a_mkfs_without_the_compressor` and once
-  with nothing identifiable, and ten consecutive runs either side were clean both times. The
+- **There is an unreproduced flake in the suite, seen three times.** A single `cargo test
+  --workspace` failed once with `plexos-plex`'s `a_mkfs_without_the_compressor` and twice
+  with nothing captured, against **more than fifty** deliberate consecutive runs that were
+  clean — so roughly one in twenty-five, and it has never been caught with output. The
   suspect is the shape below: that test writes a shell stub to a fixed path and then
   executes it, which races with any other test in the same process that forks — `ETXTBSY` on
   a file another thread holds open for writing. Recorded rather than guessed at, because a
