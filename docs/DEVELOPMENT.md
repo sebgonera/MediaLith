@@ -218,3 +218,64 @@ From that shell, `/proc/mounts` should show a tmpfs `/`, `/usr` as erofs on
 overlay. `touch /usr/anything` must fail with "Read-only file system": that is
 dm-verity and the read-only mount doing their job, and it is the cheapest check that
 the trust chain is actually assembled rather than merely configured.
+
+## Publishing an update
+
+An appliance installs only what a root key it carries has vouched for (ADR-0006), so a
+freshly built bundle is not yet something any machine will take. Signing is a separate
+step from the build on purpose: the key must not have to be on every host with a Buildroot
+tree, and a manifest has to be written exactly once, because the signature covers its
+exact bytes.
+
+### Once, per developer
+
+```
+cargo run -p plexos-update --bin plexos-sign -- root-key    ~/.plexos-keys/root-dev
+cargo run -p plexos-update --bin plexos-sign -- signing-key ~/.plexos-keys/signing-dev
+cargo run -p plexos-update --bin plexos-sign -- certify \
+    ~/.plexos-keys/root-dev ~/.plexos-keys/signing-dev \
+    plexos-signing-dev 2028-01-01T00:00:00Z > ~/.plexos-keys/signing-dev.cert
+cargo run -p plexos-update --bin plexos-sign -- trust ~/.plexos-keys/root-dev plexos-root-dev
+```
+
+The last command prints a `RootKey` to paste into `ROOT_KEYS` in
+`crates/plexos-update/src/trust.rs`. **An image trusts the keys it was built with**, so a
+machine already in the field will not believe a root key added after it was flashed: it has
+to take one more update signed by the key it already has, carrying the new one. That is
+what makes rotation a thing to plan rather than a thing to do.
+
+There is one such key today, `plexos-root-dev`, and it is marked `development: true`
+because its private half is a file on a build host rather than an offline secret. The
+console says so wherever it reports a signature. What it proves is "this came from that
+build host", which is a large improvement on "this came from whoever answered at that
+address" and is not the same as a root of trust.
+
+### Every publish
+
+```
+tools/sign-bundle.sh output/images/plexos-update \
+    ~/.plexos-keys/signing-dev ~/.plexos-keys/signing-dev.cert
+tools/publish-update.sh
+```
+
+`sign-bundle.sh` reads the `update.json` the build wrote, produces `manifest.json` and
+`manifest.json.sig`, and then verifies them with the same code the appliance runs — so
+"will the machine take this" is answered on the build host rather than after a 74 MB
+download onto a machine in another room. `publish-update.sh` refuses to serve a bundle with
+no signed manifest, for the same reason.
+
+The build stamp is load-bearing. `PLEXOS_VERSION` must end in `YYYYMMDDHHMM`, because that
+number is the manifest's anti-rollback `sequence` as well as the string `systemd-boot`
+orders boot entries by. `post-image.sh` defaults it from the clock, or from
+`SOURCE_DATE_EPOCH` when that is set.
+
+### Revoking a signing key
+
+```
+cargo run -p plexos-update --bin plexos-sign -- revoke \
+    ~/.plexos-keys/root-dev 1 plexos-signing-dev > output/images/plexos-update/revocations.json
+```
+
+Served beside the manifest, it is picked up on the next check and stored. The counter must
+increase with every list published: an appliance keeps the highest it has seen, so an older
+list — genuinely root-signed, from before the revocation — un-revokes nothing.

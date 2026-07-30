@@ -84,6 +84,48 @@ manifest during a support call has real value.
 **GPG signatures.** Rejected: a large attack surface and an awkward library story in
 Rust, for no benefit over Ed25519 here.
 
+## What implementing it changed, 2026-07-30
+
+The schema above was written before anything had been built, and three of its assumptions
+did not survive contact with the artefacts. All three were corrected in the schema rather
+than worked around in the updater, because no appliance had ever parsed a manifest — the
+deployed ones read an improvised `update.json` — so it was the last moment at which this
+was an edit rather than a migration.
+
+**There is one UKI per slot, not one per release.** `plexos.slot=` is on the kernel
+command line *inside* the UKI, and the appliance cannot build one: that needs `objcopy`,
+which is not in the image and should not be. `uki` is now `{ "a": …, "b": … }`. A device
+that wrote slot B and installed slot A's entry would boot the slot it was already running
+— an update that installs, reboots, and changes nothing.
+
+**`os_version` cannot express the version an image carries.** It is `MAJOR.MINOR.PATCH`,
+and PlexOS publishes `0.1.0.202607281844`. That full string is what `os-release` carries,
+what names the boot entry, and what `systemd-boot` orders entries by. A new `release` field
+carries it verbatim rather than composing it from parts, since recomposition is how a
+publisher and a device come to disagree about the version of the thing they are both
+holding. The parser refuses a manifest whose two version fields have drifted.
+
+**Sources are file names, not URLs.** An absolute URL fixed at signing time ties a bundle
+to the address it was built for, so moving it — which is every publish this project has
+done — would mean re-signing with a key that is supposed to be offline. A source is
+resolved against wherever the manifest itself was fetched from, and a name that is not a
+plain file name is refused rather than sanitised.
+
+Two further decisions follow from the same implementation:
+
+**`sequence` is the build stamp.** `202607281844` out of the version string. It is
+monotonic by construction, needs no counter to be kept anywhere, and cannot disagree with
+the release it describes. It also means the anti-rollback floor has a second source: the
+running image's own stamp, so a machine that has never taken an update — which is every
+machine installed by `dd` — still cannot be talked below what it is executing.
+
+**Certificate expiry is checked only when the clock can be believed.** This appliance has
+an RTC and no time synchronisation. A wrong clock that is believed refuses every future
+update, which from outside is indistinguishable from a bricked update path. A clock reading
+earlier than the image's own build stamp is definitely wrong, because an image cannot
+predate itself; in that case expiry goes unchecked, which costs the narrow protection of
+expiry and keeps the machine updatable. Revocation covers the case expiry was for.
+
 ## Consequences
 
 - Root key custody becomes an operational responsibility from the first public image.

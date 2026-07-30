@@ -3,7 +3,8 @@
 # Produce a deliberately broken copy of an update bundle, to exercise ADR-0005's
 # rollback on real hardware.
 #
-#   tools/break-bundle.sh <good-bundle-dir> <broken-bundle-dir> <version>
+#   tools/break-bundle.sh <good-bundle-dir> <broken-bundle-dir> <version> \
+#                         <signing-key> <certificate>
 #
 # The rollback path is the one branch of this project that a bug turns from "degrades"
 # into "bricks", and until it has actually run it is a claim rather than a fact. It
@@ -24,12 +25,17 @@
 # exists for -- a substituted or rotted /usr behind an intact hash tree -- so this tests
 # verified boot and rollback in one go.
 #
-# The manifest's sha256 for usr.erofs is recomputed to match the broken file. That is
-# not a workaround, it is the point: the updater must *accept* this bundle. It verifies
-# the download against the manifest and re-reads the partition after writing it, and
-# both checks should pass, because both are asking "did I receive and store the bytes I
-# was offered" and the answer is yes. Nothing in the update path is in a position to
-# know the bytes are wrong. Only verity is, at boot, which is the whole design.
+# The manifest's sha256 for usr.erofs is recomputed to match the broken file, and the
+# manifest is then re-signed. That is not a workaround, it is the point: the updater must
+# *accept* this bundle. It checks the signature, the sequence, the download digest and the
+# partition after writing it, and every one of those should pass, because every one is
+# asking "did I receive and store the bytes I was offered" and the answer is yes. Nothing
+# in the update path is in a position to know the bytes are wrong. Only verity is, at boot,
+# which is the whole design.
+#
+# Signing a bundle you have deliberately broken feels wrong and is exactly right: an
+# experiment that skipped it would be testing the signature check, which is a different
+# check that already has tests, and would prove nothing about ADR-0005.
 #
 # # Why the version is passed in rather than derived
 #
@@ -38,6 +44,10 @@
 # experiment that silently tests nothing. The version given here is what names the boot
 # entry; the version inside the image is left alone, and the difference is invisible
 # because this image is never going to get far enough to report anything.
+#
+# It must carry a build stamp, because the stamp is the anti-rollback sequence: a version
+# below the floor the appliance holds is refused before anything is downloaded, which is
+# the same silent nothing in a different disguise.
 #
 # # After the experiment
 #
@@ -51,13 +61,28 @@ set -euo pipefail
 GOOD="${1:-}"
 BROKEN="${2:-}"
 VERSION="${3:-}"
+KEY="${4:-}"
+CERT="${5:-}"
 
-if [ -z "${GOOD}" ] || [ -z "${BROKEN}" ] || [ -z "${VERSION}" ]; then
-    printf >&2 'usage: %s <good-bundle-dir> <broken-bundle-dir> <version>\n' "$0"
+if [ -z "${GOOD}" ] || [ -z "${BROKEN}" ] || [ -z "${VERSION}" ] \
+   || [ -z "${KEY}" ] || [ -z "${CERT}" ]; then
+    printf >&2 'usage: %s <good-bundle-dir> <broken-bundle-dir> <version> <signing-key> <certificate>\n' "$0"
     printf >&2 '  remedy: the first is output/images/plexos-update from a build; the\n'
-    printf >&2 '          third must sort above what the appliance is running\n'
+    printf >&2 '          third must sort above what the appliance is running, and the\n'
+    printf >&2 '          last two are what tools/sign-bundle.sh takes\n'
     exit 1
 fi
+
+case "${VERSION}" in
+    *.*.*.????????????)
+        ;;
+    *)
+        printf >&2 '%s carries no YYYYMMDDHHMM build stamp\n' "${VERSION}"
+        printf >&2 '  remedy: the stamp is the anti-rollback sequence, and a bundle below\n'
+        printf >&2 '          the appliance floor is refused before anything is downloaded\n'
+        exit 1
+        ;;
+esac
 
 [ -f "${GOOD}/update.json" ] || {
     printf >&2 'no update.json in %s, so that is not a bundle\n' "${GOOD}"
@@ -111,6 +136,11 @@ with open(path, "w") as f:
     json.dump(manifest, f, indent=2)
     f.write("\n")
 PYTHON
+
+# Re-signed, so the appliance accepts it and only verity can object. The manifest is
+# rewritten from the amended update.json rather than patched, for the reason above.
+rm -f "${BROKEN}/manifest.json" "${BROKEN}/manifest.json.sig"
+"$(dirname "$0")/sign-bundle.sh" "${BROKEN}" "${KEY}" "${CERT}"
 
 printf 'broken bundle at %s\n' "${BROKEN}"
 printf '  version:   %s  (must sort above what the appliance runs)\n' "${VERSION}"

@@ -288,6 +288,14 @@ check "with the same version in it" \
       "$(sed -n 's/^VERSION_ID=//p' "${MOCK}/target/usr/lib/os-release")" \
       "${PLEXOS_VERSION}"
 
+# The stamp is not cosmetic any more. It is the manifest's anti-rollback sequence
+# (ADR-0006) and the string systemd-boot orders entries by, so an image built without one
+# is an image that cannot be updated to and cannot refuse a replayed release. Neither
+# failure is visible from the outside: both look like an update that did nothing.
+assert "the version carries a YYYYMMDDHHMM build stamp" \
+       "printf '%s' \"${PLEXOS_VERSION}\" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]{12}$'" \
+       "build with PLEXOS_VERSION=0.1.0.\$(date -u +%Y%m%d%H%M), or let post-image.sh default it"
+
 # --------------------------------------------------------------------------
 stage "stage 4 — Unified Kernel Image"
 STUB="${MOCK}/images/linuxx64.efi.stub"

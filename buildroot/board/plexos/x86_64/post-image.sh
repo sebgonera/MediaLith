@@ -46,7 +46,24 @@ IMAGE="${BINARIES_DIR}/plexos.img"
 # usable /var. A real installation grows /var to the disk; this is a test image.
 PLEXOS_IMAGE_SIZE="${PLEXOS_IMAGE_SIZE:-8G}"
 
-PLEXOS_VERSION="${PLEXOS_VERSION:-0.1.0}"
+# The version, and with it the anti-rollback sequence.
+#
+# The default carries a UTC build stamp because a version without one cannot be updated
+# *to*: systemd-boot orders entries by this string, so two builds both called 0.1.0 sort
+# equal and the bootloader keeps choosing the entry already there -- an update that writes
+# a slot, installs an entry, reboots, and changes nothing. The stamp is also the manifest's
+# `sequence` (ADR-0006), which is what stops an old release being replayed at a machine.
+#
+# Taken from SOURCE_DATE_EPOCH when that is set, so a deliberately reproducible build stays
+# reproducible: the version reaches os-release, which is inside /usr, which is covered by
+# the verity root hash.
+if [ -z "${PLEXOS_VERSION:-}" ]; then
+    if [ "${SOURCE_DATE_EPOCH:-0}" -ne 0 ] 2>/dev/null; then
+        PLEXOS_VERSION="0.1.0.$(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y%m%d%H%M)"
+    else
+        PLEXOS_VERSION="0.1.0.$(date -u +%Y%m%d%H%M)"
+    fi
+fi
 
 # Reproducibility. mkfs.erofs stamps a build time and veritysetup generates a random
 # salt unless told otherwise; either one makes two builds of identical inputs produce
@@ -748,9 +765,14 @@ write_partition() {
 # not running from and installs the matching entry; it cannot build one itself, because
 # that needs objcopy and objcopy is not in the image.
 #
-# update.json is deliberately shaped like ADR-0006's manifest and carries none of its
-# guarantees. Nothing signs it. When the signed manifest exists it replaces this file and
-# the layers below it do not change.
+# update.json describes the bundle and is not what an appliance installs from. Two things
+# read it: tools/sign-bundle.sh, which turns it into the signed ADR-0006 manifest, and
+# appliances built before signing existed, which is the only reason it is still written at
+# all. Nothing signs it, and this release's updater does not parse it.
+#
+# The signing step is separate from the build on purpose. The key must not have to be on
+# every host with a Buildroot tree, and a manifest must be written exactly once -- the
+# signature covers its bytes, so a second tool that reformats it breaks it.
 build_bundle() {
     local bundle="${BINARIES_DIR}/plexos-update"
     msg "building update bundle"
