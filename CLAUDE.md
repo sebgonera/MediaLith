@@ -592,7 +592,13 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
   went to a disk nothing in the code chose. It happened to be the right one; nothing made it
   so. **Label resolution has to be scoped to the disk the running system is on**, and until
   it is, a machine with two PlexOS disks attached is a machine whose updates land somewhere
-  arbitrary.
+  arbitrary. **Fixed** by `by_partlabel_on(disk, label)` and a running-disk lookup that goes
+  through dm-verity's `slaves` rather than through a label — in the updater's partition
+  writes, the boot-entry install, the installer's own source resolution, and the health
+  gate, which clears the try counter and would otherwise have cleared it on another disk's
+  ESP: a working machine rolling back three boots later for no reason it could report.
+  `plexos-init` still resolves by label at boot, and cannot use the same trick because
+  dm-verity is what it is in the middle of setting up.
 - **Partition labels are not unique across disks, and an installer is what makes that
   true.** The console found the disk it was running from by resolving the ESP's partition
   label. That worked until the first successful install, at which point the machine had two

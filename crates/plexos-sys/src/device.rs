@@ -92,7 +92,74 @@ pub fn labelled_partitions() -> io::Result<Vec<Partition>> {
     Ok(found)
 }
 
+/// The whole disk a partition device name belongs to: `sda4` is `sda`, `nvme0n1p2` is
+/// `nvme0n1`.
+///
+/// **Takes a partition name.** A disk name cannot be told from a partition name by looking
+/// at it — `nvme0n1` is a disk, `sda1` is a partition, and both end in a digit.
+#[must_use]
+pub fn disk_of(partition: &str) -> String {
+    let stem = partition.trim_end_matches(|c: char| c.is_ascii_digit());
+    if stem.ends_with('p') && stem[..stem.len() - 1].ends_with(|c: char| c.is_ascii_digit()) {
+        return stem[..stem.len() - 1].to_owned();
+    }
+    stem.to_owned()
+}
+
+/// Resolves a label to a device, considering only partitions on `disk`.
+///
+/// # Why a label alone is not a question with one answer
+///
+/// It was, for as long as a PlexOS machine had one PlexOS disk. The installer ended that:
+/// a machine with the system on its internal drive and the USB stick still plugged in has
+/// **two** partitions labelled `esp`, two labelled `usr_a`, and two labelled `var`.
+/// [`by_partlabel`] returns whichever the kernel enumerated first, and that call chooses
+/// the partition an update is *written to* and the ESP a boot entry is installed on.
+///
+/// Observed, not theorised: an update installed in that state landed on a disk nothing in
+/// the code had chosen. It was the right one, and nothing made it so.
+///
+/// # Errors
+/// If `disk` has no partition with that label. The message names the disk, because "no
+/// partition labelled `usr_a`" is confusing on a machine that visibly has one.
+pub fn by_partlabel_on(disk: &str, label: &str) -> io::Result<String> {
+    let partitions = labelled_partitions()?;
+
+    if let Some(found) = partitions
+        .iter()
+        .find(|p| p.partname == label && disk_of(&p.devname) == disk)
+    {
+        return Ok(format!("/dev/{}", found.devname));
+    }
+
+    let elsewhere: Vec<&Partition> = partitions.iter().filter(|p| p.partname == label).collect();
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "{disk} has no partition labelled {label:?}{}. Remedy: this is the disk the \
+             running system is on, and it is the only one that may be written -- a label \
+             on another disk belongs to another installation.",
+            if elsewhere.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", though {} does",
+                    elsewhere
+                        .iter()
+                        .map(|p| p.devname.clone())
+                        .collect::<Vec<_>>()
+                        .join(" and ")
+                )
+            }
+        ),
+    ))
+}
+
 /// Resolves a GPT partition label to the device node `devtmpfs` created for it.
+///
+/// **Ambiguous once more than one PlexOS disk is attached**, which an installed machine
+/// with its installer stick still in it has. Prefer [`by_partlabel_on`] wherever the disk
+/// is known, and it is known wherever something is about to be written.
 ///
 /// # Errors
 ///
@@ -315,5 +382,42 @@ mod tests {
         // Not asserting what is found -- that depends on the machine -- only that
         // the scan itself succeeds against a real /sys/class/block.
         assert!(labelled_partitions().is_ok());
+    }
+
+    #[test]
+    fn a_partition_resolves_to_the_disk_it_is_on() {
+        assert_eq!(disk_of("sda4"), "sda");
+        assert_eq!(disk_of("nvme0n1p2"), "nvme0n1");
+        assert_eq!(disk_of("mmcblk0p1"), "mmcblk0");
+        assert_eq!(disk_of("vda1"), "vda");
+    }
+
+    #[test]
+    fn a_label_alone_stopped_being_a_question_with_one_answer() {
+        // The installer is what ended it. A machine with PlexOS on its internal disk and
+        // the stick it was installed from still plugged in carries two of every label, and
+        // the label is what chooses the partition an update is written to.
+        //
+        // This pins the *reason* rather than the mechanism: `by_partlabel_on` exists so
+        // that the question carries a disk, and deleting it would put the ambiguity back.
+        let both = [
+            Partition {
+                devname: "sda2".to_owned(),
+                partname: "usr_a".to_owned(),
+            },
+            Partition {
+                devname: "nvme0n1p2".to_owned(),
+                partname: "usr_a".to_owned(),
+            },
+        ];
+
+        let on = |disk: &str| {
+            both.iter()
+                .find(|p| p.partname == "usr_a" && disk_of(&p.devname) == disk)
+                .map(|p| p.devname.clone())
+        };
+        assert_eq!(on("sda").as_deref(), Some("sda2"));
+        assert_eq!(on("nvme0n1").as_deref(), Some("nvme0n1p2"));
+        assert_eq!(on("vdb"), None, "and a disk that has none says so");
     }
 }

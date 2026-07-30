@@ -495,6 +495,11 @@ fn write_slot(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Cleared at the start rather than the end: an interrupted update should leave what
     // it had, not tidy the evidence away.
+    // Every partition this writes is on the disk the running system is on, and nothing
+    // else. Without it, an update on a machine that has installed itself lands wherever
+    // the kernel happened to enumerate a duplicate label first.
+    let disk = &running_disk_or_refuse()?;
+
     let staging = Path::new(STAGING);
     let _ = std::fs::remove_dir_all(staging);
     std::fs::create_dir_all(staging)?;
@@ -531,16 +536,17 @@ fn write_slot(
         Phase::Writing,
         &format!("writing slot {target} and reading it back"),
     );
-    write_partition(job, target.usr_label(), &usr, &manifest.usr.image)?;
+    write_partition(job, disk, target.usr_label(), &usr, &manifest.usr.image)?;
     write_partition(
         job,
+        disk,
         target.verity_label(),
         &verity,
         &manifest.usr.verity.hashes,
     )?;
 
     job.step(Phase::Activating, "installing the boot entry, on trial");
-    let device = plexos_sys::device::by_partlabel(plexos_types::partition::LABEL_ESP)?;
+    let device = plexos_sys::device::by_partlabel_on(disk, plexos_types::partition::LABEL_ESP)?;
     let mut cleared = Vec::new();
     let installed = crate::esp::with_esp_mounted(&device, &mut |esp| {
         // Before the install, and inside the same mount. Both partitions have been
@@ -589,6 +595,21 @@ fn write_slot(
 
     let _ = std::fs::remove_dir_all(staging);
     Ok(())
+}
+
+/// The disk the running system is on, or a refusal to write anything.
+///
+/// `None` from [`crate::install::running_disk`] means the question could not be answered,
+/// and that is not the same as "any disk will do": it is the one state in which writing
+/// could land on a disk nobody chose.
+fn running_disk_or_refuse() -> Result<String, Box<dyn std::error::Error>> {
+    crate::install::running_disk(&plexos_gpu::env::System).ok_or_else(|| {
+        Box::<dyn std::error::Error>::from(
+            "this machine's own disk could not be identified, so nothing will be written. \
+             PlexOS finds it behind the verified /usr; not finding it means this is not a \
+             booted PlexOS system.",
+        )
+    })
 }
 
 /// The current time, if this appliance's clock is plausible enough to judge expiry.
@@ -713,6 +734,7 @@ fn stage(
 /// Writes one staged file to its partition.
 fn write_partition(
     job: &Job,
+    disk: &str,
     label: &str,
     staged: &Path,
     artifact: &plexos_types::manifest::Artifact,
@@ -720,6 +742,7 @@ fn write_partition(
     let mut file = std::fs::File::open(staged)?;
     let mut last = 0_u64;
     plexos_update::write::to_partition(
+        disk,
         label,
         &mut file,
         artifact.size,

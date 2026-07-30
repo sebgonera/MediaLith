@@ -232,8 +232,20 @@ pub fn run(esp_device: Option<&str>, log: &mut dyn FnMut(&str)) -> Verdict {
     // to `Unrecorded` and the unhealthy one to `Trial::Unknown`.
     let device = match esp_device.map(ToOwned::to_owned) {
         Some(explicit) => Ok(explicit),
-        None => plexos_sys::device::by_partlabel(ESP_LABEL)
-            .map_err(|error| format!("the ESP was not found: {error}")),
+        // On the disk the running system is on, not merely the first with that label.
+        // The counter this clears is what makes a slot permanent, and clearing it on
+        // another disk's ESP leaves the running entry on trial -- so a machine that is
+        // working perfectly rolls back three boots later, for no reason it can report.
+        None => match crate::install::running_disk(&plexos_gpu::env::System) {
+            Some(disk) => plexos_sys::device::by_partlabel_on(&disk, ESP_LABEL)
+                .map_err(|error| format!("the ESP was not found on {disk}: {error}")),
+            None => Err(
+                "this machine's own disk could not be identified, so the ESP cannot be \
+                 found. The boot counter is left alone, which means this slot rolls back \
+                 rather than becoming permanent."
+                    .to_owned(),
+            ),
+        },
     };
 
     if !health.is_healthy() {

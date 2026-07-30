@@ -94,16 +94,23 @@ impl std::error::Error for Error {}
 /// system is in the *other* slot and is untouched, so a half-written slot is a slot to
 /// write again rather than a machine to recover.
 pub fn to_partition(
+    disk: &str,
     label: &str,
     source: &mut impl Read,
     size: u64,
     expected_sha256: &str,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<String, Error> {
-    let device = plexos_sys::device::by_partlabel(label).map_err(|cause| Error::NoPartition {
-        label: label.to_owned(),
-        cause,
-    })?;
+    // Scoped to a disk, and that is the whole of the argument for this parameter: once
+    // PlexOS can install itself, a machine can carry two partitions with this label, and
+    // whichever the kernel enumerated first is not a choice anything made. An update
+    // installed in that state went to a disk nothing had chosen -- it was the right one,
+    // and nothing made it so.
+    let device =
+        plexos_sys::device::by_partlabel_on(disk, label).map_err(|cause| Error::NoPartition {
+            label: label.to_owned(),
+            cause,
+        })?;
 
     let mut target = OpenOptions::new()
         .write(true)
@@ -243,6 +250,7 @@ mod tests {
         // The realistic cause, and the one a person can act on. "No such file" would
         // send somebody looking for a bug in this code.
         let error = to_partition(
+            "no_such_disk_here",
             "no_such_label_here",
             &mut &b"x"[..],
             1,
@@ -279,6 +287,7 @@ mod tests {
         // would say so until dm-verity refused it three boots later.
         let mut short = &b"only four"[..];
         let error = to_partition(
+            "no_such_disk_here",
             "no_such_label_here",
             &mut short,
             1_000_000,

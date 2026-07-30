@@ -819,7 +819,8 @@ fn begin_install(
         Err(refusal) => return Response::text(400, format!("{refusal}\n")),
     };
 
-    let source = match crate::install::Source::resolve(crate::update::running_slot()) {
+    let source = match crate::install::Source::resolve(&source_disk, crate::update::running_slot())
+    {
         Ok(source) => source,
         Err(error) => {
             return Response::text(

@@ -349,17 +349,20 @@ pub struct Source {
 }
 
 impl Source {
-    /// Resolves the running system's partitions.
+    /// Resolves the running system's partitions, on the disk it is running from.
+    ///
+    /// Scoped to a disk for the reason above *and* one more: a second install, run from an
+    /// already-installed machine, would otherwise be able to copy the wrong system.
     ///
     /// # Errors
     /// If any of the three cannot be found, which means this is not a PlexOS disk and
     /// there is nothing to copy.
-    pub fn resolve(slot: plexos_types::Slot) -> io::Result<Self> {
+    pub fn resolve(disk: &str, slot: plexos_types::Slot) -> io::Result<Self> {
         Ok(Self {
             slot,
-            esp: plexos_sys::device::by_partlabel(plexos_types::partition::LABEL_ESP)?,
-            usr: plexos_sys::device::by_partlabel(slot.usr_label())?,
-            verity: plexos_sys::device::by_partlabel(slot.verity_label())?,
+            esp: plexos_sys::device::by_partlabel_on(disk, plexos_types::partition::LABEL_ESP)?,
+            usr: plexos_sys::device::by_partlabel_on(disk, slot.usr_label())?,
+            verity: plexos_sys::device::by_partlabel_on(disk, slot.verity_label())?,
         })
     }
 }
