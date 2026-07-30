@@ -3,8 +3,9 @@
   "product": "plexos",
   "channel": "stable",
   "os_version": "0.1.0",
-  "sequence": 1,
-  "created_at": "2026-07-27T00:00:00Z",
+  "release": "0.1.0.202607281844",
+  "sequence": 202607281844,
+  "created_at": "2026-07-28T18:44:00Z",
   "usr": {
     "format": "erofs",
     "image": {
@@ -13,7 +14,7 @@
       "sources": [
         {
           "kind": "full",
-          "url": "https://updates.example.invalid/plexos/0.1.0/usr.erofs"
+          "url": "usr.erofs"
         }
       ]
     },
@@ -25,21 +26,33 @@
         "sources": [
           {
             "kind": "full",
-            "url": "https://updates.example.invalid/plexos/0.1.0/usr.verity"
+            "url": "usr.hash"
           }
         ]
       }
     }
   },
   "uki": {
-    "size": 67108864,
-    "sha256": "fcde2b2edba56bf408601fb721fe9b5c338d10ee429ea04fae5511b68fbf8fb9",
-    "sources": [
-      {
-        "kind": "full",
-        "url": "https://updates.example.invalid/plexos/0.1.0/plexos.efi"
-      }
-    ]
+    "a": {
+      "size": 18973184,
+      "sha256": "fcde2b2edba56bf408601fb721fe9b5c338d10ee429ea04fae5511b68fbf8fb9",
+      "sources": [
+        {
+          "kind": "full",
+          "url": "plexos-0.1.0.202607281844-a.efi"
+        }
+      ]
+    },
+    "b": {
+      "size": 18973184,
+      "sha256": "084c799cd551dd1d8d5c5f9a5d593b2e931f5e36122ee5c793c1d08a19839cc0",
+      "sources": [
+        {
+          "kind": "full",
+          "url": "plexos-0.1.0.202607281844-b.efi"
+        }
+      ]
+    }
   },
   "signing": {
     "key_id": "plexos-signing-2026-01",

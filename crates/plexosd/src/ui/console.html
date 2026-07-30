@@ -1387,6 +1387,17 @@ function renderUpdate(report) {
        </div>`
     : "";
 
+  // Absent means nothing has been verified, which is not the same as unsigned and must
+  // never render as reassurance. A development root key is reported by name: its private
+  // half is on a build host, so "signed" alone would tell the reader something false.
+  const signature = report.signature;
+  const signedBy = signature
+    ? `<dt>Signed by</dt><dd class="mono">${esc(signature.key_id)} → ${esc(signature.root_key_id)}${signature.development ? " (development key)" : ""}</dd>`
+    : "";
+  const developmentKey = signature && signature.development
+    ? "<strong>This update chain ends in a development root key</strong> — its private half is on a build host rather than offline, so it proves the bundle came from that build host and no more than that."
+    : "";
+
   document.getElementById("update").innerHTML = `
     <h3>System update</h3>
     <dl>
@@ -1394,12 +1405,13 @@ function renderUpdate(report) {
       ${report.available ? `<dt>Offered</dt><dd class="mono">${esc(report.available)}</dd>` : ""}
       ${report.staged ? `<dt>Written</dt><dd class="mono">${esc(report.staged)} — restart to use it</dd>` : ""}
       ${report.gate ? `<dt>This boot</dt><dd>${esc(report.gate)}</dd>` : ""}
+      ${signedBy}
     </dl>
     ${rolledBack}
     <p class="hint">The update is written to the slot this machine is <em>not</em> running
        from, and the entry that works now is left alone. If the new one fails to boot three
        times the bootloader comes back to this one by itself.
-       ${report.trusted ? "" : "<strong>Nothing signs this bundle</strong> — whoever answers at the address below chooses what this appliance runs. For a bench, not for anything else."}</p>
+       ${developmentKey}</p>
     <div class="row">
       <input type="text" id="update-source" placeholder="paste the address publish-update.sh prints"
              autocomplete="off" spellcheck="false" value="${esc(sessionStorage.getItem(SOURCE_KEY) || "")}">

@@ -29,16 +29,32 @@
 //!   will keep choosing the old entry and the update will appear to do nothing.
 //! - **The running entry is never touched.** It is the rollback target, not litter.
 //!
-//! # What is trusted, today and later
+//! # What is trusted
 //!
-//! Today: nothing. The bundle is fetched over plain HTTP from a machine on the same LAN,
-//! and whoever can answer that request chooses what `/usr` this appliance runs. That is
-//! acceptable on a bench and nowhere else, it is stated in the console, and
-//! [`Metadata::TRUSTED`] is `false` so nothing can quietly forget it.
+//! ADR-0006's signed manifest, and nothing else. Until this crate carried [`trust`] the
+//! bundle was believed because of where it came from, which is acceptable on a bench and
+//! nowhere else — and since ADR-0014 that same LAN also offers a root shell, so the two
+//! openings were the same opening.
 //!
-//! Later: ADR-0006's signed manifest. The layers below this one — choosing the slot,
-//! writing the partitions, verifying what was written, installing the boot entry — do not
-//! change when that arrives. Only where the bytes come from and what vouches for them.
+//! Four independent things now have to be true before a byte is written, and they fail in
+//! four different directions on purpose:
+//!
+//! - **[`trust`]**: a root key certified the signing key, and that key signed these exact
+//!   manifest bytes. Refuses a document from anyone else.
+//! - **[`sequence`]**: the manifest is not older than one already accepted. Refuses a
+//!   *genuine* document being replayed, which every signature check would pass.
+//! - **[`plan`]**: it is for this product, in a format this release can mount, and it fits
+//!   the slot. Refuses an update that is honest and inapplicable.
+//! - **[`uki`]** and [`write`]: the bytes that arrived are the bytes the manifest named,
+//!   and the boot entry belongs to the slot being written. Refuses a bundle assembled
+//!   wrongly, which no signature can notice because the signature is over the mistake.
+//!
+//! The transport is not one of them, which is what makes it acceptable for the transport
+//! to be plain HTTP from a laptop on the LAN.
+//!
+//! The layers below all of this — choosing the slot, writing the partitions, verifying what
+//! was written, installing the boot entry — did not change when signing arrived. Only where
+//! the bytes come from and what vouches for them, exactly as this file predicted.
 //!
 //! # What has run
 //!
@@ -49,10 +65,16 @@
 
 #![forbid(unsafe_code)]
 
-pub mod bundle;
+pub mod atomic;
+pub mod clock;
+pub mod location;
 pub mod plan;
+pub mod sequence;
 pub mod trust;
+pub mod uki;
 pub mod write;
 
-pub use bundle::{Artifact, Metadata, MetadataError};
+pub use location::{LocationError, Role};
 pub use plan::{Decision, Refusal, plan};
+pub use sequence::SequenceError;
+pub use trust::{Policy, TrustError, Verified};

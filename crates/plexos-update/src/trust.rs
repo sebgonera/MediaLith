@@ -62,10 +62,71 @@ pub struct RootKey {
 
 /// The root keys this build believes.
 ///
-/// Empty until a key is generated, and an empty set is **not** a reason to accept
-/// anything. `tools/plexos-keygen.sh` writes the private half and prints the constant to
-/// paste here; the private half never enters the repository.
-pub const ROOT_KEYS: &[RootKey] = &[];
+/// An empty set is **not** a reason to accept anything: with no root key an appliance
+/// refuses every update, which is the safe direction and not a usable one.
+///
+/// The one entry here is a **development** key, and everything about how it is held is
+/// weaker than ADR-0006 asks for: its private half is a file on a build host, not an
+/// offline secret, so what a signature proves today is "this came from that build host".
+/// That is a large improvement on "this came from whoever answered at the address", which
+/// is what preceded it, and it is not the same as a root of trust. `development: true` is
+/// carried out of verification into [`Verified::development`] and onto the console page so
+/// that nothing anywhere says "signed" without saying signed by what.
+///
+/// Replacing it with a real one is not an edit to this constant alone: root keys change
+/// only with the image that carries them, so every deployed appliance has to take an
+/// update signed by the *old* key before it will believe the new one. Add the new key
+/// beside this one, ship that, and remove this one in a later release.
+///
+/// `plexos-sign root-key` writes the private half and `plexos-sign trust` prints the
+/// constant to paste here. The private half never enters the repository.
+pub const ROOT_KEYS: &[RootKey] = &[RootKey {
+    id: "plexos-root-dev",
+    public_key: [
+        0xc6, 0xfe, 0x18, 0x05, 0x9c, 0x19, 0x6b, 0x96, 0x0c, 0x4a, 0x35, 0xaa, 0xe8, 0xce, 0x87,
+        0xde, 0x2f, 0x28, 0xb0, 0xbb, 0x01, 0x4d, 0x2b, 0x5d, 0x08, 0x75, 0x5e, 0x78, 0xb9, 0x65,
+        0x39, 0x5c,
+    ],
+    development: true,
+}];
+
+/// Everything that decides whether a manifest may be believed.
+///
+/// One parameter rather than four, because these are not independent settings: they are
+/// the trust policy, and a caller that could pass three of them is a caller that can forget
+/// the fourth. The one most likely to be forgotten is [`Policy::revoked`], which is empty
+/// in the safe-looking direction.
+#[derive(Debug, Clone, Copy)]
+pub struct Policy<'a> {
+    /// The keys believed without proof.
+    pub roots: &'a [RootKey],
+    /// Signing key identifiers that must no longer be believed.
+    pub revoked: &'a [String],
+    /// The device's idea of the current time, RFC 3339, or `None` if it cannot tell.
+    ///
+    /// `None` skips the expiry check, and that is a decision the caller makes rather than
+    /// an accident: this appliance has no time synchronisation, and a wrong clock that is
+    /// believed refuses every future update. See [`expiry_is_checkable`].
+    pub now: Option<&'a str>,
+}
+
+impl<'a> Policy<'a> {
+    /// The policy of this image: its compiled-in roots, nothing revoked.
+    #[must_use]
+    pub const fn of_this_build(now: Option<&'a str>) -> Self {
+        Self {
+            roots: ROOT_KEYS,
+            revoked: &[],
+            now,
+        }
+    }
+
+    /// The same policy, with a revocation list applied.
+    #[must_use]
+    pub fn revoking(self, revoked: &'a [String]) -> Self {
+        Self { revoked, ..self }
+    }
+}
 
 /// Why a manifest was not believed.
 ///
@@ -107,10 +168,17 @@ pub enum TrustError {
         /// What the certificate actually authorises.
         certificate: String,
     },
+    /// The signing key is on a revocation list this device holds.
+    KeyRevoked {
+        /// The key the manifest was signed with.
+        key_id: String,
+    },
     /// The detached signature does not verify against the certified signing key.
     ManifestNotSigned(String),
     /// A key or signature was not a well-formed Ed25519 value.
     BadKeyMaterial(String),
+    /// A revocation list could not be read, or was not signed by a root key.
+    MalformedRevocations(String),
 }
 
 impl std::fmt::Display for TrustError {
@@ -119,8 +187,8 @@ impl std::fmt::Display for TrustError {
             Self::NoRootKeys => write!(
                 f,
                 "this build has no root keys compiled in, so no manifest can be \
-                 verified. Remedy: generate a root key with tools/plexos-keygen.sh and \
-                 paste the printed constant into ROOT_KEYS, then rebuild the image. An \
+                 verified. Remedy: generate one with `plexos-sign root-key`, paste what \
+                 `plexos-sign trust` prints into ROOT_KEYS, and rebuild the image. An \
                  appliance with no root keys refuses every update rather than accepting \
                  any, which is the safe direction and not a usable one."
             ),
@@ -172,6 +240,21 @@ impl std::fmt::Display for TrustError {
                 "the manifest says it was signed by {manifest} but its certificate \
                  authorises {certificate}. Remedy: treat this bundle as hostile; the two \
                  halves of it came from different places."
+            ),
+            Self::KeyRevoked { key_id } => write!(
+                f,
+                "this manifest was signed by {key_id}, which has been revoked. Remedy: \
+                 this update must not be installed even though its signature is valid -- \
+                 that is what revoking a key means. Publish with the current signing key. \
+                 If you believe the revocation is the mistake, it can only be undone by a \
+                 root-signed list with a higher counter, or by an OS update; there is \
+                 deliberately no way to withdraw one from the network."
+            ),
+            Self::MalformedRevocations(why) => write!(
+                f,
+                "the revocation list could not be used: {why}. Remedy: the list this \
+                 appliance already holds is unchanged and still in force, so nothing has \
+                 become more permissive. Re-publish the list with plexos-sign revoke."
             ),
             Self::ManifestNotSigned(why) => write!(
                 f,
@@ -228,39 +311,21 @@ pub struct Verified {
 
 /// Verifies a manifest, its detached signature, and the certificate chain behind it.
 ///
-/// `now` is the device's idea of the current time, RFC 3339, used only for certificate
-/// expiry. Passed in rather than read here so that the caller owns the decision about
-/// what to do with a clock it cannot trust — see [`expiry_is_checkable`].
+/// The policy is a parameter, including the root keys. That is partly so the accept path
+/// can be tested at all — with only the [`ROOT_KEYS`] constant to work from, every test
+/// would run against an empty trust store, exercising the refusal and nothing else, and a
+/// verifier that accepted everything would pass the suite. It is also the honest way to
+/// say what a set of root keys is: a parameter of the decision, not a property of the
+/// universe.
 ///
 /// # Errors
 /// Any break in the chain, each naming what to do about it.
 pub fn verify(
+    policy: &Policy<'_>,
     raw: &RawManifest,
     signature: &[u8],
-    now: Option<&str>,
 ) -> Result<Verified, TrustError> {
-    verify_against(ROOT_KEYS, raw, signature, now)
-}
-
-/// [`verify`], against a root key set given explicitly.
-///
-/// Exists so that the verification path can be tested end to end. With only the
-/// [`ROOT_KEYS`] constant to work from, every test would have to run against an empty
-/// trust store — which exercises the refusal and nothing else, and would leave the
-/// accept path entirely unproven while the suite reported success. That failure shape has
-/// already cost this project real bugs.
-///
-/// Also the honest way to express what a root key set *is*: a parameter of the decision,
-/// not a property of the universe.
-///
-/// # Errors
-/// As [`verify`].
-pub fn verify_against(
-    roots: &[RootKey],
-    raw: &RawManifest,
-    signature: &[u8],
-    now: Option<&str>,
-) -> Result<Verified, TrustError> {
+    let roots = policy.roots;
     if roots.is_empty() {
         return Err(TrustError::NoRootKeys);
     }
@@ -289,7 +354,7 @@ pub fn verify_against(
         .map_err(|e| TrustError::BadKeyMaterial(e.to_string()))?;
     verify_detached(&root_key, &body, &cert_signature).map_err(TrustError::CertificateNotSigned)?;
 
-    if let Some(now) = now
+    if let Some(now) = policy.now
         && now > certificate.not_after.as_str()
     {
         return Err(TrustError::CertificateExpired {
@@ -302,6 +367,16 @@ pub fn verify_against(
         return Err(TrustError::KeyIdMismatch {
             manifest: manifest.signing.key_id.clone(),
             certificate: certificate.key_id.clone(),
+        });
+    }
+
+    // After the certificate has been checked and before the manifest signature is. The
+    // order is what makes the answer mean anything: revoking is about the key the root
+    // actually certified, not about whatever the manifest claimed, and a revoked key must
+    // be refused whether or not it signed this document correctly.
+    if policy.revoked.contains(&certificate.key_id) {
+        return Err(TrustError::KeyRevoked {
+            key_id: certificate.key_id,
         });
     }
 
@@ -332,21 +407,124 @@ pub fn expiry_is_checkable(now: &str, image_built_at: &str) -> bool {
     now >= image_built_at
 }
 
+/// A root-signed list of signing keys that must no longer be believed.
+///
+/// Expiry alone cannot handle a compromised key: the certificate an attacker holds is
+/// valid until it expires, and shortening every certificate's life to shorten that window
+/// means a publisher who forgets to re-certify bricks the update path.
+///
+/// The counter is what stops the list itself being rolled back. A device keeps the highest
+/// it has seen, so serving an older list — genuinely root-signed, from before the
+/// revocation — un-revokes nothing.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Revocations {
+    /// Monotonic counter. A list may only be replaced by one carrying a higher value.
+    pub counter: u64,
+    /// Which root key vouches for this list.
+    pub root_key_id: String,
+    /// The signing key identifiers that are no longer believed.
+    pub revoked: Vec<String>,
+}
+
+impl Revocations {
+    /// An empty list, which revokes nothing and is superseded by any signed one.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            counter: 0,
+            root_key_id: String::new(),
+            revoked: Vec::new(),
+        }
+    }
+
+    /// Whether this list may replace `held`.
+    ///
+    /// Strictly higher. Equal counters with different contents means somebody published
+    /// two lists with one number, and the safe reading is to keep what is already in
+    /// force — a replacement can only ever remove entries, so "keep the old one" is the
+    /// direction that revokes more rather than less.
+    #[must_use]
+    pub fn supersedes(&self, held: &Self) -> bool {
+        self.counter > held.counter
+    }
+}
+
+/// Checks a revocation list against the root keys, and returns what it says.
+///
+/// Same encoding as a certificate — `base64(body).base64(signature)` — and same reason:
+/// the bytes that were signed are recoverable without re-encoding anything.
+///
+/// # Errors
+/// [`TrustError::MalformedRevocations`] for anything unreadable or not properly signed,
+/// and [`TrustError::UnknownRootKey`] when it names a root this image does not have.
+pub fn verify_revocations(roots: &[RootKey], document: &str) -> Result<Revocations, TrustError> {
+    if roots.is_empty() {
+        return Err(TrustError::NoRootKeys);
+    }
+
+    let (body, signature) =
+        split_signed(document.trim()).map_err(TrustError::MalformedRevocations)?;
+    let list: Revocations = serde_json::from_slice(&body)
+        .map_err(|e| TrustError::MalformedRevocations(e.to_string()))?;
+
+    let root = roots
+        .iter()
+        .find(|k| k.id == list.root_key_id)
+        .ok_or_else(|| TrustError::UnknownRootKey {
+            wanted: list.root_key_id.clone(),
+            known: roots.iter().map(|k| k.id.to_owned()).collect(),
+        })?;
+
+    let key = VerifyingKey::from_bytes(&root.public_key)
+        .map_err(|e| TrustError::BadKeyMaterial(e.to_string()))?;
+    verify_detached(&key, &body, &signature).map_err(TrustError::MalformedRevocations)?;
+
+    Ok(list)
+}
+
 /// Splits `base64(body).base64(signature)` into its two decoded halves.
-fn split_certificate(certificate: &str) -> Result<(Vec<u8>, Vec<u8>), TrustError> {
-    let (body, signature) = certificate.split_once('.').ok_or_else(|| {
-        TrustError::MalformedCertificate("no '.' separating body from signature".to_owned())
-    })?;
+///
+/// Shared by certificates and revocation lists, and returning a bare reason rather than a
+/// [`TrustError`] so that each caller can say which document it was reading. A revocation
+/// list reported as a malformed certificate would send somebody to look at the signing
+/// setup instead of at the list.
+fn split_signed(document: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let (body, signature) = document
+        .split_once('.')
+        .ok_or_else(|| "no '.' separating body from signature".to_owned())?;
 
     let engine = base64::engine::general_purpose::STANDARD;
     let body = engine
         .decode(body)
-        .map_err(|e| TrustError::MalformedCertificate(format!("body is not base64: {e}")))?;
+        .map_err(|e| format!("body is not base64: {e}"))?;
     let signature = engine
         .decode(signature)
-        .map_err(|e| TrustError::MalformedCertificate(format!("signature is not base64: {e}")))?;
+        .map_err(|e| format!("signature is not base64: {e}"))?;
 
     Ok((body, signature))
+}
+
+/// [`split_signed`], reporting as a certificate.
+fn split_certificate(certificate: &str) -> Result<(Vec<u8>, Vec<u8>), TrustError> {
+    split_signed(certificate).map_err(TrustError::MalformedCertificate)
+}
+
+/// Decodes the base64 detached signature published beside a manifest.
+///
+/// Public because the thing that fetches a signature should not have to grow a base64
+/// dependency, and more importantly should not get to decide what a signature is. Sixty-
+/// four bytes, and a file that is not that is a malformed artefact rather than a wrong one.
+///
+/// # Errors
+/// [`TrustError::BadKeyMaterial`], which names re-running `plexos-sign` as the remedy.
+pub fn decode_signature(encoded: &str) -> Result<[u8; 64], TrustError> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .map_err(|e| TrustError::BadKeyMaterial(format!("the signature is not base64: {e}")))?;
+
+    bytes
+        .try_into()
+        .map_err(|_| TrustError::BadKeyMaterial("an Ed25519 signature is 64 bytes".to_owned()))
 }
 
 /// Decodes a base64 Ed25519 public key.
@@ -431,9 +609,19 @@ mod tests {
         }]
     }
 
+    /// A policy trusting `roots`, revoking nothing.
+    fn policy<'a>(roots: &'a [RootKey], now: Option<&'a str>) -> Policy<'a> {
+        Policy {
+            roots,
+            revoked: &[],
+            now,
+        }
+    }
+
     #[test]
     fn a_properly_signed_manifest_verifies_end_to_end() {
-        // The accept path. Without `verify_against` this could not be written at all, and
+        // The accept path. With the root keys fixed by a constant this could not be
+        // written at all, and
         // a suite that only ever exercised the refusal would have passed against a
         // verifier that accepted everything.
         let root = key(1);
@@ -443,18 +631,20 @@ mod tests {
         let signature = signing.sign(&bytes);
 
         let raw = RawManifest::new(bytes);
-        let verified = verify_against(
-            &roots(&root, "plexos-root-dev"),
+        let verified = verify(
+            &policy(
+                &roots(&root, "plexos-root-dev"),
+                Some("2026-07-29T00:00:00Z"),
+            ),
             &raw,
             &signature.to_bytes(),
-            Some("2026-07-29T00:00:00Z"),
         )
         .expect("a correctly signed manifest");
 
         assert_eq!(verified.key_id, "plexos-signing-test");
         assert_eq!(verified.root_key_id, "plexos-root-dev");
         assert!(verified.development, "a test key is never a real root");
-        assert_eq!(verified.manifest.sequence, 1);
+        assert_eq!(verified.manifest.sequence, 202_607_281_844);
     }
 
     #[test]
@@ -479,11 +669,10 @@ mod tests {
 
         let raw = RawManifest::new(tampered);
         assert!(matches!(
-            verify_against(
-                &roots(&root, "plexos-root-dev"),
+            verify(
+                &policy(&roots(&root, "plexos-root-dev"), None),
                 &raw,
-                &signature.to_bytes(),
-                None
+                &signature.to_bytes()
             ),
             Err(TrustError::ManifestNotSigned(_))
         ));
@@ -508,11 +697,10 @@ mod tests {
 
         let raw = RawManifest::new(bytes);
         assert!(matches!(
-            verify_against(
-                &roots(&real_root, "plexos-root-dev"),
+            verify(
+                &policy(&roots(&real_root, "plexos-root-dev"), None),
                 &raw,
-                &signature.to_bytes(),
-                None
+                &signature.to_bytes()
             ),
             Err(TrustError::CertificateNotSigned(_))
         ));
@@ -531,11 +719,10 @@ mod tests {
         let signature = signing.sign(&bytes);
 
         let raw = RawManifest::new(bytes);
-        match verify_against(
-            &roots(&root, "plexos-root-dev"),
+        match verify(
+            &policy(&roots(&root, "plexos-root-dev"), None),
             &raw,
             &signature.to_bytes(),
-            None,
         ) {
             Err(TrustError::KeyIdMismatch {
                 manifest,
@@ -558,11 +745,13 @@ mod tests {
         let raw = RawManifest::new(bytes);
 
         assert!(matches!(
-            verify_against(
-                &roots(&root, "plexos-root-dev"),
+            verify(
+                &policy(
+                    &roots(&root, "plexos-root-dev"),
+                    Some("2028-01-01T00:00:00Z")
+                ),
                 &raw,
-                &signature.to_bytes(),
-                Some("2028-01-01T00:00:00Z")
+                &signature.to_bytes()
             ),
             Err(TrustError::CertificateExpired { .. })
         ));
@@ -571,11 +760,10 @@ mod tests {
         // as "the certificate is fine" by accident -- it is, but only because the caller
         // decided that, which is why the decision is a parameter.
         assert!(
-            verify_against(
-                &roots(&root, "plexos-root-dev"),
+            verify(
+                &policy(&roots(&root, "plexos-root-dev"), None),
                 &raw,
-                &signature.to_bytes(),
-                None
+                &signature.to_bytes()
             )
             .is_ok()
         );
@@ -583,13 +771,46 @@ mod tests {
 
     #[test]
     fn a_build_with_no_root_keys_refuses_rather_than_accepts() {
-        // The default state of this file, and the one that must fail closed. An empty
-        // trust store is not "nothing to check against", it is "nothing can be checked".
+        // The state this file shipped in for months, and the one that must fail closed. An
+        // empty trust store is not "nothing to check against", it is "nothing can be
+        // checked" -- and the tempting reading of an empty list is the other one.
         let raw = RawManifest::new(b"{}".to_vec());
+        let nothing = Policy {
+            roots: &[],
+            revoked: &[],
+            now: None,
+        };
         assert_eq!(
-            verify(&raw, &[0; 64], None).unwrap_err(),
+            verify(&nothing, &raw, &[0; 64]).unwrap_err(),
             TrustError::NoRootKeys
         );
+        assert_eq!(
+            verify_revocations(&[], "anything").unwrap_err(),
+            TrustError::NoRootKeys
+        );
+    }
+
+    #[test]
+    fn this_build_trusts_exactly_one_root_and_says_it_is_a_development_key() {
+        // The constant is what an image actually ships with, and every test above runs
+        // against keys made up locally -- so without this, ROOT_KEYS could go back to
+        // empty and the whole suite would still pass while no appliance could update.
+        assert_eq!(ROOT_KEYS.len(), 1, "one root key is compiled in");
+        assert!(
+            ROOT_KEYS.iter().all(|k| k.development),
+            "a key whose private half is on a build host must say so, or the console \
+             reports 'signed' about something weaker than the word implies"
+        );
+        assert!(ROOT_KEYS.iter().all(|k| !k.id.is_empty()));
+        assert!(
+            ROOT_KEYS.iter().all(|k| k.public_key != [0u8; 32]),
+            "an all-zero key is a small-order point, not a key"
+        );
+
+        // And the policy an image uses is the one built from that constant, rather than
+        // something a caller assembles and can assemble wrongly.
+        assert_eq!(Policy::of_this_build(None).roots.len(), ROOT_KEYS.len());
+        assert!(Policy::of_this_build(None).revoked.is_empty());
     }
 
     #[test]
@@ -614,8 +835,12 @@ mod tests {
                 manifest: "a".to_owned(),
                 certificate: "b".to_owned(),
             },
+            TrustError::KeyRevoked {
+                key_id: "a".to_owned(),
+            },
             TrustError::ManifestNotSigned("x".to_owned()),
             TrustError::BadKeyMaterial("x".to_owned()),
+            TrustError::MalformedRevocations("x".to_owned()),
         ];
 
         for case in cases {
@@ -625,6 +850,106 @@ mod tests {
                 "{case:?} has no remedy: {message}"
             );
         }
+    }
+
+    /// A root-signed revocation list, in the encoding a device reads.
+    fn revocations(root: &SigningKey, root_id: &str, counter: u64, revoked: &[&str]) -> String {
+        let list: Vec<String> = revoked.iter().map(|s| format!("\"{s}\"")).collect();
+        let body = format!(
+            r#"{{"counter":{counter},"root_key_id":"{root_id}","revoked":[{}]}}"#,
+            list.join(",")
+        );
+        format!(
+            "{}.{}",
+            ENGINE.encode(body.as_bytes()),
+            ENGINE.encode(root.sign(body.as_bytes()).to_bytes())
+        )
+    }
+
+    #[test]
+    fn a_manifest_signed_by_a_revoked_key_is_refused_although_the_signature_is_good() {
+        // The case expiry cannot cover. The attacker's certificate is valid, their
+        // signature verifies, and every other check in this module says yes -- which is
+        // precisely the situation a revocation list exists for.
+        let root = key(1);
+        let signing = key(2);
+        let cert = certificate(&root, "plexos-root-dev", &signing, "leaked-key");
+        let bytes = manifest_bytes("leaked-key", &cert);
+        let signature = signing.sign(&bytes);
+        let raw = RawManifest::new(bytes);
+        let roots = roots(&root, "plexos-root-dev");
+
+        // Without the list, this is a perfectly good update.
+        assert!(verify(&policy(&roots, None), &raw, &signature.to_bytes()).is_ok());
+
+        let revoked = vec!["leaked-key".to_owned()];
+        match verify(
+            &policy(&roots, None).revoking(&revoked),
+            &raw,
+            &signature.to_bytes(),
+        ) {
+            Err(TrustError::KeyRevoked { key_id }) => assert_eq!(key_id, "leaked-key"),
+            other => panic!("expected a revoked key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_revocation_list_is_believed_only_when_a_root_key_signed_it() {
+        // Otherwise anyone on the wire could revoke the publisher's key and stop every
+        // appliance updating -- a denial of service with no forgery required.
+        let root = key(1);
+        let attacker = key(9);
+        let roots = roots(&root, "plexos-root-dev");
+
+        let list = verify_revocations(
+            &roots,
+            &revocations(&root, "plexos-root-dev", 3, &["leaked-key"]),
+        )
+        .expect("a root-signed list");
+        assert_eq!(list.counter, 3);
+        assert_eq!(list.revoked, vec!["leaked-key".to_owned()]);
+
+        assert!(matches!(
+            verify_revocations(
+                &roots,
+                &revocations(&attacker, "plexos-root-dev", 4, &["the-real-key"])
+            ),
+            Err(TrustError::MalformedRevocations(_))
+        ));
+        assert!(matches!(
+            verify_revocations(&roots, "not even two fields"),
+            Err(TrustError::MalformedRevocations(_))
+        ));
+    }
+
+    #[test]
+    fn an_older_revocation_list_cannot_un_revoke_anything() {
+        // The list from before a revocation is genuinely root-signed, so replaying it is
+        // the obvious attack once revocation exists at all.
+        let held = Revocations {
+            counter: 3,
+            root_key_id: "plexos-root-dev".to_owned(),
+            revoked: vec!["leaked-key".to_owned()],
+        };
+        let older = Revocations {
+            counter: 2,
+            ..held.clone()
+        };
+        let same_number_fewer_entries = Revocations {
+            counter: 3,
+            revoked: Vec::new(),
+            ..held.clone()
+        };
+        let newer = Revocations {
+            counter: 4,
+            ..held.clone()
+        };
+
+        assert!(!older.supersedes(&held));
+        assert!(!same_number_fewer_entries.supersedes(&held));
+        assert!(newer.supersedes(&held));
+        assert!(held.supersedes(&Revocations::none()));
+        assert!(Revocations::none().revoked.is_empty());
     }
 
     #[test]

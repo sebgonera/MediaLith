@@ -5,6 +5,8 @@
 //! the wrong slot overwrites the system that is currently running, which is the one
 //! outcome ADR-0001's two-slot layout exists to make impossible.
 
+use plexos_types::manifest::{Channel, ImageFormat, Manifest};
+use plexos_types::version::PRODUCT;
 use plexos_types::{Slot, partition};
 
 /// What to do about a bundle.
@@ -49,6 +51,22 @@ pub enum Refusal {
         /// What is running.
         running: String,
     },
+    /// The manifest describes a different product.
+    WrongProduct {
+        /// What the manifest says it is for.
+        offered: String,
+        /// What this is.
+        expected: &'static str,
+    },
+    /// The manifest names a channel or an image format this release does not know.
+    ///
+    /// Both are `Unknown` variants that exist so an old device can read a new publisher's
+    /// document without choking on it — but reading it is not the same as installing it,
+    /// and an unrecognised filesystem format is a `/usr` this kernel cannot mount.
+    Unrecognised {
+        /// Which field.
+        field: &'static str,
+    },
 }
 
 impl std::fmt::Display for Refusal {
@@ -75,6 +93,19 @@ impl std::fmt::Display for Refusal {
                  choose -- an update that appears to do nothing. Publish a higher \
                  version."
             ),
+            Self::WrongProduct { offered, expected } => write!(
+                f,
+                "this update is for {offered} and this appliance is {expected}. Remedy: \
+                 check the address it was fetched from. Nothing about the signature makes \
+                 an image for another product bootable here."
+            ),
+            Self::Unrecognised { field } => write!(
+                f,
+                "this update declares a {field} this release does not know. Remedy: it \
+                 was published for a newer appliance than this one. Being able to *read* a \
+                 document from the future is deliberate; installing one is not, and an \
+                 unrecognised filesystem format is a /usr this kernel cannot mount."
+            ),
         }
     }
 }
@@ -94,48 +125,68 @@ pub fn capacity_of(label: &str) -> Option<u64> {
         .map(|mib| mib * 1024 * 1024)
 }
 
-/// Decides what to do with a bundle on a machine running `running_slot` at
+/// Decides what to do with an update on a machine running `running_slot` at
 /// `running_version`.
 ///
+/// The manifest is taken as a [`Manifest`] and not as a [`crate::trust::Verified`], which
+/// is deliberate in one direction only: this is a decision about sizes and version
+/// strings, and it has nothing to say about trust. The caller must have verified the
+/// manifest before it gets here, and the type that proves it did is the one it holds.
+///
 /// # Errors
-/// [`Refusal`] when the bundle cannot be installed at all. That is distinct from
+/// [`Refusal`] when the update cannot be installed at all. That is distinct from
 /// [`Decision::UpToDate`], which is a normal answer to a normal question.
 pub fn plan(
     running_slot: Slot,
     running_version: &str,
-    bundle: &crate::Metadata,
+    manifest: &Manifest,
 ) -> Result<Decision, Refusal> {
     // Never the running slot. This is the single most important line in the crate: the
     // running system's /usr is mounted read-only through dm-verity, and overwriting the
     // partition underneath it corrupts the machine that is doing the writing.
     let target = running_slot.other();
 
+    if manifest.product != PRODUCT {
+        return Err(Refusal::WrongProduct {
+            offered: manifest.product.clone(),
+            expected: PRODUCT,
+        });
+    }
+    if manifest.channel == Channel::Unknown {
+        return Err(Refusal::Unrecognised { field: "channel" });
+    }
+    if manifest.usr.format == ImageFormat::Unknown {
+        return Err(Refusal::Unrecognised {
+            field: "filesystem format",
+        });
+    }
+
     let usr_capacity = capacity_of(target.usr_label()).unwrap_or(0);
-    if bundle.usr.size > usr_capacity {
+    if manifest.usr.image.size > usr_capacity {
         return Err(Refusal::ImageTooLarge {
-            size: bundle.usr.size,
+            size: manifest.usr.image.size,
             capacity: usr_capacity,
         });
     }
 
     let verity_capacity = capacity_of(target.verity_label()).unwrap_or(0);
-    if bundle.verity.size > verity_capacity {
+    if manifest.usr.verity.hashes.size > verity_capacity {
         return Err(Refusal::VerityTooLarge {
-            size: bundle.verity.size,
+            size: manifest.usr.verity.hashes.size,
             capacity: verity_capacity,
         });
     }
 
-    match compare_versions(&bundle.version, running_version) {
+    match compare_versions(&manifest.release, running_version) {
         std::cmp::Ordering::Greater => Ok(Decision::Install {
             target,
-            version: bundle.version.clone(),
+            version: manifest.release.clone(),
         }),
         std::cmp::Ordering::Equal => Ok(Decision::UpToDate {
             running: running_version.to_owned(),
         }),
         std::cmp::Ordering::Less => Err(Refusal::NotNewer {
-            offered: bundle.version.clone(),
+            offered: manifest.release.clone(),
             running: running_version.to_owned(),
         }),
     }
@@ -179,27 +230,25 @@ mod tests {
     use super::*;
     use std::cmp::Ordering;
 
-    const HASH: &str = "b024b422b89fe9c8bd140915b3633c0819c183f83b45fc26b884d1d4971d2aa7";
-
-    fn bundle(version: &str, usr_size: u64, verity_size: u64) -> crate::Metadata {
-        let artifact = |name: &str, size: u64| crate::Artifact {
-            name: name.to_owned(),
-            size,
-            sha256: HASH.to_owned(),
-        };
-        crate::Metadata {
-            bundle_version: 1,
-            version: version.to_owned(),
-            root_hash: HASH.to_owned(),
-            usr: artifact("usr.erofs", usr_size),
-            verity: artifact("usr.hash", verity_size),
-            uki_a: artifact("plexos-a.efi", 18_973_184),
-            uki_b: artifact("plexos-b.efi", 18_973_184),
-        }
+    /// The published v1 manifest, with the fields this module reads adjusted.
+    ///
+    /// Built by parsing the frozen fixture rather than by constructing a `Manifest`
+    /// literal, so a test here cannot pass against a document the parser would reject.
+    fn manifest(release: &str, usr_size: u64, verity_size: u64) -> Manifest {
+        let raw = plexos_types::manifest::RawManifest::new(
+            include_bytes!("../../plexos-types/tests/fixtures/manifest-v1.json")
+                .as_slice()
+                .to_vec(),
+        );
+        let mut manifest = raw.parse().expect("the fixture parses");
+        manifest.release = release.to_owned();
+        manifest.usr.image.size = usr_size;
+        manifest.usr.verity.hashes.size = verity_size;
+        manifest
     }
 
-    fn ok() -> crate::Metadata {
-        bundle("0.1.0.2", 74_448_896, 1_179_648)
+    fn ok() -> Manifest {
+        manifest("0.1.0.2", 74_448_896, 1_179_648)
     }
 
     #[test]
@@ -243,7 +292,7 @@ mod tests {
     #[test]
     fn an_image_that_does_not_fit_is_refused_before_anything_is_written() {
         let capacity = capacity_of("usr_b").unwrap();
-        let error = plan(Slot::A, "0.1.0.1", &bundle("0.1.0.2", capacity + 1, 1024)).unwrap_err();
+        let error = plan(Slot::A, "0.1.0.1", &manifest("0.1.0.2", capacity + 1, 1024)).unwrap_err();
         assert_eq!(
             error,
             Refusal::ImageTooLarge {
@@ -257,7 +306,7 @@ mod tests {
     #[test]
     fn an_oversized_verity_tree_is_refused_too() {
         let capacity = capacity_of("usr_b_hash").unwrap();
-        let error = plan(Slot::A, "0.1.0.1", &bundle("0.1.0.2", 1024, capacity + 1)).unwrap_err();
+        let error = plan(Slot::A, "0.1.0.1", &manifest("0.1.0.2", 1024, capacity + 1)).unwrap_err();
         assert!(matches!(error, Refusal::VerityTooLarge { .. }));
     }
 
@@ -297,5 +346,58 @@ mod tests {
         assert_eq!(compare_versions("0.1.10", "0.1.9"), Ordering::Greater);
         assert_eq!(compare_versions("0.2.0", "0.10.0"), Ordering::Less);
         assert_eq!(compare_versions("0.1.0", "0.1.0"), Ordering::Equal);
+    }
+
+    #[test]
+    fn an_update_for_another_product_is_refused_however_well_it_is_signed() {
+        // A correctly signed manifest for something else is still correctly signed. This
+        // is the check no signature can make.
+        let mut other = ok();
+        other.product = "someone-elses-appliance".to_owned();
+        let error = plan(Slot::A, "0.1.0.1", &other).unwrap_err();
+        assert_eq!(
+            error,
+            Refusal::WrongProduct {
+                offered: "someone-elses-appliance".to_owned(),
+                expected: "plexos",
+            }
+        );
+        assert!(error.to_string().contains("Remedy:"));
+    }
+
+    #[test]
+    fn reading_a_document_from_the_future_is_not_the_same_as_installing_one() {
+        // The Unknown variants exist so an old appliance can parse a new publisher's
+        // manifest and say something useful. Installing one would mean guessing what an
+        // unrecognised filesystem format is, and the guess is a /usr this kernel cannot
+        // mount.
+        let mut future = ok();
+        future.channel = Channel::Unknown;
+        assert_eq!(
+            plan(Slot::A, "0.1.0.1", &future).unwrap_err(),
+            Refusal::Unrecognised { field: "channel" }
+        );
+
+        let mut future = ok();
+        future.usr.format = ImageFormat::Unknown;
+        assert!(matches!(
+            plan(Slot::A, "0.1.0.1", &future).unwrap_err(),
+            Refusal::Unrecognised { .. }
+        ));
+    }
+
+    #[test]
+    fn the_version_compared_is_the_one_the_boot_entry_carries() {
+        // os_version is 0.1.0 for every build this project has published; release is the
+        // string with the stamp on it, and it is what systemd-boot orders by. Comparing
+        // the wrong one would make every build look identical to every other.
+        let newer = manifest("0.1.0.202607291323", 1024, 1024);
+        let Decision::Install { version, .. } =
+            plan(Slot::A, "0.1.0.202607281844", &newer).unwrap()
+        else {
+            panic!("a later build stamp is an update");
+        };
+        assert_eq!(version, "0.1.0.202607291323");
+        assert_eq!(newer.os_version.to_string(), "0.1.0");
     }
 }

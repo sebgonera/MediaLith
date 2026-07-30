@@ -877,8 +877,13 @@ mod tests {
         );
         assert!(PAGE.contains("Download and install"));
         assert!(
-            PAGE.contains("Nothing signs this bundle"),
-            "the page must say what it does not know, because the reader cannot"
+            PAGE.contains("Signed by"),
+            "the page must name what vouched for an update, not merely that something did"
+        );
+        assert!(
+            PAGE.contains("development root key"),
+            "and must say when that chain ends in a key whose private half is on a build \
+             host, because 'signed' alone would tell the reader something false"
         );
         assert!(
             PAGE.contains("comes back to this one by itself"),

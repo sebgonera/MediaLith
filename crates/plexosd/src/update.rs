@@ -6,28 +6,36 @@
 //! way [`crate::provision`] does, for the same reason — the work takes minutes and a
 //! request cannot be held open for it.
 //!
-//! # What this trusts, and what makes it survivable
+//! # What this trusts
 //!
-//! Nothing signs the bundle. Whoever answers on the configured address chooses what
-//! `/usr` this appliance will run, which is acceptable on a bench and nowhere else; the
-//! page says so and [`plexos_update::Metadata::TRUSTED`] is a constant `false`.
+//! A signature over the manifest's exact bytes, chaining to a root key compiled into
+//! `/usr` (ADR-0006). Whoever answers on the configured address no longer chooses what
+//! this appliance runs; they choose only whether it gets an update at all, which is a
+//! denial of service and not a compromise.
 //!
-//! What makes that tolerable is not the transport. It is that the update goes to the slot
-//! that is *not* running, and that `systemd-boot` sorts an entry with no tries left to the
-//! end of its list — so a bundle that turns out to be rubbish costs three reboots and
-//! lands back on the system that was working. The running slot is never written and the
-//! working boot entry is never removed.
+//! Two things are worth being precise about. **The address is still unauthenticated**, so
+//! a bundle can be served from anywhere and moved without re-signing — that is deliberate,
+//! and it is why sources in a manifest are file names rather than URLs. And **the trust is
+//! only as good as the custody of the root key**: while a development key is in force its
+//! private half is on a build host rather than offline, which is reported through
+//! [`Progress::signature`] rather than hidden behind the word "signed".
+//!
+//! What makes a bad-but-signed update survivable is unchanged and is not the signature: the
+//! update goes to the slot that is *not* running, and `systemd-boot` sorts an entry with no
+//! tries left to the end of its list. The running slot is never written and the working
+//! boot entry is never removed.
 //!
 //! # What has run
 //!
-//! **This has updated an appliance twice**, alternating slots, with no USB stick
-//! involved. What it does not yet do is check a signature, and that has not changed.
+//! **This has updated an appliance twice**, alternating slots, with no USB stick involved.
+//! Both of those were unsigned, through the improvised `update.json` that this module no
+//! longer reads. **No appliance has yet installed a signed manifest.**
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use plexos_update::{Decision, Metadata};
+use plexos_update::{Decision, Role, trust};
 
 /// Where a bundle is fetched from when the request does not say.
 ///
@@ -38,6 +46,16 @@ use plexos_update::{Decision, Metadata};
 ///
 /// A request with no source is therefore refused rather than sent somewhere arbitrary.
 pub const DEFAULT_SOURCE: &str = "";
+
+/// The manifest, its detached signature, and the revocation list, beside each other.
+///
+/// Fixed names rather than anything discovered: the appliance asks for exactly these three
+/// and a publisher chooses only where they are served from.
+pub const MANIFEST: &str = "manifest.json";
+/// The detached Ed25519 signature over [`MANIFEST`]'s exact bytes, base64.
+pub const SIGNATURE: &str = "manifest.json.sig";
+/// The root-signed revocation list, if the publisher serves one.
+pub const REVOCATIONS: &str = "revocations.json";
 
 /// Where downloads are staged before anything is written to a partition.
 ///
@@ -100,9 +118,15 @@ pub struct Progress {
     pub staged: Option<String>,
     /// Why the run failed, if it did.
     pub error: Option<String>,
-    /// Whether anything vouched for the bundle. Always false today, and reported so the
-    /// page can say it rather than the reader having to know.
-    pub trusted: bool,
+    /// What vouched for the last manifest that was read, if anything did.
+    ///
+    /// `None` means nothing has been verified — either nothing has been checked yet, or the
+    /// check failed, in which case `error` says how. It is deliberately not a `bool`: the
+    /// question a reader has is not "is this signed" but "signed by what", and the answer
+    /// includes whether the root of the chain is a development key whose private half sits
+    /// on a build host. An appliance that said "signed" about that would be telling the
+    /// reader something false.
+    pub signature: Option<Signature>,
     /// What the boot health gate decided about this boot, once it has decided.
     ///
     /// Here because "did this slot become permanent" is a question about the system's
@@ -134,10 +158,31 @@ impl Default for Progress {
             available: None,
             staged: None,
             error: None,
-            trusted: Metadata::TRUSTED,
+            signature: None,
             gate: crate::gate::last_verdict(),
             rollback: crate::rollback::last(),
             log: Vec::new(),
+        }
+    }
+}
+
+/// Who vouched for a manifest, once the chain has been checked.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Signature {
+    /// The signing key that signed the manifest.
+    pub key_id: String,
+    /// The root key that certified it.
+    pub root_key_id: String,
+    /// Whether that root is a development stand-in rather than an offline key.
+    pub development: bool,
+}
+
+impl From<&trust::Verified> for Signature {
+    fn from(verified: &trust::Verified) -> Self {
+        Self {
+            key_id: verified.key_id.clone(),
+            root_key_id: verified.root_key_id.clone(),
+            development: verified.development,
         }
     }
 }
@@ -312,7 +357,7 @@ pub fn spawn(job: &Arc<Job>, source: String, install: bool) {
     });
 }
 
-/// Checks a bundle and, if `install`, writes it.
+/// Checks an update and, if `install`, writes it.
 ///
 /// # Errors
 /// Anything that stops the update. Nothing here can damage the running system: every
@@ -336,19 +381,11 @@ pub fn run(
     let curl = plexos_plex::tools::resolve("curl", &|p: &Path| p.exists())
         .ok_or("curl is not in this image, so no bundle can be fetched")?;
 
-    let document = fetch(&curl, &format!("{source}/update.json"))?;
-    let bundle = Metadata::parse(&document)?;
-    job.with(|state| state.available = Some(bundle.version.clone()));
-    job.note(&format!(
-        "bundle offers {} (root hash {})",
-        bundle.version, bundle.root_hash
-    ));
+    let running = running_version();
+    let manifest = believe(job, &curl, source, &running)?;
 
     let slot = running_slot();
-    let running = running_version();
-    let decision = plexos_update::plan(slot, &running, &bundle)?;
-
-    let (target, version) = match decision {
+    let (target, version) = match plexos_update::plan(slot, &running, &manifest)? {
         Decision::UpToDate { running } => {
             job.note(&format!("this appliance already runs {running}"));
             return Ok(None);
@@ -363,6 +400,82 @@ pub fn run(
         return Ok(None);
     }
 
+    write_slot(job, &curl, source, &manifest, target, &version, &running)?;
+    Ok(Some(version))
+}
+
+/// Fetches the manifest and returns it only if this appliance may act on it.
+///
+/// Everything that can refuse an update before a byte of it is downloaded: the signature
+/// chain, the revocation list, and the anti-rollback floor.
+fn believe(
+    job: &Job,
+    curl: &Path,
+    source: &str,
+    running: &str,
+) -> Result<plexos_types::manifest::Manifest, Box<dyn std::error::Error>> {
+    // The manifest is held as the bytes that arrived and is never re-encoded on the way to
+    // the signature check. `fetch_text` would be enough to parse it and would quietly
+    // replace anything invalid with U+FFFD, which is a manifest that parses, verifies
+    // against nothing, and reports a signature failure about a document nobody mistyped.
+    let raw = plexos_types::manifest::RawManifest::new(fetch_bytes(
+        curl,
+        &format!("{source}/{MANIFEST}"),
+    )?);
+    let signature = trust::decode_signature(&fetch_text(curl, &format!("{source}/{SIGNATURE}"))?)?;
+
+    let revoked = revocations_in_force(job, curl, source);
+    let now = expiry_clock(running);
+    let policy = trust::Policy::of_this_build(now.as_deref()).revoking(&revoked);
+
+    let verified = trust::verify(&policy, &raw, &signature)?;
+    job.with(|state| {
+        state.available = Some(verified.manifest.release.clone());
+        state.signature = Some(Signature::from(&verified));
+    });
+    job.note(&format!(
+        "{} is signed by {}, certified by root key {}{}",
+        verified.manifest.release,
+        verified.key_id,
+        verified.root_key_id,
+        if verified.development {
+            " -- a development key, whose private half is on a build host rather than \
+             offline"
+        } else {
+            ""
+        }
+    ));
+
+    // Before the plan, because being offered a downgrade is a different thing from being
+    // offered something that does not fit, and the first one is the one worth saying out
+    // loud: every signature on it was valid.
+    let floor = plexos_update::sequence::floor(
+        plexos_update::sequence::recorded(Path::new(plexos_types::paths::ACCEPTED_SEQUENCE_FILE)),
+        running,
+    );
+    plexos_update::sequence::check(
+        verified.manifest.sequence,
+        verified.manifest.min_sequence,
+        floor,
+    )?;
+    job.note(&format!(
+        "sequence {} is at or above the {floor} this appliance has accepted",
+        verified.manifest.sequence
+    ));
+
+    Ok(verified.manifest)
+}
+
+/// Downloads the update and writes it to the slot that is not running.
+fn write_slot(
+    job: &Job,
+    curl: &Path,
+    source: &str,
+    manifest: &plexos_types::manifest::Manifest,
+    target: plexos_types::Slot,
+    version: &str,
+    running: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Cleared at the start rather than the end: an interrupted update should leave what
     // it had, not tidy the evidence away.
     let staging = Path::new(STAGING);
@@ -370,16 +483,44 @@ pub fn run(
     std::fs::create_dir_all(staging)?;
 
     job.step(Phase::Downloading, &format!("downloading {version}"));
-    let usr = stage(job, &curl, source, staging, &bundle.usr)?;
-    let verity = stage(job, &curl, source, staging, &bundle.verity)?;
-    let uki = stage(job, &curl, source, staging, bundle.uki_for(target))?;
+    let usr = stage(job, curl, source, staging, Role::Usr, &manifest.usr.image)?;
+    let verity = stage(
+        job,
+        curl,
+        source,
+        staging,
+        Role::Verity,
+        &manifest.usr.verity.hashes,
+    )?;
+    let uki = stage(
+        job,
+        curl,
+        source,
+        staging,
+        Role::Uki,
+        manifest.uki.for_slot(target),
+    )?;
+
+    // The digest proved this is the file the manifest named. This proves the manifest
+    // named the right one, which is a mistake a publishing script makes and a signature
+    // cannot see, because the signature is over the mistake.
+    let root_hash = &manifest.usr.verity.root_hash;
+    plexos_update::uki::check(&std::fs::read(&uki)?, target, root_hash)?;
+    job.note(&format!(
+        "the boot entry carries plexos.slot={target} and root hash {root_hash}"
+    ));
 
     job.step(
         Phase::Writing,
         &format!("writing slot {target} and reading it back"),
     );
-    write_partition(job, target.usr_label(), &usr, &bundle.usr)?;
-    write_partition(job, target.verity_label(), &verity, &bundle.verity)?;
+    write_partition(job, target.usr_label(), &usr, &manifest.usr.image)?;
+    write_partition(
+        job,
+        target.verity_label(),
+        &verity,
+        &manifest.usr.verity.hashes,
+    )?;
 
     job.step(Phase::Activating, "installing the boot entry, on trial");
     let device = plexos_sys::device::by_partlabel(plexos_types::partition::LABEL_ESP)?;
@@ -389,8 +530,8 @@ pub fn run(
         // exhausted 18 MB entry on an ESP sized for three, and nothing else ever removes
         // it -- so without this the partition the machine cannot boot without fills up
         // one bad update at a time. Found by causing a rollback rather than by reading.
-        cleared = crate::esp::remove_wreckage(esp, &running);
-        crate::esp::install_entry(esp, &uki, &version)
+        cleared = crate::esp::remove_wreckage(esp, running);
+        crate::esp::install_entry(esp, &uki, version)
     })?;
     if !cleared.is_empty() {
         job.note(&format!(
@@ -410,20 +551,109 @@ pub fn run(
         crate::esp::INITIAL_TRIES
     ));
 
+    // Last, and deliberately. Recording the sequence raises the floor permanently, so
+    // doing it before the entry is installed would mean a failed download had refused
+    // this release forever -- an appliance that will not take the update it just failed to
+    // finish, and no way from the network to lower the number again.
+    if let Err(error) = plexos_update::sequence::record(
+        Path::new(plexos_types::paths::ACCEPTED_SEQUENCE_FILE),
+        manifest.sequence,
+    ) {
+        job.note(&format!(
+            "the update is installed, but sequence {} could not be recorded ({error}), so \
+             this appliance would accept an older release again. /var may be full or \
+             read-only.",
+            manifest.sequence
+        ));
+    }
+
     let _ = std::fs::remove_dir_all(staging);
-    Ok(Some(version))
+    Ok(())
 }
 
-/// Downloads one artifact and checks it against the digest the bundle declared.
+/// The current time, if this appliance's clock is plausible enough to judge expiry.
+///
+/// A wrong clock that is believed refuses every future update, which from outside is
+/// indistinguishable from a broken update path. There is no time synchronisation here, so
+/// the only reference is the running image's own build stamp: an image cannot predate
+/// itself.
+fn expiry_clock(running: &str) -> Option<String> {
+    let now = plexos_update::clock::now()?;
+    let built = plexos_update::clock::built_at(running)?;
+    trust::expiry_is_checkable(&now, &built).then_some(now)
+}
+
+/// The signing keys this appliance will not believe, refreshed from the source if it
+/// offers a newer list.
+///
+/// Failure here is never fatal and never permissive: whatever list is already in force
+/// stays in force. The list an appliance holds can only be replaced by a root-signed one
+/// with a higher counter, so somebody who can answer at this address can withhold a
+/// revocation but cannot withdraw one.
+fn revocations_in_force(job: &Job, curl: &Path, source: &str) -> Vec<String> {
+    let path = Path::new(plexos_types::paths::REVOCATION_FILE);
+    let held = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|document| trust::verify_revocations(trust::ROOT_KEYS, &document).ok())
+        .unwrap_or_else(trust::Revocations::none);
+
+    let offered = match fetch_optional(curl, &format!("{source}/{REVOCATIONS}")) {
+        Ok(Some(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+        // No list published here is the ordinary case and says nothing about the one held.
+        Ok(None) => return held.revoked,
+        Err(error) => {
+            job.note(&format!("could not ask for a revocation list: {error}"));
+            return held.revoked;
+        }
+    };
+
+    match trust::verify_revocations(trust::ROOT_KEYS, &offered) {
+        Ok(list) if list.supersedes(&held) => {
+            if let Err(error) = plexos_update::atomic::write(path, offered.as_bytes()) {
+                job.note(&format!(
+                    "a newer revocation list was accepted but could not be stored \
+                     ({error}), so it applies to this update and will have to be fetched \
+                     again for the next one"
+                ));
+            }
+            job.note(&format!(
+                "revocation list updated to counter {}; {} signing {} no longer believed",
+                list.counter,
+                list.revoked.len(),
+                if list.revoked.len() == 1 {
+                    "key is"
+                } else {
+                    "keys are"
+                }
+            ));
+            list.revoked
+        }
+        // Two silences, for two reasons. A list that is not newer is what every ordinary
+        // update looks like once one exists, and a line saying so on every run would push
+        // the useful ones out of a bounded log. And a build with no root keys is about to
+        // refuse the manifest, which says the same thing and says it better.
+        Ok(_) | Err(trust::TrustError::NoRootKeys) => held.revoked,
+        Err(error) => {
+            job.note(&format!(
+                "the revocation list published here was not used: {error}"
+            ));
+            held.revoked
+        }
+    }
+}
+
+/// Downloads one artifact and checks it against the digest the manifest declared.
 fn stage(
     job: &Job,
     curl: &Path,
     source: &str,
     staging: &Path,
-    artifact: &plexos_update::Artifact,
+    role: Role,
+    artifact: &plexos_types::manifest::Artifact,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let destination = staging.join(&artifact.name);
-    let url = format!("{source}/{}", artifact.name);
+    let url = plexos_update::location::resolve(source, role, artifact)?;
+    // Named by role, so nothing a publisher writes chooses a path on this appliance.
+    let destination = staging.join(role.staging_name());
 
     let output = std::process::Command::new(curl)
         .args(["--fail", "--silent", "--show-error", "--location"])
@@ -446,16 +676,15 @@ fn stage(
     let found = plexos_update::write::digest_of_file(&destination)?;
     if found != artifact.sha256 {
         return Err(format!(
-            "{} does not match the digest the bundle declared: got {found}, expected {}. \
-             The download was corrupted; nothing has been written to a partition. \
-             Retrying is the remedy.",
-            artifact.name, artifact.sha256
+            "{url} does not match the digest the manifest declared: got {found}, expected \
+             {}. Nothing has been written to a partition. If the manifest verified, this \
+             is a corrupted download and retrying is the remedy.",
+            artifact.sha256
         )
         .into());
     }
     job.note(&format!(
-        "{} downloaded and matches its digest ({} MB)",
-        artifact.name,
+        "{role} downloaded and matches its digest ({} MB)",
         artifact.size / 1_000_000
     ));
     Ok(destination)
@@ -466,7 +695,7 @@ fn write_partition(
     job: &Job,
     label: &str,
     staged: &Path,
-    artifact: &plexos_update::Artifact,
+    artifact: &plexos_types::manifest::Artifact,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut file = std::fs::File::open(staged)?;
     let mut last = 0_u64;
@@ -491,8 +720,8 @@ fn write_partition(
     Ok(())
 }
 
-/// Fetches a small document as text.
-fn fetch(curl: &Path, url: &str) -> Result<String, Box<dyn std::error::Error>> {
+/// Fetches a small document as the bytes that arrived.
+fn fetch_bytes(curl: &Path, url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let output = std::process::Command::new(curl)
         .args(["--fail", "--silent", "--show-error", "--location"])
         .arg("--max-time")
@@ -501,13 +730,48 @@ fn fetch(curl: &Path, url: &str) -> Result<String, Box<dyn std::error::Error>> {
         .output()?;
     if !output.status.success() {
         return Err(format!(
-            "could not read {url}: {}. Nothing is serving an update bundle there.",
+            "could not read {url}: {}. Nothing is serving a signed update there. Remedy: \
+             check the address, and check that the bundle was published by \
+             tools/sign-bundle.sh -- an unsigned bundle has no {MANIFEST} and this release \
+             will not install one.",
             String::from_utf8_lossy(&output.stderr).trim()
         )
         .into());
     }
     let _ = std::io::stdout().flush();
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(output.stdout)
+}
+
+/// [`fetch_bytes`], where the document not being there is an answer rather than a failure.
+///
+/// curl exits 22 for an HTTP error status when `--fail` is given, which separates "the
+/// publisher does not serve this" from "the network is broken" — and those have opposite
+/// meanings for an optional document.
+fn fetch_optional(curl: &Path, url: &str) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+    const HTTP_ERROR: i32 = 22;
+
+    let output = std::process::Command::new(curl)
+        .args(["--fail", "--silent", "--show-error", "--location"])
+        .arg("--max-time")
+        .arg("60")
+        .arg(url)
+        .output()?;
+
+    if output.status.code() == Some(HTTP_ERROR) {
+        return Ok(None);
+    }
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .to_owned()
+            .into());
+    }
+    Ok(Some(output.stdout))
+}
+
+/// Fetches a small document as text, for things that are text by definition.
+fn fetch_text(curl: &Path, url: &str) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(String::from_utf8_lossy(&fetch_bytes(curl, url)?).into_owned())
 }
 
 #[cfg(test)]
@@ -521,7 +785,10 @@ mod tests {
         assert_eq!(progress.phase, Phase::Idle);
         assert!(!progress.running.is_empty());
         assert!(matches!(progress.slot.as_str(), "a" | "b"));
-        assert!(!progress.trusted, "nothing signs a bundle yet");
+        assert!(
+            progress.signature.is_none(),
+            "nothing has been verified yet, and that must not read as signed"
+        );
     }
 
     #[test]
@@ -596,6 +863,38 @@ mod tests {
     }
 
     #[test]
+    fn a_clock_that_cannot_be_judged_is_not_used_to_expire_certificates() {
+        // There is no time synchronisation here. A wrong clock that is believed refuses
+        // every future update, which from outside is indistinguishable from a bricked
+        // update path -- and unlike an expired certificate, nobody would know where to
+        // look.
+        assert_eq!(
+            expiry_clock("unknown"),
+            None,
+            "a version with no build stamp gives nothing to judge the clock against"
+        );
+        assert_eq!(
+            expiry_clock("0.1.0"),
+            None,
+            "and neither does one that was never stamped"
+        );
+
+        // A build host's clock is after the stamp of any image it could be running, so
+        // this is the branch that does check expiry.
+        assert!(expiry_clock("0.1.0.202607281844").is_some());
+    }
+
+    #[test]
+    fn the_documents_this_asks_for_are_the_ones_the_publisher_writes() {
+        // Three fixed names. tools/sign-bundle.sh writes the first two and they are what
+        // an appliance refuses an update for the absence of, so a rename here is a rename
+        // in two places or an update path that stops working.
+        assert_eq!(MANIFEST, "manifest.json");
+        assert_eq!(SIGNATURE, "manifest.json.sig");
+        assert_eq!(REVOCATIONS, "revocations.json");
+    }
+
+    #[test]
     fn progress_serialises_to_what_the_page_reads() {
         let job = Job::new();
         job.begin();
@@ -603,6 +902,9 @@ mod tests {
         let json = serde_json::to_string(&job.snapshot()).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["phase"], "writing");
-        assert_eq!(parsed["trusted"], false);
+        assert!(
+            parsed["signature"].is_null(),
+            "the page distinguishes unverified from signed, so this may not be absent"
+        );
     }
 }

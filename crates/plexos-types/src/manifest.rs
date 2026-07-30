@@ -22,11 +22,22 @@
 //! choke on them. [`Source::Chunked`] exists in the schema from v1 precisely so that
 //! delta transport can be introduced later with no `manifest_version` bump: a device
 //! that does not implement it simply skips it and takes the full image.
+//!
+//! **The schema describes the artefacts PlexOS actually builds.** Two of its fields were
+//! written before anything had been built and did not survive contact with the images:
+//! there is one UKI *per slot*, because `plexos.slot=` is on the kernel command line
+//! inside it and the appliance cannot build one (that needs `objcopy`); and the version
+//! string an image carries is `0.1.0.202607281844`, which [`OsVersion`] cannot represent
+//! and which is the exact string `systemd-boot` orders entries by. Both are corrected
+//! here rather than worked around by the updater, because this schema has never reached a
+//! disk — no appliance has ever parsed a manifest — and it is append-only from the first
+//! one that does.
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::partition::Slot;
 use crate::version::{MANIFEST_VERSION, OsVersion};
 
 /// Reads `manifest_version` and nothing else.
@@ -78,7 +89,8 @@ impl RawManifest {
     ///
     /// # Errors
     /// Returns [`ManifestError::UnsupportedVersion`] for a version this build does not
-    /// implement, or [`ManifestError::Malformed`] if the body does not parse.
+    /// implement, [`ManifestError::Malformed`] if the body does not parse, or
+    /// [`ManifestError::Inconsistent`] if it parses into something that cannot be true.
     pub fn parse(&self) -> Result<Manifest, ManifestError> {
         let found = self.probe_version()?;
         if found != MANIFEST_VERSION {
@@ -87,7 +99,10 @@ impl RawManifest {
                 supported: MANIFEST_VERSION,
             });
         }
-        serde_json::from_slice(&self.bytes).map_err(|e| ManifestError::Malformed(e.to_string()))
+        let manifest: Manifest = serde_json::from_slice(&self.bytes)
+            .map_err(|e| ManifestError::Malformed(e.to_string()))?;
+        manifest.check_internal_consistency()?;
+        Ok(manifest)
     }
 }
 
@@ -103,6 +118,12 @@ pub enum ManifestError {
     },
     /// The bytes are not a well-formed manifest.
     Malformed(String),
+    /// The manifest parsed, and says two things that cannot both be true.
+    ///
+    /// Separate from [`ManifestError::Malformed`] because the remedies differ entirely: a
+    /// malformed manifest is a publishing tool that produced rubbish, and an inconsistent
+    /// one is a publishing tool that produced two fields from two different places.
+    Inconsistent(String),
 }
 
 impl fmt::Display for ManifestError {
@@ -114,6 +135,11 @@ impl fmt::Display for ManifestError {
                  (supports {supported}); update to a newer PlexOS release first"
             ),
             Self::Malformed(detail) => write!(f, "malformed manifest: {detail}"),
+            Self::Inconsistent(detail) => write!(
+                f,
+                "this manifest contradicts itself: {detail}. Republish it; nothing on \
+                 the appliance can make the two halves agree"
+            ),
         }
     }
 }
@@ -131,6 +157,20 @@ pub struct Manifest {
     pub channel: Channel,
     /// Human-readable release version. Never used to decide update eligibility.
     pub os_version: OsVersion,
+    /// The exact version string the image carries, verbatim.
+    ///
+    /// `0.1.0.202607281844`: [`Manifest::os_version`] plus the build stamp. It is what
+    /// `os-release` sets as `VERSION_ID`, what names the boot entry, and what
+    /// `systemd-boot` orders entries by — so a device that installs this update compares
+    /// *this* string against what it is running, and gets a slot the bootloader then
+    /// declines to choose if the two disagree.
+    ///
+    /// Carried verbatim rather than composed from [`Manifest::os_version`] and a build
+    /// field. Recomposing is how a publisher and a device come to disagree about the
+    /// version of the thing they are both holding, and the symptom is an update that
+    /// installs and appears to do nothing. [`RawManifest::parse`] checks that the two
+    /// agree, which catches the drift at the device rather than at the bootloader.
+    pub release: String,
     /// Monotonic anti-rollback counter.
     ///
     /// This, not [`Manifest::os_version`], is the security boundary. A device persists
@@ -147,10 +187,70 @@ pub struct Manifest {
     pub min_sequence: Option<u64>,
     /// The `/usr` image and its verity data.
     pub usr: UsrPayload,
-    /// The Unified Kernel Image, carrying the verity root hash on its command line.
-    pub uki: Artifact,
+    /// The Unified Kernel Images, one per slot.
+    pub uki: UkiSet,
     /// Which key signed this manifest.
     pub signing: Signing,
+}
+
+/// One Unified Kernel Image per slot.
+///
+/// Not one image with a slot chosen at install time, because `plexos.slot=` is on the
+/// kernel command line *inside* the UKI, and the command line is inside the section the
+/// UKI's own hashes cover. Building one on the appliance would need `objcopy`, which is
+/// not in the image and should not be; patching a PE section in place is how a UKI stops
+/// matching its own hashes. So the publisher builds both and the device takes the one for
+/// the slot it is about to write.
+///
+/// The failure this shape prevents is quiet: a device that wrote slot B and installed
+/// slot A's entry would boot with `plexos.slot=a`, mount the slot it is running from, and
+/// look exactly like an update that did nothing — or, with the two slots' root hashes
+/// differing, fail dm-verity in a way that reads as a corrupt download.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UkiSet {
+    /// The image that boots slot A.
+    pub a: Artifact,
+    /// The image that boots slot B.
+    pub b: Artifact,
+}
+
+impl UkiSet {
+    /// The image that boots `slot`.
+    #[must_use]
+    pub const fn for_slot(&self, slot: Slot) -> &Artifact {
+        match slot {
+            Slot::A => &self.a,
+            Slot::B => &self.b,
+        }
+    }
+}
+
+impl Manifest {
+    /// Checks the things a manifest can get wrong about itself.
+    ///
+    /// Only claims this document makes about its *own* fields — never about the machine
+    /// reading it, which is the updater's job. Called by [`RawManifest::parse`] so that
+    /// holding a [`Manifest`] means these have been checked.
+    ///
+    /// # Errors
+    /// [`ManifestError::Inconsistent`], naming the two fields that disagree.
+    pub fn check_internal_consistency(&self) -> Result<(), ManifestError> {
+        let human = self.os_version.to_string();
+        // `release` must *extend* `os_version`, and the boundary has to be a dot: without
+        // it, os_version 0.1.1 would accept release 0.1.10, which is a different release
+        // that sorts differently — the exact class of mistake this check exists for.
+        let extends = self.release == human
+            || (self.release.starts_with(&human)
+                && self.release.as_bytes().get(human.len()) == Some(&b'.'));
+        if !extends {
+            return Err(ManifestError::Inconsistent(format!(
+                "it declares os_version {human} and release {}, and a release string must \
+                 be the os_version optionally followed by a dot and a build stamp",
+                self.release
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Release channel.
@@ -234,7 +334,19 @@ impl Artifact {
 pub enum Source {
     /// Download the complete artifact.
     Full {
-        /// Location of the artifact.
+        /// Location of the artifact: an absolute `http`/`https` URL, or a bare file name
+        /// beside the manifest.
+        ///
+        /// A bare name is what PlexOS publishes, and the reason is that the signature
+        /// covers these bytes. An absolute URL fixed at build time would tie a signed
+        /// manifest to the one address it was built for, so moving a bundle to another
+        /// host — which is every publish this project has ever done — would mean
+        /// re-signing it with a key that is meant to be offline. A name is resolved
+        /// against wherever the manifest itself was fetched from.
+        ///
+        /// The reader decides what a name may look like; it is joined to a URL and to a
+        /// path, so `..` or a leading `/` would let a publisher choose what the device
+        /// reads and writes. See `plexos_update::location`.
         url: String,
     },
     /// Reconstruct the artifact from content-addressed chunks, reusing what the
@@ -297,8 +409,75 @@ mod tests {
         assert_eq!(m.product, "plexos");
         assert_eq!(m.channel, Channel::Stable);
         assert_eq!(m.os_version, OsVersion::new(0, 1, 0));
-        assert_eq!(m.sequence, 1);
+        assert_eq!(m.release, "0.1.0.202607281844");
+        assert_eq!(m.sequence, 202_607_281_844);
         assert_eq!(m.usr.format, ImageFormat::Erofs);
+    }
+
+    #[test]
+    fn each_slot_gets_its_own_kernel_image() {
+        // The correction this schema needed. `plexos.slot=` is on the command line inside
+        // the UKI, so there is no such thing as "the" UKI for a release: writing slot B
+        // and installing slot A's entry produces a machine that boots the slot it was
+        // already running, which reads as an update that did nothing.
+        let m = fixture().parse().unwrap();
+        assert_ne!(m.uki.a, m.uki.b, "two slots, two images");
+        assert_eq!(m.uki.for_slot(Slot::A), &m.uki.a);
+        assert_eq!(m.uki.for_slot(Slot::B), &m.uki.b);
+        for slot in Slot::ALL {
+            let Some(Source::Full { url }) = m.uki.for_slot(slot).first_supported_source() else {
+                panic!("every slot's image must be fetchable");
+            };
+            assert!(
+                url.ends_with(&format!("-{slot}.efi")),
+                "{slot}'s image is published as {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_manifest_offering_one_image_for_both_slots_does_not_parse() {
+        // The old shape of this field, and the reason it is worth refusing loudly rather
+        // than defaulting: a device that accepted it would have to guess which slot the
+        // single image boots, and would be right half the time.
+        let mut json: serde_json::Value = serde_json::from_slice(fixture().signed_bytes()).unwrap();
+        json["uki"] = json["uki"]["a"].clone();
+        let raw = RawManifest::new(serde_json::to_vec(&json).unwrap());
+        assert!(matches!(raw.parse(), Err(ManifestError::Malformed(_))));
+    }
+
+    #[test]
+    fn the_release_string_must_extend_the_human_version() {
+        // Both fields describe the same release and come from different places in the
+        // publisher. When they drift, the device compares the wrong one against what it
+        // is running and installs a slot systemd-boot then declines to choose.
+        let mut json: serde_json::Value = serde_json::from_slice(fixture().signed_bytes()).unwrap();
+        json["release"] = serde_json::json!("0.2.0.202607281844");
+        let raw = RawManifest::new(serde_json::to_vec(&json).unwrap());
+        match raw.parse() {
+            Err(ManifestError::Inconsistent(detail)) => {
+                assert!(detail.contains("0.1.0"), "{detail}");
+                assert!(detail.contains("0.2.0.202607281844"), "{detail}");
+            }
+            other => panic!("expected an inconsistency, got {other:?}"),
+        }
+
+        // And the boundary is a dot, so a release of a *different* version that happens
+        // to share a prefix is caught too.
+        json["os_version"] = serde_json::json!("0.1.1");
+        json["release"] = serde_json::json!("0.1.10");
+        let raw = RawManifest::new(serde_json::to_vec(&json).unwrap());
+        assert!(matches!(raw.parse(), Err(ManifestError::Inconsistent(_))));
+    }
+
+    #[test]
+    fn a_release_with_no_build_stamp_is_allowed() {
+        // Not every image has to carry one, and refusing this would be a rule about the
+        // publisher's version scheme rather than about consistency.
+        let mut json: serde_json::Value = serde_json::from_slice(fixture().signed_bytes()).unwrap();
+        json["release"] = serde_json::json!("0.1.0");
+        let raw = RawManifest::new(serde_json::to_vec(&json).unwrap());
+        assert_eq!(raw.parse().unwrap().release, "0.1.0");
     }
 
     #[test]
@@ -343,7 +522,7 @@ mod tests {
         let mut json: serde_json::Value = serde_json::from_slice(fixture().signed_bytes()).unwrap();
         json["field_from_the_future"] = serde_json::json!({"nested": [1, 2, 3]});
         let raw = RawManifest::new(serde_json::to_vec(&json).unwrap());
-        assert_eq!(raw.parse().unwrap().sequence, 1);
+        assert_eq!(raw.parse().unwrap().sequence, 202_607_281_844);
     }
 
     #[test]

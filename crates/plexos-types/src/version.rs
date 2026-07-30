@@ -19,6 +19,17 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
+/// What this product is called in machine-readable places.
+///
+/// The manifest's `product` field and `os-release`'s `ID` are the same string, and an
+/// update whose product does not match is one built for a different appliance — a check
+/// that costs nothing and that a signature cannot make for you, since a correctly signed
+/// manifest for something else is still correctly signed.
+///
+/// Lower-case and no spaces, because `os-release` says so. This is one of the things the
+/// open naming decision would change; it is a constant so that changing it is one edit.
+pub const PRODUCT: &str = "plexos";
+
 /// Manifest structure version understood by this build (ADR-0006).
 pub const MANIFEST_VERSION: u32 = 1;
 

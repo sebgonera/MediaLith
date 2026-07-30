@@ -11,6 +11,8 @@
 //! plexos-sign signing-key <path>                    make a signing key
 //! plexos-sign certify    <root> <signing> <id> <until>   certify a signing key
 //! plexos-sign sign       <signing-key> <file>       detached signature, base64
+//! plexos-sign check      <root-key> <manifest> <sig>  verify as the appliance will
+//! plexos-sign revoke     <root-key> <counter> <id>... publish a revocation list
 //! plexos-sign trust      <root-key> <id>            print the ROOT_KEYS entry
 //! ```
 //!
@@ -57,6 +59,16 @@ plexos-sign — the publisher's half of ADR-0006
   plexos-sign sign <signing-key> <file>
       Print a detached base64 Ed25519 signature over the file's exact bytes.
 
+  plexos-sign check <root-key> <manifest> <signature-file>
+      Run the appliance's own verification against this manifest, using the public
+      half of <root-key>. The last thing to do before publishing: it answers
+      whether the machine will take this, on the build host rather than after a
+      74 MB download.
+
+  plexos-sign revoke <root-key> <counter> <key-id>...
+      Print a root-signed revocation list. <counter> must be higher than any list
+      previously published, or appliances holding the older one will ignore this.
+
   plexos-sign trust <root-key> <key-id>
       Print the ROOT_KEYS entry to paste into crates/plexos-update/src/trust.rs.
 
@@ -75,6 +87,12 @@ fn main() -> ExitCode {
             certify(Path::new(root), Path::new(signing), key_id, not_after)
         }
         ["sign", key, file] => sign(Path::new(key), Path::new(file)),
+        ["check", root, manifest, signature] => {
+            check(Path::new(root), Path::new(manifest), Path::new(signature))
+        }
+        ["revoke", root, counter, ids @ ..] if !ids.is_empty() => {
+            revoke(Path::new(root), counter, ids)
+        }
         ["trust", key, key_id] => trust(Path::new(key), key_id),
         ["--help" | "-h"] | [] => {
             print!("{USAGE}");
@@ -170,6 +188,79 @@ fn sign(key: &Path, file: &Path) -> Result<(), String> {
         std::fs::read(file).map_err(|e| format!("could not read {}: {e}", file.display()))?;
 
     println!("{}", ENGINE.encode(key.sign(&bytes).to_bytes()));
+    Ok(())
+}
+
+/// Verifies a manifest exactly as the appliance will, against a root key.
+///
+/// The reason this exists is the reason the tool lives in this crate: a signer and a
+/// verifier that agree only by coincidence produce one symptom, once, in the field. This
+/// makes the field be the build host.
+///
+/// The root key is given as its private file because that is what a publisher has; only
+/// the public half is used.
+fn check(root: &Path, manifest: &Path, signature: &Path) -> Result<(), String> {
+    let root_key = read_private(root)?;
+    let bytes = std::fs::read(manifest)
+        .map_err(|e| format!("could not read {}: {e}", manifest.display()))?;
+    let encoded = std::fs::read_to_string(signature)
+        .map_err(|e| format!("could not read {}: {e}", signature.display()))?;
+
+    let signature = plexos_update::trust::decode_signature(&encoded).map_err(|e| e.to_string())?;
+    let roots = [plexos_update::trust::RootKey {
+        id: root_id_hint(),
+        public_key: root_key.verifying_key().to_bytes(),
+        development: true,
+    }];
+
+    // No clock is passed. An expired certificate must be caught here, but the publisher's
+    // clock is not the appliance's, and this tool cannot answer what time the machine will
+    // think it is when it fetches this. The expiry is checked at `certify` time instead --
+    // and the appliance rechecks it, which is the check that counts.
+    let verified = plexos_update::trust::verify(
+        &plexos_update::trust::Policy {
+            roots: &roots,
+            revoked: &[],
+            now: None,
+        },
+        &plexos_types::manifest::RawManifest::new(bytes),
+        &signature,
+    )
+    .map_err(|e| format!("an appliance would refuse this manifest.\n  {e}"))?;
+
+    println!(
+        "{} {} verifies: signed by {}, certified by {}",
+        verified.manifest.product, verified.manifest.release, verified.key_id, verified.root_key_id
+    );
+    println!("  sequence {}", verified.manifest.sequence);
+    Ok(())
+}
+
+/// Prints a root-signed revocation list.
+fn revoke(root: &Path, counter: &str, key_ids: &[&str]) -> Result<(), String> {
+    let counter: u64 = counter.parse().map_err(|_| {
+        format!(
+            "{counter} is not a number. Remedy: the counter is what stops an old list \
+             being replayed to un-revoke a key, so it must be an integer higher than any \
+             list already published."
+        )
+    })?;
+    let root = read_private(root)?;
+
+    // Text, in a fixed field order, for the same reason `certify` builds text: these exact
+    // bytes are what gets signed and what the device will verify.
+    let quoted: Vec<String> = key_ids.iter().map(|id| format!("\"{id}\"")).collect();
+    let body = format!(
+        r#"{{"counter":{counter},"root_key_id":"{}","revoked":[{}]}}"#,
+        root_id_hint(),
+        quoted.join(",")
+    );
+
+    println!(
+        "{}.{}",
+        ENGINE.encode(body.as_bytes()),
+        ENGINE.encode(root.sign(body.as_bytes()).to_bytes())
+    );
     Ok(())
 }
 
@@ -352,11 +443,14 @@ mod tests {
         let signature = signing.sign(&bytes);
 
         let raw = plexos_types::manifest::RawManifest::new(bytes);
-        let verified = plexos_update::trust::verify_against(
-            &roots,
+        let verified = plexos_update::trust::verify(
+            &plexos_update::trust::Policy {
+                roots: &roots,
+                revoked: &[],
+                now: Some("2026-07-29T00:00:00Z"),
+            },
             &raw,
             &signature.to_bytes(),
-            Some("2026-07-29T00:00:00Z"),
         )
         .expect("what this tool produces must verify");
 
