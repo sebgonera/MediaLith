@@ -100,41 +100,53 @@ the hardware alone months before Plex existed on the machine.
 
 Next, in order:
 
-1. **Finish signing (ADR-0006).** The chain is written: `plexos-update::trust` verifies
-   root key → certificate → signing key → detached signature over the manifest's raw
-   bytes, and `plexos-sign` is the publisher's half, with a test that signs with one and
-   verifies with the other. `ROOT_KEYS` is empty, so nothing is trusted and nothing calls
-   any of it yet; updates behave exactly as before.
+1. **Finish signing (ADR-0006).** The widest gap between what the appliance does and what
+   it should be allowed to do: the updater trusts whoever answers at the address it was
+   given. The chain is written and tested — `plexos-update::trust` verifies root key →
+   certificate → signing key → detached signature over the manifest's raw bytes, and
+   `plexos-sign` is the publisher's half — but `ROOT_KEYS` is empty, so nothing is trusted
+   and nothing calls any of it. Updates behave exactly as before.
 
    Three things remain. A development root key has to be generated and baked in, which is
    a key-custody decision rather than a coding one. The updater has to move onto the
-   ADR-0006 manifest — and that has an obstacle worth knowing before starting: the frozen
-   schema in `plexos-types::manifest` has a single `uki`, while PlexOS builds one per slot
+   ADR-0006 manifest, and that has an obstacle worth knowing before starting: the schema
+   in `plexos-types::manifest` has a single `uki`, while PlexOS builds one per slot
    because `plexos.slot=` is on the command line inside it. That crate is append-only
    because its formats reach disks, and this one never has — the appliance has only ever
    parsed the improvised `update.json` — so reconciling it is cheap now and never again.
    Then anti-rollback by `sequence`: `paths::ACCEPTED_SEQUENCE_FILE` and `REVOCATION_FILE`
-   are declared and have no callers, which is the shape of two defects already in this
+   are declared and have no callers, which is the shape of three defects already in this
    file.
-3. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
-   asked for and both are deferred: an 83 MB upload has to stream to disk, and
-   `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
-4. **A supervisor.** `plexos-init` still prints "no supervisor yet" and hands over to a
+
+2. **A supervisor.** `plexos-init` still prints "no supervisor yet" and hands over to a
    shell. Nothing restarts a service that dies — and `plexosd::plex` says so rather than
    pretending: a Plex that exits stays exited, and a newly provisioned version does not
-   replace a running one without a reboot.
-5. **Prove the *other* rollback path.** The unbootable-image branch has now run (below).
-   What has not is the one where the image boots and the system does not work — the gate
+   replace a running one without a reboot. This is the largest piece of missing
+   *function*, as opposed to missing trust.
+
+3. **Prove the other rollback path.** The unbootable-image branch has run (below). What
+   has not is the one where the image boots and the system does not work — the gate
    restarting to spend a try, and the record it leaves on `/var`. That code is written and
    tested and has never executed on hardware. Staging it needs a bundle that boots but
    whose Plex cannot start, which is a realistic bad update and not obviously easy to
    build deliberately.
-6. **Configuration from the page.** `plexosd::settings` reads, writes and *applies*
-   `/etc/plexos/config.toml`: hostname through a new `sethostname(2)` in `plexos-sys`,
-   timezone through `/etc/localtime` against a zoneinfo database the image now carries.
-   Static addressing is the notable gap, and it is the one setting that cuts off the
-   console when it is wrong — so it needs apply-then-revert-unless-confirmed, the same
-   shape as ADR-0005.
+
+4. **Installer and first-boot wizard.** Never started, and the reason it has not mattered
+   is that the only installs so far were `dd` onto a disk by somebody who wrote the image.
+   A machine handed to anybody else needs both.
+
+5. **`xe` firmware is not in the image at all**, only `i915/`. Found while fixing the
+   GuC/HuC list. `CONFIG_DRM_XE=y`, so Arc parts bind — but a driver without its firmware
+   is the thing that just cost an evening, and the claim that current Arc works today is
+   softer than it looked.
+
+6. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
+   asked for and both are deferred: an 83 MB upload has to stream to disk, and
+   `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
+
+7. **NVIDIA (ADR-0015).** Planned in detail, deliberately unscheduled. The blocker is
+   `CONFIG_MODULES=n`, not the driver. Steps 1 and 2 of that ADR are about half a day and
+   answer most of the risk.
 
 **Hardware transcoding works.** `/api/gpu` on the reference laptop reports H.264 and
 HEVC Main and Main10 decode *and* encode, plus VP9 decode, with GuC and HuC running —
@@ -485,6 +497,24 @@ does not work. Images are unsigned, so Secure Boot must be off.
   the manifest instead tests the updater's parser and proves nothing about ADR-0005.
   `tools/break-bundle.sh` does the former, and `veritysetup verify` will confirm the
   premise on the build host before anything is sent to a machine.
+
+## It has now run on four machines in two days
+
+The reference laptop (UHD 620), an RTX 5060 desktop with no integrated graphics, an Alder
+Lake-P laptop, and back to the reference laptop — the USB stick simply moved. Every one of
+those moves found a defect that had been latent for weeks, and none of them was found by
+reading code:
+
+- **The RTX machine** had no driver bound at all, and the GPU report advised enabling an
+  integrated GPU it does not have. Now it reads the PCI bus and names the device.
+- **The Alder Lake laptop** had a fully working VA-API stack, `ready` health, and Plex on
+  the CPU: the render node was `0600 root:root` because there is no `udev` here, and every
+  probe above it runs as root.
+- **The same laptop** then transcoded on the GPU at reduced quality, because the initramfs
+  carried GuC/HuC firmware for exactly one generation — the one the reference laptop needs.
+
+The lesson they share is the one this file keeps recording in different words: a thing that
+is true about the machine it was written on is not a thing that is true.
 
 ## Other hardware it has been tried on
 
