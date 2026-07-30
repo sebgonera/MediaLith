@@ -709,20 +709,23 @@ pub fn supervise(handle: &Handle, mount: &Path, log: &mut dyn FnMut(&str)) -> ! 
             provisioned: is_provisioned(mount),
         };
 
-        if restart_reason(handle.is_wanted(), &seen).is_none() {
+        let Some(reason) = restart_reason(handle.is_wanted(), &seen) else {
             // Healthy, or deliberately down. Either way the history is forgiven: the next
             // failure should be treated as the first one, not as the fifth.
             failures = 0;
             continue;
-        }
+        };
 
         if std::time::Instant::now() < next_attempt {
             continue;
         }
 
         let delay = RESTART_BACKOFF[failures.min(RESTART_BACKOFF.len() - 1)];
+        // The reason is reported rather than restated. A message composed here would drift
+        // from the condition that produced it, and the condition is the tested part -- a
+        // returned string nobody prints is also a string the compiler quietly discards.
         log(&format!(
-            "Plex is not running; starting it again{}",
+            "{reason}; starting it again{}",
             if delay.is_zero() {
                 String::new()
             } else {

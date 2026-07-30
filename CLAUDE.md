@@ -42,7 +42,7 @@ Everything else is cheap to revise. Prefer revising it.
 | `crates/plexos-update` | Which slot an update goes to, writing a partition and reading it back, the ADR-0006 trust chain, the anti-rollback sequence, root-signed revocation, boot-entry/slot agreement, and `plexos-sign` as the publisher's half. 65 tests. **Has updated the reference laptop four times, alternating slots — and one of those updates was deliberately unbootable and was rolled back.** All four were unsigned, through an improvised `update.json` this crate no longer parses. **Nothing signed has yet reached a machine.** |
 | `crates/plexos-gpu` | 46 tests, and it has now answered the question it was written for — on four machines, three of which it was wrong about until they were tried. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
 | `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, `reboot(2)`, `sethostname(2)`, PTY allocation for the console terminal, and reaping children for PID 1. 86 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
-| `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role mounts the Plex app image, then keeps the console and a shell running: it reaps orphans, restarts what dies with a widening delay, and never exits. 62 tests. **The supervisor has never booted.** |
+| `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role mounts the Plex app image, then keeps the console and a shell running: it reaps orphans, restarts what dies with a widening delay, and never exits. 62 tests. **PID 1 stays alive on the appliance and has restarted both of its services after they were killed.** |
 | `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates, the configuration model actually applied (ADR-0008), and the terminal session (ADR-0014), the updater on the signed manifest, and a supervisor that restarts Plex and swaps a newly-installed version in without a reboot. 251 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
 | `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 104 tests. Provisioning now runs end to end **on the appliance**, driven from a browser: download, signature, manifest, build, publish, mount, confine, start. |
 | `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. |
@@ -100,47 +100,31 @@ the hardware alone months before Plex existed on the machine.
 
 Next, in order:
 
-1. **Prove the supervisor.** Written, tested and **never booted**. `plexos-init` no longer
-   execs a shell: it stays alive as PID 1, reaps orphans, restarts a service that dies with
-   a widening delay, and respawns the console shell like a getty. `plexosd` watches Plex on
-   a thread and restarts one that exits — consulting both whether it holds a live child and
-   whether anything answers on loopback, because a restarted `plexosd` owns no child while a
-   perfectly good orphaned Plex serves away, and a child can be alive for the twenty seconds
-   before Plex opens its port. A deliberate stop is recorded, so the supervisor does not
-   start a server on a machine that is powering off. And a newly-provisioned version now
-   replaces a running one without a reboot: stop, unmount, mount what `current` points at,
-   start.
-
-   **Changing PID 1 is the riskiest edit in this repository**, and the next image is what
-   finds out: a supervisor that exits panics the kernel, and if the thing that fails is what
-   starts the console there is nothing to read the reason on. The way back is slot B, which
-   holds `0.1.0.202607291945`, at the cost of the three boots ADR-0005 charges.
-
-2. **Prove the other rollback path.** The unbootable-image branch has run (below). What
+1. **Prove the other rollback path.** The unbootable-image branch has run (below). What
    has not is the one where the image boots and the system does not work — the gate
    restarting to spend a try, and the record it leaves on `/var`. That code is written and
    tested and has never executed on hardware. Staging it needs a bundle that boots but
    whose Plex cannot start, which is a realistic bad update and not obviously easy to
    build deliberately.
 
-3. **Installer and first-boot wizard.** Never started, and the reason it has not mattered
+2. **Installer and first-boot wizard.** Never started, and the reason it has not mattered
    is that the only installs so far were `dd` onto a disk by somebody who wrote the image.
    A machine handed to anybody else needs both.
 
-4. **`xe` firmware is not in the image at all**, only `i915/`. Found while fixing the
+3. **`xe` firmware is not in the image at all**, only `i915/`. Found while fixing the
    GuC/HuC list. `CONFIG_DRM_XE=y`, so Arc parts bind — but a driver without its firmware
    is the thing that just cost an evening, and the claim that current Arc works today is
    softer than it looked.
 
-5. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
+4. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
    asked for and both are deferred: an 83 MB upload has to stream to disk, and
    `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
 
-6. **NVIDIA (ADR-0015).** Planned in detail, deliberately unscheduled. The blocker is
+5. **NVIDIA (ADR-0015).** Planned in detail, deliberately unscheduled. The blocker is
    `CONFIG_MODULES=n`, not the driver. Steps 1 and 2 of that ADR are about half a day and
    answer most of the risk.
 
-7. **TLS on the console (ADR-0014).** Sequenced after update signing and now due: with the
+6. **TLS on the console (ADR-0014).** Sequenced after update signing and now due: with the
    update path closed, the console's root shell over plain HTTP is the widest opening left.
 
 **Hardware transcoding works.** `/api/gpu` on the reference laptop reports H.264 and
@@ -201,6 +185,21 @@ of them.
 
 The root key is a development key: its private half is on the build host, and every place
 that reports a signature says so, including the appliance's own log line.
+
+**And nothing runs unattended any more.** `0.1.0.202607301247` — the first release
+installed through the signed path end to end — boots with `plexos-init` still alive as
+PID 1. Proved by killing things on the machine: the console shell was killed and came back
+with a new pid, Plex was killed and `plexosd` restarted it within twenty-five seconds, and
+`plexosd` itself was killed and PID 1 had the console answering again five seconds later.
+The last of those is the case worth having built for: Plex survived its parent, was
+reparented to PID 1, and the *new* `plexosd` saw it answering and did **not** start a
+second server into the same `SQLite` database.
+
+It also found a defect nothing else could have. With PID 1 finally reaping, one zombie
+turned up that was not PID 1's to reap: `udhcpc`, a child of `plexosd`. `-b` makes it fork,
+so the process `plexosd` spawns exits at once and the resident client is its child — while
+a comment in `net.rs` said it stayed resident and there was nothing to wait for. One leaked
+process per `plexosd` start, invisible until something else started counting.
 
 Still unproven: revocation, which has tests and no history, and the half of rollback where
 the image boots but the system does not work. **Kernel images are still unsigned, so Secure
@@ -507,6 +506,14 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
   verdict and the version string with it, and the system that comes back is the older one,
   which cannot tell it is a replacement. `/var` is the only surface that survives, and it
   survives because of the rule that makes it awkward everywhere else.
+- **A daemon that spawns and never waits leaks a zombie per spawn, and only PID 1 reaping
+  makes it visible.** `plexosd` starts `udhcpc` with `-b`, which forks — so the process it
+  spawned exits at once and the resident client is a *grandchild*. The comment in `net.rs`
+  said udhcpc stayed resident and there was nothing to wait for, which describes the
+  behaviour without `-b`. One leaked process per `plexosd` start, found on the appliance the
+  hour PID 1 began reaping, because a zombie turned up whose parent was not PID 1. The fix
+  is `Child::wait` on a thread and **not** a general reaper: `waitpid(-1)` in a process that
+  also runs `Command::output()` steals the child that call is waiting for.
 - **`waitpid(-1)` is process-wide, so only PID 1 may reap.** It collects *any* child,
   including one something else in the same process is waiting for. The first thing it broke
   was the test suite: Rust runs tests as threads in one process, so the new reaping tests

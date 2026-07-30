@@ -619,8 +619,9 @@ fn link_up(
 /// a network problem, not one that should refuse to finish booting or roll back its
 /// operating system.
 ///
-/// `udhcpc` is spawned rather than waited on: it stays resident to renew the lease, so
-/// waiting for it to exit would mean waiting for the lease to expire.
+/// The `udhcpc` that keeps the lease is a *grandchild*: `-b` makes it fork and the
+/// process spawned here exits at once. Something has to collect that exit or it is a
+/// zombie for the life of the daemon — see the thread below.
 ///
 /// # Errors
 /// Fails if no wired interface acquires a carrier within `timeout`, or if `udhcpc`
@@ -660,7 +661,7 @@ pub fn configure(
     // default gateway. busybox sh happens to install a usable default when PATH is
     // unset, so this is belt and braces rather than a fix -- but the whole reason this
     // module now resolves absolute paths is that the same assumption was wrong once.
-    std::process::Command::new(&udhcpc)
+    let child = std::process::Command::new(&udhcpc)
         .args(["-i", &interface.name, "-b", "-R"])
         .env("PATH", PROGRAM_DIRS.join(":"))
         .spawn()
@@ -674,6 +675,24 @@ pub fn configure(
                 ),
             )
         })?;
+
+    // On a thread, and this is not tidiness. `-b` makes udhcpc fork, so the process
+    // spawned above exits immediately and the resident client is its child -- reparented
+    // to PID 1, which now collects it. Nothing collected the *direct* child, so every
+    // plexosd left one zombie behind, found by looking at a real machine after PID 1
+    // started reaping and one turned up that was not PID 1's to reap.
+    //
+    // Waiting here would be wrong, because the exit is only immediate when udhcpc
+    // backgrounds itself, and a thread cannot make the caller late either way.
+    //
+    // A general reaper in this process would be worse than the leak: `waitpid(-1)`
+    // collects *any* child, and plexosd runs curl, ip, losetup and sha256sum through
+    // `Command::output()`, which waits for a specific pid and fails with ECHILD if
+    // something else got there first. `Child::wait` waits for this one.
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
 
     log(&format!(
         "{} has a carrier; udhcpc is running",
