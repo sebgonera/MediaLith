@@ -57,6 +57,7 @@ pub mod power;
 pub mod provision;
 pub mod rollback;
 pub mod settings;
+pub mod setup;
 pub mod shares;
 pub mod status;
 pub mod terminal;

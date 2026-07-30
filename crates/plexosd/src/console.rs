@@ -115,6 +115,16 @@ pub fn respond(
             Err(error) => Response::text(500, format!("could not serialise progress: {error}\n")),
         },
 
+        // What a new appliance still needs, in order (ADR-0016). Read-only and derived
+        // entirely from state other endpoints already report, so it cannot disagree with
+        // them.
+        ("GET" | "HEAD", "/api/setup") => {
+            match serde_json::to_string(&crate::setup::Report::observe()) {
+                Ok(json) => Response::json(json),
+                Err(error) => Response::text(500, format!("could not serialise setup: {error}\n")),
+            }
+        }
+
         // Putting PlexOS on a disk (ADR-0016). The most destructive route here, and the
         // only one whose refusals are the point rather than the edge cases.
         ("GET" | "HEAD", "/api/install") => report_disks(env, install),
@@ -1143,6 +1153,20 @@ mod tests {
             PAGE.contains("comes back to this one by itself"),
             "and must say what happens when an update is bad, which is the question \
              anybody hesitating over that button is actually asking"
+        );
+    }
+
+    #[test]
+    fn the_page_leads_a_new_appliance_through_setup_and_then_stops() {
+        // A machine five minutes old used to show exactly the page one running for a year
+        // showed. The section has to exist, has to be driven by the endpoint rather than by
+        // anything the browser remembers, and has to disappear on its own -- a banner that
+        // must be dismissed is one people dismiss before reading.
+        assert!(PAGE.contains("\"/api/setup\""));
+        assert!(PAGE.contains("This appliance has just been installed"));
+        assert!(
+            PAGE.contains("report.complete"),
+            "the section's visibility comes from the machine's own state"
         );
     }
 

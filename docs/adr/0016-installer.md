@@ -1,6 +1,6 @@
 # ADR-0016: The installer, and the first boot after it
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-07-30
 
 ## Context
@@ -102,6 +102,23 @@ nothing saying that is the next thing to do.
 
 The wizard is that ordering, over the endpoints that are already there. It is finished when
 Plex is answering, and after that the console is what it is today.
+
+**It computes rather than remembers.** No progress is stored anywhere: each step is derived
+from the state it is about — is there a configuration file, an app image, a Plex that
+answers — so it cannot drift from the machine, cannot be completed by something that did not
+happen, and cannot be reset by clearing a flag. An appliance whose Plex is removed goes back
+to needing one, which is true of it.
+
+Two steps are *suggestions* rather than requirements: naming the machine, and mounting a
+share. A library can be on a disk inside the machine, and an appliance that called itself
+unfinished for ever because nobody attached a NAS would be wrong about its own state. They
+are still offered in their turn, and their turn is before Plex — Plex registers itself under
+the name the machine has at the time, and a library that is not mounted when it first scans
+is one somebody has to work out why is empty.
+
+The one step not computed here is the first: whether somebody has the device token. That is
+a fact about a browser rather than about the appliance — the token is issued at first start
+whether or not anyone has read it off the screen (ADR-0013) — so the page asks it.
 
 ## Alternatives considered
 

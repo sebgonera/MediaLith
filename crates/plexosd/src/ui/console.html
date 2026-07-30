@@ -179,6 +179,18 @@
   }
   .empty { color: var(--muted); }
 
+  /* The first-boot flow. Sits above everything because it is what a new appliance is
+     for, and disappears entirely once there is nothing left to do. */
+  .setup { margin: 1.5rem 0; border-left: 4px solid var(--accent); }
+  .steps { list-style: none; margin: .9rem 0 0; padding: 0; display: grid; gap: .8rem; counter-reset: step; }
+  .steps .step { display: grid; grid-template-columns: 1.6rem 1fr; gap: .6rem; align-items: start; }
+  .steps .mark { font-weight: 700; color: var(--muted); }
+  .steps .done .mark { color: var(--ready); }
+  .steps .next .mark { color: var(--accent); }
+  .steps .done strong { color: var(--muted); font-weight: 500; }
+  .steps .next strong { color: var(--accent); }
+  .steps .hint { margin: .2rem 0 0; color: var(--muted); font-size: .9rem; }
+
   /* Disks, in the install section. Each row has to read as a piece of hardware
      somebody owns rather than as a device name. */
   .disks { list-style: none; margin: .9rem 0 0; padding: 0; display: grid; gap: .7rem; }
@@ -478,6 +490,7 @@ const TOKEN_KEY = "plexos-device-token";
 const SOURCE_KEY = "plexos-update-source";
 const UPDATE_ENDPOINT = "/api/update";
 const INSTALL_ENDPOINT = "/api/install";
+const SETUP_ENDPOINT = "/api/setup";
 const SHARES_ENDPOINT = "/api/shares";
 
 function token() { return sessionStorage.getItem(TOKEN_KEY) || ""; }
@@ -1535,6 +1548,50 @@ async function tick() {
   }
 }
 
+let lastSetupRendered = null;
+
+/** The first-boot flow: one thing to do, in order, until there is nothing left. */
+function renderSetup(report) {
+  const host = document.getElementById("setup");
+  const rendered = JSON.stringify(report);
+  if (rendered === lastSetupRendered) return;
+  lastSetupRendered = rendered;
+
+  // Gone the moment the required steps are done, rather than dismissed. A banner that has
+  // to be closed is one people close before reading; a banner that goes away when the
+  // machine is ready says something true about the machine.
+  if (report.complete) { host.hidden = true; return; }
+  host.hidden = false;
+
+  const mark = step => step.state === "done" ? "✓" : step.state === "next" ? "→" : "·";
+  const row = step => `
+    <li class="step ${esc(step.state)}">
+      <span class="mark">${mark(step)}</span>
+      <div>
+        <strong>${esc(step.title)}</strong>${step.required ? "" : ` <span class="hint">optional</span>`}
+        <div class="hint">${esc(step.detail)}</div>
+      </div>
+    </li>`;
+
+  host.innerHTML = `
+    <h3>Setting up</h3>
+    <p class="hint">This appliance has just been installed. The steps below are what is
+       left; each one is a card further down this page.</p>
+    <ol class="steps">${(report.steps || []).map(row).join("")}</ol>`;
+}
+
+/** Polls the setup flow. */
+async function tickSetup() {
+  try {
+    const response = await fetch(SETUP_ENDPOINT, { cache: "no-store" });
+    if (!response.ok) return;
+    renderSetup(await response.json());
+  } catch (error) {
+    // Deliberately silent. This section is guidance, and a machine whose console is
+    // struggling has more useful things to say in the sections that are about it.
+  }
+}
+
 let lastInstallRendered = null;
 
 /** The install-to-disk section: the only part of this page that erases somebody's data. */
@@ -1720,9 +1777,11 @@ document.getElementById("restart").addEventListener("click", () => power("restar
 }
 
 tick();
+tickSetup();
 tickInstall();
 setInterval(tick, REFRESH_MS);
 setInterval(tickInstall, REFRESH_MS);
+setInterval(tickSetup, REFRESH_MS);
 
 // Fetched once, and re-fetched only after a save. Polling settings would overwrite
 // whatever somebody was halfway through typing into them, which is the one thing a
