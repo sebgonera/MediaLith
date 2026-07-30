@@ -34,20 +34,58 @@ Everything else is cheap to revise. Prefer revising it.
   `clippy::undocumented_unsafe_blocks`. If you find yourself wanting `unsafe` in
   another crate, the answer is a function in `plexos-sys`, not an exception.
 
+## Rules for the work itself
+
+Not about PlexOS. About mistakes made *while building* it, every one of which happened
+more than once, and none of which the "Known traps" list could have prevented because that
+list is about the system. Check against this before committing; it is short on purpose.
+
+1. **After a scripted edit, prove the edit landed.** Every `str.replace` that silently
+   matched nothing has cost something: the first-boot section shipped with its markup never
+   inserted, because the anchor `<main class="grid" id="cards">` did not exist and nothing
+   said so. `grep` for the new text, or diff, before moving on. A replacement that matched
+   nothing is not an error in any tool that will tell you.
+2. **A change to `ui/console.html` is not done until the *served* page has been checked.**
+   Twice in one day a page change reached the appliance broken — a duplicate `const`, which
+   is a parse error that blanks every section, and a section whose markup was missing, whose
+   exception its own poll swallowed. Both passed tests that assert strings appear in the
+   page, because in both cases the strings were in the script. After deploying: fetch `/`,
+   extract the script, run `node --check`, and check every `getElementById` against what the
+   page creates. Two tests do this at build time now; run them against the *fetched* page as
+   well, because that is the artefact.
+3. **Never `rm -rf` a directory you did not wholly create.** `crates/plexosd/examples/` was
+   deleted twice to remove one scratch file, taking `authgate.rs` with it both times. Remove
+   the file by name. Better: put scratch probes outside the tree entirely.
+4. **A test's scratch path includes the test's name.** Rust runs tests as threads in one
+   process, so a fixed path is a race — one test deleting what another is reading. Written
+   wrong twice; suspected in a third that still flakes about once in twenty runs.
+5. **Do not conclude a package was not rebuilt by grepping its binary for a string.** A
+   string that nothing prints is one the compiler discards, so its absence proves nothing.
+   That produced a false alarm about `plexosd`. Grep for a string that is actually used, or
+   look at the sources in `output/build/<pkg>/`.
+6. **Ask what the *state its own success produces* looks like.** Already in the traps list
+   for the system; it applies to the work too. Every one of the mistakes above was invisible
+   in the state it was written in and only wrong in the state that followed.
+
 ## Where things stand
 
 | Component | State |
 | --- | --- |
-| `crates/plexos-types` | Done. Formats and the layout emitter, 50 tests. The ADR-0006 manifest schema was reconciled with the artefacts PlexOS actually builds — one UKI per slot, and a `release` string `OsVersion` cannot express — which was the last moment that was an edit rather than a migration. |
+| `crates/plexos-types` | Done. Formats and the layout emitter and the GPT writer, 65 tests. The ADR-0006 manifest schema was reconciled with the artefacts PlexOS actually builds — one UKI per slot, and a `release` string `OsVersion` cannot express — which was the last moment that was an edit rather than a migration. |
 | `crates/plexos-update` | Which slot an update goes to, writing a partition and reading it back, the ADR-0006 trust chain, the anti-rollback sequence, root-signed revocation, boot-entry/slot agreement, and `plexos-sign` as the publisher's half. 65 tests. **Has updated the reference laptop four times, alternating slots — and one of those updates was deliberately unbootable and was rolled back.** All four were unsigned, through an improvised `update.json` this crate no longer parses. **Nothing signed has yet reached a machine.** |
 | `crates/plexos-gpu` | 46 tests, and it has now answered the question it was written for — on four machines, three of which it was wrong about until they were tried. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
-| `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, `reboot(2)`, `sethostname(2)`, PTY allocation for the console terminal, and reaping children for PID 1. 86 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
-| `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role mounts the Plex app image, then keeps the console and a shell running: it reaps orphans, restarts what dies with a widening delay, and never exits. 62 tests. **PID 1 stays alive on the appliance and has restarted both of its services after they were killed.** |
-| `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates, the configuration model actually applied (ADR-0008), and the terminal session (ADR-0014), the updater on the signed manifest, a supervisor that restarts Plex and swaps a newly-installed version in without a reboot, and the console's own TLS identity (ADR-0014). 269 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
+| `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, `reboot(2)`, `sethostname(2)`, PTY allocation for the console terminal, reaping children for PID 1, and resolving partitions on a *named disk* rather than by label alone. 89 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
+| `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role mounts the Plex app image, then keeps the console and a shell running: it reaps orphans, restarts what dies with a widening delay, and never exits. It also asks the boot loader which disk the firmware started, so a two-disk machine mounts the right `/usr` and `/var`. 63 tests. **PID 1 stays alive on the appliance and has restarted both of its services after they were killed.** |
+| `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates, the configuration model actually applied (ADR-0008), and the terminal session (ADR-0014), the updater on the signed manifest, a supervisor that restarts Plex and swaps a newly-installed version in without a reboot, the console's own TLS identity (ADR-0014), the installer and the first-boot flow (ADR-0016). 301 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
 | `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 104 tests. Provisioning now runs end to end **on the appliance**, driven from a browser: download, signature, manifest, build, publish, mount, confine, start. |
 | `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. |
 | `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 47 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree. |
 | Installer, updater, first-boot wizard | Not started. |
+
+**PlexOS is installed on the reference laptop's internal disk and boots from it.** Its own
+installer put it there (ADR-0016); the USB stick it was installed from is still attached and
+still holds a working system, which makes it the recovery medium. Everything below that
+says "USB stick" is history rather than the present arrangement.
 
 **The image boots on the reference laptop, from a USB stick, to a shell.** tmpfs root,
 `/usr` verified by dm-verity and mounted read-only, `/var` writable, `/etc` an overlay.
@@ -292,6 +330,53 @@ work.
 `rollback.json`, all three written by the machine itself. None of the three is a constant
 without callers any more, which is where two of them started. **Kernel images are still unsigned, so Secure
 Boot must be off** — that is ADR-0004 and separate from update signing.
+
+## What exists, in one place
+
+An index, so nothing here has to be rediscovered by reading the tree.
+
+**Console API** — HTTPS only, port 443; port 80 answers a 308. `GET` needs no credential,
+every `POST` needs the device token (ADR-0013), and the terminal is *all* `POST` so a root
+shell's output cannot be read without one.
+
+| Route | What it is |
+| --- | --- |
+| `/api/status` | Image identity, slot, root hash, whole kernel command line, health checks, TLS fingerprint |
+| `/api/setup` | The first-boot flow: ordered steps, computed not stored (ADR-0016) |
+| `/api/install` | Disks, refusals, and installing PlexOS onto one (ADR-0016) |
+| `/api/update` | Check and install a signed update; gate verdict; rollback record (ADR-0005/0006) |
+| `/api/provision` | Install Plex from Plex's own packages (ADR-0010) |
+| `/api/config`, `/api/network` | Hostname, timezone, static addressing (ADR-0008) |
+| `/api/shares` | Network shares the library lives on |
+| `/api/terminal` | Root shell, long-polled (ADR-0014) |
+| `/api/power` | Shut down, restart |
+| `/api/token` | Rotate the device token |
+
+**Publisher tooling**, all on the build host:
+
+| Tool | What it does |
+| --- | --- |
+| `tools/sign-bundle.sh` | Turns a built bundle into `manifest.json` + `.sig`, then verifies it with the appliance's own verifier |
+| `tools/publish-update.sh` | Serves the bundle; refuses one with no signed manifest |
+| `tools/break-bundle.sh` | Corrupts an image and re-signs it, to exercise ADR-0005 |
+| `plexos-sign` | `root-key`, `signing-key`, `certify`, `sign`, `check`, `revoke`, `trust` |
+
+**State on `/var`** — the only surface a rollback leaves alone, which is why every one of
+these is here and not in `/usr`:
+
+| Path | Written by |
+| --- | --- |
+| `update/accepted_sequence` | The anti-rollback floor (ADR-0006) |
+| `update/revocations.json` | The root-signed revocation list in force |
+| `update/rollback.json` | Why a boot was handed back to the other slot (ADR-0005) |
+| `tls/` | The console's key and certificate; the key outlives the certificate |
+| `apps/plex/` | Plex app images and the `current` link (ADR-0007) |
+| `etc/` | The writable half of the `/etc` overlay |
+| `STATE_VERSION` | The `/var` layout version (ADR-0009) |
+
+**Keys** live in `~/.plexos-keys/` on the build host, outside the repository: `root-dev`
+(baked into `ROOT_KEYS` as a *development* key), `signing-dev` (**revoked**), `signing-dev-2`
+and its certificate — sign with the second one.
 
 ## Known traps
 
