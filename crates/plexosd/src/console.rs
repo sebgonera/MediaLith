@@ -1315,6 +1315,133 @@ mod tests {
     }
 
     #[test]
+    fn the_terminal_renders_what_the_shell_printed_and_not_less() {
+        // The page destroyed sixty-one per cent of every session's output for the whole
+        // life of this feature, and nothing here could see it: the tests assert what is in
+        // the page, and the page was fine. The *behaviour* was wrong.
+        //
+        //     body.replace(/[^\n\b]\b/g, "")
+        //
+        // meant to say "drop a character a backspace erased". Inside a character class
+        // `\b` is a backspace, so the first half says what it looks like; outside one it
+        // is a **word boundary**, so the rule actually said "drop the last character of
+        // every word". `total 4` came out `tota`, `root` came out `roo`, `drwxr-xr-x`
+        // came out `drwxx`. Reported from a machine, reproduced by running this very
+        // function over a captured session.
+        //
+        // So this test runs the page's own cleaner, under a real engine, over chunks
+        // split the way a poll splits them -- mid escape sequence, and between the two
+        // halves of a CRLF.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+
+        let ansi = script
+            .lines()
+            .find(|line| line.starts_with("const ANSI = "))
+            .expect("the control-character pattern is declared on one line");
+        let start = script
+            .find("function termClean(")
+            .expect("the cleaner is a named function so that it can be tested");
+        let end = script[start..]
+            .find("\n}\n")
+            .map(|at| start + at + "\n}".len())
+            .expect("and ends at a brace in the first column");
+        let cleaner = &script[start..end];
+
+        // Every hazard in one session: a CRLF cut in half, an escape sequence cut in half,
+        // a backspace erasing two characters, and a carriage return redrawing a line.
+        let chunks = [
+            "total 4\r",
+            "\ndrwxr-xr-x   10 root     root  .\r\n",
+            "\u{1b}[1;3",
+            "4mbin\u{1b}[m -> usr/bin\r\n",
+            "abc\u{8}\u{8}d\r\n",
+            "50%\r100%\r\n",
+        ];
+        let expected = "total 4\ndrwxr-xr-x   10 root     root  .\nbin -> usr/bin\nad\n100%\n";
+
+        let Some(engine) = ["node", "deno", "qjs"].into_iter().find(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        }) else {
+            println!(
+                "skip: the terminal cleaner was not run -- no node, deno or qjs on this \
+                 host. Install one, or output corruption will only be found by reading a \
+                 shell's output on an appliance."
+            );
+            return;
+        };
+
+        let driver = format!(
+            "{ansi}\n{cleaner}\n\
+             const chunks = {};\n\
+             let pending = \"\", body = \"\";\n\
+             for (const chunk of chunks) {{\n\
+             \x20 const done = termClean(pending, chunk);\n\
+             \x20 body += done[0];\n\
+             \x20 pending = done[1];\n\
+             }}\n\
+             process.stdout.write(JSON.stringify(body));\n",
+            serde_json::to_string(&chunks).expect("chunks encode")
+        );
+
+        // Named for this test: Rust runs tests as threads in one process, so a fixed path
+        // is one test deleting what another is reading.
+        let file = std::env::temp_dir().join("plexos-terminal-cleaner-test.js");
+        std::fs::write(&file, driver).expect("scratch is writable");
+        let run = std::process::Command::new(engine)
+            .arg(&file)
+            .output()
+            .expect("the engine runs");
+        let _ = std::fs::remove_file(&file);
+
+        assert!(
+            run.status.success(),
+            "the cleaner did not run:\n{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let rendered: String =
+            serde_json::from_slice(&run.stdout).expect("the driver prints a JSON string");
+        assert_eq!(
+            rendered, expected,
+            "the terminal does not render what the shell printed"
+        );
+    }
+
+    #[test]
+    fn backspace_is_never_spelled_as_a_word_boundary() {
+        // The guard for the defect above, in the form somebody would reintroduce it: `\b`
+        // reads as "backspace" and is one only inside a character class. This is cheap and
+        // it is specific, which is what a guard against a re-typed mistake has to be.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+        // Comments are skipped, because the explanation of a defect has to be allowed to
+        // quote it -- and the first version of this test tripped over its own description
+        // of the bug, which is a check that cannot be lived with.
+        let code: String = script
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("]\\b"),
+            "a `\\b` outside a character class is a word boundary, not a backspace"
+        );
+        assert!(
+            script.contains("[^\\n\\x08]\\x08"),
+            "backspace erasure must be spelled with \\x08, which means one thing only"
+        );
+    }
+
+    #[test]
     fn the_terminal_reports_the_size_it_negotiated() {
         // The invisible half of every complaint about this terminal. A shell wrapping at
         // the wrong width looks like a rendering fault, and there was no way to see what

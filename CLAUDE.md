@@ -794,6 +794,24 @@ and its certificate — sign with the second one.
   thing". `no_id_is_given_to_two_elements` and `the_script_declares_no_function_twice` ask
   it; note that only the `const` flavour of this is a parse error, which is why
   `the_pages_script_parses` could not see the `function` one.
+- **`\b` is a backspace only inside a character class, and the terminal was deleting the
+  last character of every word.** `body.replace(/[^\n\b]\b/g, "")` was meant to say "drop a
+  character that a backspace erased". The `\b` *inside* the class is `\x08`, so the first
+  half says exactly what it looks like; the one *outside* is a **word boundary**, so the
+  rule actually said "drop the last character of every word". `total 4` rendered as `tota`,
+  `root` as `roo`, `drwxr-xr-x` as `drwxx` — and replaying a captured session through it
+  showed **1371 characters of output becoming 541**, for the whole life of the feature.
+  Nothing here could see it: the page's tests assert what is *in* the page, and the page
+  was fine — it was the behaviour that was wrong. Reported from a machine by somebody
+  reading a shell's output, twice, and the first report was misdiagnosed here as short
+  lines in a wide box, because the box and the PTY were measured and the renderer was not.
+  Two lessons. Spell control characters `\x08`, `\x1b`, `\x0d`, never `\b`/`\e`/`\r` in a
+  pattern where a class boundary changes the meaning. And **a transform is testable only if
+  it is a function**: `termClean` is pure and separate from the element it writes into, so
+  `the_terminal_renders_what_the_shell_printed_and_not_less` can run the page's own code
+  under `node` over chunks split the way a poll splits them — mid escape sequence, and
+  between the two halves of a CRLF, both of which were also broken and neither of which
+  any assertion about text could have found.
 - **A render cache keyed on the wrong fields hides the field you just added.** The update
   section redraws only when one of a listed set of values changes, and a newly-verified
   signature is the only thing that changes when a check runs — so the "Signed by" line

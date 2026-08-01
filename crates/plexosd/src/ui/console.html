@@ -160,6 +160,11 @@
     border: 1px solid var(--line);
     border-radius: 10px;
     padding: 1rem 1.1rem;
+    /* A grid item's floor is its content, not zero, so one long unbroken line inside a
+       card widens the whole track and pushes the page sideways. Everything here already
+       wraps, which is why it has never happened -- and the terminal is a box whose whole
+       job is to hold lines nothing may wrap. */
+    min-width: 0;
   }
   .card h3 {
     margin: 0 0 .75rem;
@@ -332,6 +337,7 @@
   .wide { margin-top: 1rem; }
 
   #terminal .screen {
+    width: 100%;
     margin: .85rem 0 0;
     padding: .75rem .9rem;
     height: 26rem;
@@ -999,14 +1005,84 @@ let termPolling = false;
 
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[()][A-Za-z0-9]|\x1b[=>MNOc]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
 
+/// What has arrived but cannot be judged yet -- see `termClean`.
+let termPending = "";
+
+/// Turns what the PTY produced into what belongs on screen.
+///
+/// Pure, and separate from the element it writes to, so that it can be run against a
+/// captured session with no browser at all. It had to be: the defect this function exists
+/// in its present form to fix destroyed sixty-one per cent of every session's output and
+/// nothing in this repository could see it, because the tests assert what is in the page
+/// and the page was fine. It was the *behaviour* that was wrong.
+///
+/// That defect, written out, because it is the kind that reads as correct:
+///
+/// ```
+/// body.replace(/[^\n\b]\b/g, "")
+/// ```
+///
+/// The intent was "drop a character that a backspace erased". Inside a character class
+/// `\b` is a backspace, so `[^\n\b]` says what it looks like. Outside one it is a **word
+/// boundary** -- so the second `\b` is not a backspace at all, and the rule actually says
+/// "drop the last character of every word". `total 4` rendered as `tota`, `root` as `roo`
+/// and `drwxr-xr-x` as `drwxx`. Backspace is spelled `\x08` here for that reason, and
+/// nowhere in this function is it spelled `\b`.
+///
+/// Returns the text to append and a tail to hold until the next chunk arrives.
+function termClean(pending, chunk) {
+  let text = pending + chunk;
+
+  // Hold back what cannot be judged yet: half an escape sequence, or a carriage return
+  // that may turn out to be the first half of a CRLF. Polls split the stream at arbitrary
+  // bytes, and each chunk used to be cleaned alone -- so a sequence cut in half was
+  // rendered as itself and never repaired, because its other half arrived in a separate
+  // call.
+  let hold = "";
+  const tail = text.match(/(?:\x1b(?:\[[0-9;?]*[ -/]*|\][^\x07\x1b]*)?|\r)$/);
+  if (tail) {
+    hold = tail[0];
+    text = text.slice(0, text.length - hold.length);
+  }
+
+  text = text.replace(/\r\n/g, "\n");
+
+  // Backspace erases what precedes it, and a shell uses it for line editing -- so this
+  // runs *before* the control characters are stripped. The old code said so in a comment
+  // and then did the opposite, which made the erasure a no-op even where it parsed.
+  // Repeated, because two backspaces erase two characters and one pass sees only the
+  // first.
+  let previous;
+  do {
+    previous = text;
+    text = text.replace(/[^\n\x08]\x08/g, "");
+  } while (text !== previous);
+  // Backspaces with nothing left in front of them to erase.
+  text = text.replace(/\x08/g, "");
+
+  text = text.replace(ANSI, "");
+
+  // A carriage return with no newline after it means "draw this line again from the
+  // start", which is how a program shows progress in place. Only what follows the last
+  // one is on screen. A line already flushed in an earlier chunk cannot be taken back,
+  // which is the one thing this rendering cannot do and does not pretend to.
+  if (text.includes("\r")) {
+    text = text
+      .split("\n")
+      .map(line => line.slice(line.lastIndexOf("\r") + 1))
+      .join("\n");
+  }
+
+  return [text, hold];
+}
+
 function termWrite(text) {
   const out = document.getElementById("term-out");
   if (!out) return;
-  // Backspace is handled before the control characters are stripped, because a shell
-  // uses it for line editing and dropping it leaves every correction visible.
-  let cleaned = text.replace(/\r\n/g, "\n").replace(ANSI, "");
+  const [cleaned, hold] = termClean(termPending, text);
+  termPending = hold;
+  if (!cleaned) return;
   let body = out.textContent + cleaned;
-  body = body.replace(/[^\n\b]\b/g, "");
   // Bounded, or a long session grows the DOM until the tab dies.
   if (body.length > 200000) body = body.slice(-200000);
   out.textContent = body;
@@ -1081,6 +1157,10 @@ async function termOpen(takeOver) {
     termId = opened.id;
     termOffset = opened.offset;
     document.getElementById("term-out").textContent = "";
+    // A new session starts with an empty screen, so it starts with an empty tail: a held
+    // half-sequence from the previous one would be prepended to the first thing this one
+    // says.
+    termPending = "";
     termStatus("connected", "live", size);
     document.getElementById("term-in").focus();
     termLoop();
@@ -1154,6 +1234,29 @@ function terminalCard() {
     </div>`;
 }
 
+/// Watches the screen and tells the shell whenever its size changes.
+///
+/// Set up when the card is made rather than when the script runs: the terminal is created
+/// from the first status reply, so at load time there is nothing to observe and this would
+/// silently take the fallback for ever.
+///
+/// A ResizeObserver on the box itself rather than a listener on the window, because the
+/// box also changes when the card is unfolded, when a section above it grows, or when the
+/// page reflows, and none of those is a window resize.
+///
+/// Debounced: a dragged window fires this continuously and every one is a POST that takes
+/// the terminal's lock.
+function observeTerminalSize() {
+  let pending = null;
+  const later = () => { clearTimeout(pending); pending = setTimeout(termResize, 250); };
+  const screen = document.getElementById("term-out");
+  if (window.ResizeObserver && screen) {
+    new ResizeObserver(later).observe(screen);
+  } else {
+    window.addEventListener("resize", later);
+  }
+}
+
 /// Sets the status line, its colour, and whether the prompt accepts anything.
 ///
 /// One function for all three because they are one fact. A prompt that takes keystrokes
@@ -1218,6 +1321,7 @@ function render(status) {
 
     host.innerHTML = terminalCard();
     trial.after(host);
+    observeTerminalSize();
     termStatus("no session");
     renderTrial();
   }
@@ -1942,16 +2046,6 @@ setInterval(tickSetup, REFRESH_MS);
 // whatever somebody was halfway through typing into them, which is the one thing a
 // settings form must never do.
 loadSettings();
-
-// A dragged window fires this continuously and each one is a POST that takes the
-// terminal's lock, so it is debounced rather than sent per frame.
-{
-  let pending = null;
-  window.addEventListener("resize", () => {
-    clearTimeout(pending);
-    pending = setTimeout(termResize, 250);
-  });
-}
 
 // A line at a time rather than a keystroke at a time. Character-level input would need
 // the field to stop being a field -- no browser autocomplete, no selection, and a
