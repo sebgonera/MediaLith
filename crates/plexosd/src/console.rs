@@ -881,7 +881,22 @@ fn wifi_action(request: &Request, wifi: &std::sync::Arc<crate::wifi::Job>) -> Re
                 .get("hidden")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
-            crate::wifi::spawn_join(wifi, ssid.to_owned(), passphrase.to_owned(), hidden);
+            // What the network expects, as the scan reported it. Absent when the name was
+            // typed rather than chosen, and then the join keeps the credential that works
+            // for both kinds.
+            let security = body
+                .get("security")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|kind| {
+                    serde_json::from_value(serde_json::Value::String(kind.to_owned())).ok()
+                });
+            crate::wifi::spawn_join(
+                wifi,
+                ssid.to_owned(),
+                passphrase.to_owned(),
+                hidden,
+                security,
+            );
             Response::json("{\"started\":true}")
         }
         Some("forget") => match crate::wifi::forget() {

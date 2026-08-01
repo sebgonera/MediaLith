@@ -1404,14 +1404,21 @@ function wifiJoin() {
     return;
   }
   const chosen = document.querySelector('input[name="wifi-network"]:checked');
+  const picked = chosen && chosen.value === ssid;
   // Hidden only when the name was typed rather than chosen: a network that was in the
   // scan broadcasts its name by definition, and probing for one that does not need it
   // is slower and noisier.
+  //
+  // The security goes with it, because it decides which credential the appliance can
+  // store: WPA2 takes a hashed key and the passphrase need never be written down, and
+  // WPA3 takes only the passphrase. A typed name has no scan behind it and sends none,
+  // which the appliance reads as "use whichever works".
   wifiPost({
     action: "join",
     ssid,
     passphrase: document.getElementById("wifi-pass").value || "",
-    hidden: !chosen || chosen.value !== ssid,
+    hidden: !picked,
+    security: picked ? chosen.dataset.security : undefined,
   });
 }
 

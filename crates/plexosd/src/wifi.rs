@@ -20,14 +20,21 @@
 //!
 //! # What is stored, and what is not
 //!
-//! The passphrase is never written down. `wpa_passphrase` turns it into the 256-bit PSK
-//! that the protocol actually uses, and only that is saved — which is why
-//! `BR2_PACKAGE_WPA_SUPPLICANT_PASSPHRASE` is in the defconfig. It is not a secret worth
-//! much less than the passphrase, since it is all an attacker needs to join this one
-//! network, but it is not the string somebody probably also uses elsewhere.
+//! For WPA2 the passphrase is never written down: `wpa_passphrase` turns it into the
+//! 256-bit PSK that the protocol actually uses on the wire, and only that is saved — which
+//! is why `BR2_PACKAGE_WPA_SUPPLICANT_PASSPHRASE` is in the defconfig. The key is all an
+//! attacker needs to join this one network, so it is not worth much less; but it is not
+//! the string somebody probably also uses elsewhere.
 //!
 //! `wpa_passphrase` echoes the passphrase back as a comment on the line above the PSK.
 //! [`parse_psk`] takes the uncommented one, which is the only reason that function exists.
+//!
+//! **WPA3 cannot have that.** SAE derives its key inside the handshake, from the
+//! passphrase, so a precomputed PSK is not a credential it can use — and an access point
+//! offering SAE alone rejects one out of hand. The first real network this was tried
+//! against was exactly that: every BSS answered `skip RSN IE - key mgmt mismatch`, and the
+//! supplicant never got as far as authenticating. So the passphrase is kept for those, and
+//! only for those.
 //!
 //! # What has run
 //!
@@ -261,9 +268,22 @@ pub fn best_per_ssid(mut found: Vec<Network>) -> Vec<Network> {
 pub struct Saved {
     /// The network's name, as it is broadcast or as it was typed.
     pub ssid: String,
-    /// The 256-bit pre-shared key, as 64 hex characters. Empty for an open network.
+    /// The 256-bit pre-shared key, as 64 hex characters. Empty unless the network takes
+    /// one -- see `passphrase`, and only ever one of the two is set.
     #[serde(default)]
     pub psk: String,
+    /// The passphrase itself, for a network that will not take a precomputed key.
+    ///
+    /// **WPA3 is why this exists.** SAE derives its key inside the handshake, from the
+    /// passphrase, so a 256-bit PSK — which is what WPA2 actually uses on the wire and
+    /// what this stored instead — is not a credential it can use at all. The symptom is
+    /// `skip RSN IE - key mgmt mismatch` in the supplicant's debug log and, everywhere
+    /// else, a network that is in range and never associates.
+    ///
+    /// So the passphrase is kept only where nothing else will do, and the hashed key
+    /// everywhere it still works.
+    #[serde(default)]
+    pub passphrase: String,
     /// Whether the network has to be probed for by name.
     #[serde(default)]
     pub hidden: bool,
@@ -317,11 +337,24 @@ pub fn supplicant_conf(saved: &Saved) -> String {
     if saved.hidden {
         conf.push_str("\tscan_ssid=1\n");
     }
-    if saved.psk.is_empty() {
+    if !saved.passphrase.is_empty() {
+        // WPA3, or a network whose protection is not known because its name was typed.
+        //
+        // `SAE WPA-PSK WPA-PSK-SHA256` rather than one of them: an access point may offer
+        // SAE only, both (transition mode), or PSK with management frames required, and
+        // this one line joins all three. `ieee80211w=1` says "capable of protected
+        // management frames", which SAE requires and WPA2 ignores.
+        //
+        // Quoted, which means "this is a passphrase": SAE needs the passphrase itself and
+        // cannot be given a precomputed key.
+        conf.push_str("\tkey_mgmt=SAE WPA-PSK WPA-PSK-SHA256\n\tieee80211w=1\n");
+        let _ = writeln!(conf, "\tpsk=\"{}\"", escape(&saved.passphrase));
+    } else if saved.psk.is_empty() {
         conf.push_str("\tkey_mgmt=NONE\n");
     } else {
         // Unquoted: quoted means "this is a passphrase, hash it", and bare means "this is
         // already the key". Storing the key and then quoting it would hash the hash.
+        conf.push_str("\tkey_mgmt=WPA-PSK WPA-PSK-SHA256\n");
         let _ = writeln!(conf, "\tpsk={}", saved.psk);
     }
     conf.push_str("}\n");
@@ -611,52 +644,25 @@ pub fn psk_for(env: &impl Environment, ssid: &str, passphrase: &str) -> io::Resu
     })
 }
 
-/// How long to wait for the supplicant to associate before giving up.
+/// Starts the supplicant in the foreground and drains everything it says.
 ///
-/// Association is a handshake with an access point, and 25 seconds is long enough for a
-/// slow one and short enough that a wrong passphrase is reported while somebody is still
-/// looking at the page. A wrong key does not fail fast: the supplicant retries, so the
-/// timeout *is* the error path.
-const ASSOCIATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
-
-/// Associates with a network and takes an address on it.
+/// **Not `-B`.** Backgrounding hands the process to init and closes the pipes with it, so
+/// the supplicant's own account of why it would not start goes nowhere — and that is
+/// exactly how a `ctrl_interface` naming a directory that does not exist here came to be
+/// reported as a wrong passphrase, twenty-five seconds later. Kept in the foreground and
+/// drained, so what it says is what gets reported.
+///
+/// Returns the child and the bounded buffer of what it has said.
 ///
 /// # Errors
-/// Fails if the programs are missing, if the supplicant will not start, or if it has not
-/// associated within [`ASSOCIATE_TIMEOUT`].
-pub fn connect(
+/// Fails if the program is missing or cannot be started.
+fn start_supplicant(
     env: &impl Environment,
     name: &str,
-    network: &Saved,
-    log: &mut dyn FnMut(&str),
-) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    bring_up(name)?;
-
-    let conf = Path::new(SUPPLICANT_CONF);
-    if let Some(parent) = conf.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(conf, supplicant_conf(network))?;
-    std::fs::set_permissions(conf, std::fs::Permissions::from_mode(0o600))?;
-
-    // The socket directory, because the supplicant does not create it and exits when it
-    // cannot bind. See SUPPLICANT_CTRL.
-    std::fs::create_dir_all(SUPPLICANT_CTRL)?;
-
-    // Whatever was running is for the previous network. Terminating it is allowed to fail:
-    // on the first connection of a boot there is nothing there, and that is the ordinary
-    // case rather than a problem.
-    let cli = program(env, "wpa_cli")?;
-    let _ = env.run(&cli, &["-p", SUPPLICANT_CTRL, "-i", name, "terminate"]);
-
-    // **Not `-B`.** Backgrounding hands the process to init and closes the pipes with it,
-    // so the supplicant's own account of why it would not start goes nowhere -- and this
-    // failed for exactly that reason: `ctrl_interface` named a directory that does not
-    // exist here, the supplicant said so and died, and all anybody saw was a twenty-five
-    // second timeout blaming the passphrase. Kept in the foreground and drained, so what
-    // it says is what gets reported.
+) -> io::Result<(
+    std::process::Child,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+)> {
     let supplicant = program(env, "wpa_supplicant")?;
     let mut child = std::process::Command::new(&supplicant)
         .args(["-i", name, "-c", SUPPLICANT_CONF, "-D", "nl80211"])
@@ -699,6 +705,51 @@ pub fn connect(
             }
         });
     }
+    Ok((child, said))
+}
+
+/// How long to wait for the supplicant to associate before giving up.
+///
+/// Association is a handshake with an access point, and 25 seconds is long enough for a
+/// slow one and short enough that a wrong passphrase is reported while somebody is still
+/// looking at the page. A wrong key does not fail fast: the supplicant retries, so the
+/// timeout *is* the error path.
+const ASSOCIATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// Associates with a network and takes an address on it.
+///
+/// # Errors
+/// Fails if the programs are missing, if the supplicant will not start, or if it has not
+/// associated within [`ASSOCIATE_TIMEOUT`].
+pub fn connect(
+    env: &impl Environment,
+    name: &str,
+    network: &Saved,
+    log: &mut dyn FnMut(&str),
+) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    bring_up(name)?;
+
+    let conf = Path::new(SUPPLICANT_CONF);
+    if let Some(parent) = conf.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(conf, supplicant_conf(network))?;
+    std::fs::set_permissions(conf, std::fs::Permissions::from_mode(0o600))?;
+
+    // The socket directory, because the supplicant does not create it and exits when it
+    // cannot bind. See SUPPLICANT_CTRL.
+    std::fs::create_dir_all(SUPPLICANT_CTRL)?;
+
+    // Whatever was running is for the previous network. Terminating it is allowed to fail:
+    // on the first connection of a boot there is nothing there, and that is the ordinary
+    // case rather than a problem.
+    let cli = program(env, "wpa_cli")?;
+    let _ = env.run(&cli, &["-p", SUPPLICANT_CTRL, "-i", name, "terminate"]);
+
+    let (mut child, said) = start_supplicant(env, name)?;
+
     let quote = || {
         let held = said
             .lock()
@@ -708,6 +759,7 @@ pub fn connect(
 
     log(&format!("associating with {}", network.ssid));
     let deadline = std::time::Instant::now() + ASSOCIATE_TIMEOUT;
+    let mut reached = String::from("nothing");
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
 
@@ -730,15 +782,32 @@ pub fn connect(
         if associated(&status) {
             break;
         }
+        if let Some((_, value)) = status.iter().find(|(key, _)| key == "wpa_state") {
+            reached.clone_from(value);
+        }
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
+            // The state it reached is the difference between two failures that look
+            // identical from outside. Stuck in SCANNING means the supplicant never found
+            // a network it was willing to try -- wrong name, out of range, or a
+            // credential of the wrong *kind*, which is what WPA3 does to a stored WPA2
+            // key. Anything past that means it tried and was refused, which is a wrong
+            // passphrase.
+            let remedy = if reached == "SCANNING" {
+                "Remedy: it never got as far as authenticating, so this is not the \
+                 passphrase. Either the name is wrong, the network is out of range, or it \
+                 wants a credential of a different kind -- scan again and join from the \
+                 list, which tells the appliance what the network expects."
+            } else {
+                "Remedy: it found the network and was refused, which is what a wrong \
+                 passphrase looks like -- the supplicant retries rather than refusing, so \
+                 this timeout is how that is reported."
+            };
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
-                    "{} did not associate within {} seconds. The supplicant said: {}. \
-                     Remedy: a wrong passphrase looks exactly like this, because the \
-                     supplicant keeps retrying rather than refusing -- check it, and check \
-                     the network is in range with a scan.",
+                    "{} did not associate within {} seconds; it got as far as {reached}. \
+                     The supplicant said: {}. {remedy}",
                     network.ssid,
                     ASSOCIATE_TIMEOUT.as_secs(),
                     quote()
@@ -849,7 +918,13 @@ pub fn spawn_scan(job: &std::sync::Arc<Job>) {
 /// Remembered **after** it associates, never before. A network recorded first is one the
 /// machine tries again at every boot on the strength of a passphrase nobody has yet shown
 /// to work — the same ordering rule as the anti-rollback sequence, for the same reason.
-pub fn spawn_join(job: &std::sync::Arc<Job>, ssid: String, passphrase: String, hidden: bool) {
+pub fn spawn_join(
+    job: &std::sync::Arc<Job>,
+    ssid: String,
+    passphrase: String,
+    hidden: bool,
+    security: Option<Security>,
+) {
     let job = std::sync::Arc::clone(job);
     std::thread::spawn(move || {
         let env = plexos_gpu::env::System;
@@ -857,24 +932,42 @@ pub fn spawn_join(job: &std::sync::Arc<Job>, ssid: String, passphrase: String, h
             job.fail("this machine has no wireless interface.");
             return;
         };
+        if let Some(refusal) = security.and_then(Security::refusal) {
+            job.fail(refusal);
+            return;
+        }
 
+        // Which credential is kept is decided by what the network will accept, not by
+        // preference. WPA2 takes the hashed key and the passphrase need not be stored;
+        // WPA3 takes only the passphrase. A network whose name was typed rather than
+        // chosen has no scan behind it to ask, so it gets the credential that works for
+        // both -- being unable to join is worse than storing a string.
         let network = if passphrase.is_empty() {
             Saved {
                 ssid: ssid.clone(),
                 psk: String::new(),
+                passphrase: String::new(),
                 hidden,
             }
-        } else {
+        } else if security == Some(Security::Psk) {
             match psk_for(&env, &ssid, &passphrase) {
                 Ok(psk) => Saved {
                     ssid: ssid.clone(),
                     psk,
+                    passphrase: String::new(),
                     hidden,
                 },
                 Err(error) => {
                     job.fail(&error.to_string());
                     return;
                 }
+            }
+        } else {
+            Saved {
+                ssid: ssid.clone(),
+                psk: String::new(),
+                passphrase: passphrase.clone(),
+                hidden,
             }
         };
 
@@ -1057,6 +1150,7 @@ mod tests {
         let conf = supplicant_conf(&Saved {
             ssid: "HomeNetwork".to_owned(),
             psk: "4fa9683b7e074d7da8220aa0139a48189ffaf49622ab5b468b370b93ae2b5ba8".to_owned(),
+            passphrase: String::new(),
             hidden: false,
         });
         assert!(
@@ -1080,6 +1174,7 @@ mod tests {
         let conf = supplicant_conf(&Saved {
             ssid: "HomeNetwork".to_owned(),
             psk: "0".repeat(64),
+            passphrase: String::new(),
             hidden: false,
         });
         assert!(
@@ -1097,10 +1192,58 @@ mod tests {
     }
 
     #[test]
+    fn a_wpa3_network_is_offered_the_passphrase_and_not_a_hashed_key() {
+        // The first real network this met was WPA3, and every one of its access points
+        // answered `skip RSN IE - key mgmt mismatch`: SAE derives its key inside the
+        // handshake from the passphrase, so the 256-bit PSK that WPA2 uses on the wire is
+        // not a credential it can take at all. The supplicant never got as far as
+        // authenticating, and `wpa_state` stayed at SCANNING for the whole timeout.
+        let conf = supplicant_conf(&Saved {
+            ssid: "ModernNetwork".to_owned(),
+            psk: String::new(),
+            passphrase: "a passphrase here".to_owned(),
+            hidden: false,
+        });
+        assert!(conf.contains("key_mgmt=SAE"), "{conf}");
+        assert!(
+            conf.contains("WPA-PSK"),
+            "and the older kinds too, because an access point in transition mode offers \
+             both and one line has to join either: {conf}"
+        );
+        assert!(
+            conf.contains("ieee80211w=1"),
+            "SAE requires protected management frames and WPA2 ignores the offer: {conf}"
+        );
+        assert!(
+            conf.contains(r#"psk="a passphrase here""#),
+            "quoted, which is what tells the supplicant this is a passphrase: {conf}"
+        );
+    }
+
+    #[test]
+    fn a_wpa2_network_still_never_sees_the_passphrase() {
+        // The property is kept where it can be kept. Only WPA3 forces the passphrase to be
+        // stored, and a network that takes a hashed key still gets one.
+        let conf = supplicant_conf(&Saved {
+            ssid: "HomeNetwork".to_owned(),
+            psk: "4fa9683b7e074d7da8220aa0139a48189ffaf49622ab5b468b370b93ae2b5ba8".to_owned(),
+            passphrase: String::new(),
+            hidden: false,
+        });
+        assert!(
+            conf.contains("psk=4fa9683b"),
+            "bare, so it is used as the key rather than hashed again: {conf}"
+        );
+        assert!(!conf.contains("psk=\""), "{conf}");
+        assert!(!conf.contains("SAE"), "{conf}");
+    }
+
+    #[test]
     fn an_open_network_asks_for_no_key_at_all() {
         let conf = supplicant_conf(&Saved {
             ssid: "OpenGuest".to_owned(),
             psk: String::new(),
+            passphrase: String::new(),
             hidden: false,
         });
         assert!(conf.contains("key_mgmt=NONE"), "{conf}");
@@ -1112,6 +1255,7 @@ mod tests {
         let conf = supplicant_conf(&Saved {
             ssid: "Invisible".to_owned(),
             psk: "0".repeat(64),
+            passphrase: String::new(),
             hidden: true,
         });
         assert!(conf.contains("scan_ssid=1"), "{conf}");
@@ -1122,6 +1266,7 @@ mod tests {
         let conf = supplicant_conf(&Saved {
             ssid: "it\"s \\ mine".to_owned(),
             psk: String::new(),
+            passphrase: String::new(),
             hidden: false,
         });
         assert!(conf.contains(r#"ssid="it\"s \\ mine""#), "{conf}");
