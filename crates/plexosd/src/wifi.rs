@@ -49,6 +49,20 @@ pub const CONFIG: &str = "/var/lib/plexos/wifi.json";
 /// [`CONFIG`] and regenerating it is cheaper than keeping two files that can disagree.
 pub const SUPPLICANT_CONF: &str = "/run/plexos/wpa_supplicant.conf";
 
+/// Where the supplicant puts its control socket, and where `wpa_cli` is told to look.
+///
+/// **Not `/var/run`, which is what every `wpa_supplicant` example in the world says and
+/// what both programs default to.** On an ordinary distribution `/var/run` is a symlink to
+/// `/run`; here it does not exist at all, because the running root holds only what
+/// `plan.rs` puts there and `/var` is a partition whose layout the installer made. The
+/// supplicant then cannot create its socket, exits immediately, and the only symptom is
+/// `wpa_cli` failing to connect — which reads as "not associated yet" and, twenty-five
+/// seconds later, as a wrong passphrase.
+///
+/// Fourth thing in this project to assume a path that a normal system has and this one
+/// does not, after `/dev/mapper`, the two `by-partlabel` lookups, and `/tmp`.
+pub const SUPPLICANT_CTRL: &str = "/run/wpa_supplicant";
+
 /// How a network is protected.
 ///
 /// `Psk` covers WPA and WPA2, which take the same credential and the same configuration
@@ -295,7 +309,9 @@ pub fn parse_psk(output: &str) -> Option<String> {
 pub fn supplicant_conf(saved: &Saved) -> String {
     use std::fmt::Write as _;
 
-    let mut conf = String::from("ctrl_interface=/var/run/wpa_supplicant\nupdate_config=0\n\n");
+    let mut conf = String::new();
+    let _ = writeln!(conf, "ctrl_interface={SUPPLICANT_CTRL}");
+    conf.push_str("update_config=0\n\n");
     conf.push_str("network={\n");
     let _ = writeln!(conf, "\tssid=\"{}\"", escape(&saved.ssid));
     if saved.hidden {
@@ -625,57 +641,118 @@ pub fn connect(
     std::fs::write(conf, supplicant_conf(network))?;
     std::fs::set_permissions(conf, std::fs::Permissions::from_mode(0o600))?;
 
+    // The socket directory, because the supplicant does not create it and exits when it
+    // cannot bind. See SUPPLICANT_CTRL.
+    std::fs::create_dir_all(SUPPLICANT_CTRL)?;
+
     // Whatever was running is for the previous network. Terminating it is allowed to fail:
     // on the first connection of a boot there is nothing there, and that is the ordinary
     // case rather than a problem.
     let cli = program(env, "wpa_cli")?;
-    let _ = env.run(&cli, &["-i", name, "terminate"]);
+    let _ = env.run(&cli, &["-p", SUPPLICANT_CTRL, "-i", name, "terminate"]);
 
+    // **Not `-B`.** Backgrounding hands the process to init and closes the pipes with it,
+    // so the supplicant's own account of why it would not start goes nowhere -- and this
+    // failed for exactly that reason: `ctrl_interface` named a directory that does not
+    // exist here, the supplicant said so and died, and all anybody saw was a twenty-five
+    // second timeout blaming the passphrase. Kept in the foreground and drained, so what
+    // it says is what gets reported.
     let supplicant = program(env, "wpa_supplicant")?;
-    let child = std::process::Command::new(&supplicant)
-        .args(["-B", "-i", name, "-c", SUPPLICANT_CONF, "-D", "nl80211"])
+    let mut child = std::process::Command::new(&supplicant)
+        .args(["-i", name, "-c", SUPPLICANT_CONF, "-D", "nl80211"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!(
                     "could not start {supplicant} on {name}: {error}. Remedy: the radio is \
-                     present, so try `wpa_supplicant -i {name} -c {SUPPLICANT_CONF} -D \
-                     nl80211` in the terminal, without -B, to see what it says."
+                     present, so run `{supplicant} -i {name} -c {SUPPLICANT_CONF} -D \
+                     nl80211` in the terminal to see what it says."
                 ),
             )
         })?;
 
-    // -B forks, so the process spawned above exits at once and the resident supplicant is
-    // its child. Exactly the shape that left one zombie per plexosd start for the life of
-    // the project when udhcpc was started the same way -- see net::dhcp.
-    std::thread::spawn(move || {
-        let mut child = child;
-        let _ = child.wait();
-    });
+    let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    for stream in [
+        child.stdout.take().map(drainable),
+        child.stderr.take().map(drainable),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let said = std::sync::Arc::clone(&said);
+        std::thread::spawn(move || {
+            use std::io::BufRead as _;
+            for line in std::io::BufReader::new(stream)
+                .lines()
+                .map_while(Result::ok)
+            {
+                let mut held = said
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if held.len() > 40 {
+                    held.remove(0);
+                }
+                held.push(line);
+            }
+        });
+    }
+    let quote = || {
+        let held = said
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.join(" / ")
+    };
 
     log(&format!("associating with {}", network.ssid));
     let deadline = std::time::Instant::now() + ASSOCIATE_TIMEOUT;
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
-        let status = parse_status(&env.run(&cli, &["-i", name, "status"]).unwrap_or_default());
+
+        // Before the status, because a supplicant that has already exited will never
+        // produce one -- and waiting the full timeout to say so is how a missing directory
+        // came to read as a wrong password.
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(io::Error::other(format!(
+                "wpa_supplicant stopped ({status}) instead of associating: {}. Remedy: run \
+                 it in the terminal with the same arguments; whatever it says there is the \
+                 whole answer.",
+                quote()
+            )));
+        }
+
+        let status = parse_status(
+            &env.run(&cli, &["-p", SUPPLICANT_CTRL, "-i", name, "status"])
+                .unwrap_or_default(),
+        );
         if associated(&status) {
             break;
         }
         if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
-                    "{} did not associate within {} seconds. Remedy: a wrong passphrase \
-                     looks exactly like this, because the supplicant keeps retrying rather \
-                     than refusing -- check it, and check the network is in range with a \
-                     scan.",
+                    "{} did not associate within {} seconds. The supplicant said: {}. \
+                     Remedy: a wrong passphrase looks exactly like this, because the \
+                     supplicant keeps retrying rather than refusing -- check it, and check \
+                     the network is in range with a scan.",
                     network.ssid,
-                    ASSOCIATE_TIMEOUT.as_secs()
+                    ASSOCIATE_TIMEOUT.as_secs(),
+                    quote()
                 ),
             ));
         }
     }
+
+    // Left running: it holds the association for as long as the machine is on it. Reaped
+    // on a thread so that its eventual exit is collected rather than left as a zombie --
+    // the shape that leaked one process per plexosd start when udhcpc was spawned with -b.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 
     log(&format!("associated with {}", network.ssid));
     crate::net::dhcp(env, name, log)
@@ -710,7 +787,10 @@ pub fn report(env: &impl Environment, job: &Job) -> Report {
     let interface = interface(env).ok().flatten();
     let status = interface.as_ref().map_or_else(Vec::new, |name| {
         crate::net::resolve(env, "wpa_cli").map_or_else(Vec::new, |cli| {
-            parse_status(&env.run(&cli, &["-i", name, "status"]).unwrap_or_default())
+            parse_status(
+                &env.run(&cli, &["-p", SUPPLICANT_CTRL, "-i", name, "status"])
+                    .unwrap_or_default(),
+            )
         })
     });
     let field = |key: &str| {
@@ -814,6 +894,11 @@ pub fn spawn_join(job: &std::sync::Arc<Job>, ssid: String, passphrase: String, h
         }
         job.step(Phase::Connected, &format!("connected to {ssid}"));
     });
+}
+
+/// Lets stdout and stderr be drained by the same loop.
+fn drainable(stream: impl std::io::Read + Send + 'static) -> Box<dyn std::io::Read + Send> {
+    Box::new(stream)
 }
 
 /// Reads the remembered network, if there is one.
@@ -981,6 +1066,33 @@ mod tests {
         assert!(
             !conf.contains("scan_ssid"),
             "only a hidden network is probed for"
+        );
+    }
+
+    #[test]
+    fn the_control_socket_goes_somewhere_that_exists_on_this_machine() {
+        // `/var/run` is what every wpa_supplicant example says and what both programs
+        // default to, because on an ordinary distribution it is a symlink to /run. Here it
+        // does not exist: the running root holds only what plan.rs puts there. The
+        // supplicant could not create its socket, exited at once, and `wpa_cli` then failed
+        // to connect -- which reads as "not associated yet" and, twenty-five seconds later,
+        // as a wrong passphrase. Every join failed that way, on every network.
+        let conf = supplicant_conf(&Saved {
+            ssid: "HomeNetwork".to_owned(),
+            psk: "0".repeat(64),
+            hidden: false,
+        });
+        assert!(
+            !conf.contains("/var/run"),
+            "/var/run does not exist on this appliance: {conf}"
+        );
+        assert!(
+            conf.contains(&format!("ctrl_interface={SUPPLICANT_CTRL}")),
+            "{conf}"
+        );
+        assert!(
+            SUPPLICANT_CTRL.starts_with("/run/"),
+            "and /run is one of the few directories the plan does create"
         );
     }
 
