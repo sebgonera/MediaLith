@@ -584,7 +584,23 @@ pub fn redirect_target(head: &str) -> Option<String> {
     if host.is_empty() {
         return None;
     }
-    Some(format!("https://{host}{}", request.path))
+
+    // The whole request target, query string included. `Request::path` drops the query on
+    // purpose, because no route here takes one -- but this is not a route. It is the same
+    // address over TLS, and a redirect that quietly rewrites what was asked for sends
+    // somebody somewhere they did not ask to go.
+    //
+    // Only an origin-form target is pasted through. An absolute-form one -- `GET
+    // http://host/path`, which is what a proxy sends -- would otherwise be concatenated
+    // onto the host and produce `https://192.168.2.102http://...`, so it becomes the
+    // console root, which is somewhere that exists.
+    let target = head
+        .lines()
+        .next()
+        .and_then(|line| line.split(' ').nth(1))
+        .filter(|target| target.starts_with('/'))
+        .unwrap_or("/");
+    Some(format!("https://{host}{target}"))
 }
 
 /// Read and write deadlines, so one stuck client cannot hold a thread for ever.
@@ -885,6 +901,32 @@ mod tests {
         // It is *this* listener's port. Carrying it over sends the browser to https on
         // the http port, which hangs rather than failing -- the worse of the two.
         let head = "GET / HTTP/1.1\r\nHost: 192.168.2.102:80\r\n";
+        assert_eq!(
+            redirect_target(head).as_deref(),
+            Some("https://192.168.2.102/")
+        );
+    }
+
+    #[test]
+    fn a_redirect_keeps_the_query_string() {
+        // The parser drops the query on purpose -- no route here reads one -- and the
+        // redirect was built from the parsed path, so it quietly sent the browser to a
+        // different address from the one it asked for. Nothing on this console uses a
+        // query today, which is exactly why this would have been found by somebody
+        // bookmarking a link, long after anybody remembered writing it.
+        let head = "GET /api/status?x=1&y=2 HTTP/1.1\r\nHost: 192.168.2.102\r\n";
+        assert_eq!(
+            redirect_target(head).as_deref(),
+            Some("https://192.168.2.102/api/status?x=1&y=2")
+        );
+    }
+
+    #[test]
+    fn an_absolute_target_is_not_pasted_into_the_redirect() {
+        // Proxies send `GET http://host/path`. Pasting that after `https://<host>` would
+        // produce `https://192.168.2.102http://elsewhere.example/path`, which is what the
+        // first version of this did. The console root is somewhere that exists.
+        let head = "GET http://elsewhere.example/path HTTP/1.1\r\nHost: 192.168.2.102\r\n";
         assert_eq!(
             redirect_target(head).as_deref(),
             Some("https://192.168.2.102/")

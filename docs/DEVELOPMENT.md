@@ -19,6 +19,33 @@ cargo run -p plexos-gpu                # will hardware transcoding work here?
 cargo run -p plexos-init -- --dry-run  # what would PID 1 do?
 ```
 
+## Looking at the console page
+
+Three page changes have reached a machine broken and every one of them passed the tests,
+because a test asserts that strings appear in the page and a completely broken page
+satisfies that. Two checks were added after the first two — `the_pages_script_parses` runs
+`node --check`, and `every_element_the_script_reaches_for_exists_in_the_markup` — and a
+third slipped past both, because it was two elements sharing an id and neither check asks
+about *that*.
+
+So look at it. This needs a running appliance, because the page is empty until its own
+fetches answer:
+
+```
+python3 tools/preview-console.py crates/plexosd/src/ui/console.html 192.168.2.102 8791
+firefox --headless --profile ~/ffprofile --window-size=1500,2400 \
+        --screenshot ~/console.png http://127.0.0.1:8791/
+```
+
+The page is served over plain HTTP on localhost and given a slow image to hold `load`
+open until its sections have arrived; `tools/preview-console.py` explains why both are
+necessary. It found a folded card whose prompt stayed visible — an id outranking a class,
+which is invisible in source and obvious in a picture.
+
+To see a state the appliance is not in, copy the page and edit the copy: the fold defaults
+are one `new Set([...])`, so both halves of a toggle can be photographed without clicking
+anything.
+
 ## Building an image
 
 This is the part with a real host requirement.

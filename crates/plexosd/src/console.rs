@@ -984,7 +984,10 @@ mod tests {
         // /usr is read-only and the appliance may have no route off the LAN. Anything
         // fetched from elsewhere renders this page unstyled in exactly the situation
         // it exists for: a machine whose network is broken.
-        for marker in ["https://", "<script src", "<link", "<img", "@import"] {
+        // "https://" is not in this list: the page has exactly one absolute URL and the
+        // test below asks the sharper question about it -- whether it points at this
+        // machine. A blanket ban here would only be a second, blunter copy of that.
+        for marker in ["<script src", "<link", "<img", "@import"] {
             assert!(
                 !PAGE.contains(marker),
                 "the page must be self-contained, but it contains {marker:?}"
@@ -1234,6 +1237,105 @@ mod tests {
     }
 
     #[test]
+    fn the_cards_that_fold_are_the_ones_a_running_appliance_rarely_opens() {
+        // Six cards fold. Five start closed, and the terminal is the exception because it
+        // is the one somebody opening this page has usually come for.
+        for key in [
+            "system", "settings", "shares", "update", "install", "terminal",
+        ] {
+            assert!(
+                PAGE.contains(&format!("data-fold=\"{key}\"")),
+                "the {key} card must carry a fold key, or its heading is not a control"
+            );
+        }
+        let defaults = PAGE
+            .split_once("const folded = new Set([")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(list, _)| list)
+            .expect("the set of cards that start folded is declared in one place");
+        for key in ["system", "settings", "shares", "update", "install"] {
+            assert!(defaults.contains(key), "{key} must start folded");
+        }
+        assert!(
+            !defaults.contains("terminal"),
+            "the terminal must start open"
+        );
+    }
+
+    #[test]
+    fn a_folded_card_still_shows_what_went_wrong_inside_it() {
+        // The failure this feature invents. A card that is closed cannot be clicked into,
+        // so a report written into one lands where nobody can see it — and the code that
+        // wrote it looks correct, because it did write it. Every path that puts a failure
+        // or a running operation into a card has to open the card first.
+        assert!(
+            PAGE.contains("unfold(id);"),
+            "sectionError must open the card it writes a failure into"
+        );
+        assert!(
+            PAGE.contains("if (busy || phase === \"failed\") unfold(\"update\");"),
+            "an update that is running or has failed must not be hidden"
+        );
+        assert!(
+            PAGE.contains("if (busy || phase === \"failed\") unfold(\"install\");"),
+            "nor an install"
+        );
+        assert!(
+            PAGE.contains(".card[data-fold].folded > :not(h3):not(.bar) { display: none; }"),
+            "folding must hide the body and keep the heading, which is the control"
+        );
+        assert!(
+            PAGE.contains("[data-fold] > h3, [data-fold] > .bar"),
+            "the heading and the terminal's bar are what a click lands on"
+        );
+    }
+
+    #[test]
+    fn opening_plex_leaves_this_page_where_it_is() {
+        // The console is a page people leave open and come back to — a status console
+        // that navigates away from itself is one they have to find again. And it is
+        // served over TLS, so the link out of it is too.
+        let anchor = PAGE
+            .split_once("Open Plex")
+            .map(|(before, _)| before)
+            .and_then(|before| before.rfind("<a ").map(|at| &before[at..]))
+            .expect("the running-Plex card links to Plex");
+        assert!(
+            anchor.contains("target=\"_blank\""),
+            "Open Plex must open in a new tab: {anchor}"
+        );
+        assert!(
+            anchor.contains("rel=\"noopener"),
+            "and must not hand the new tab a handle on this one: {anchor}"
+        );
+        assert!(
+            anchor.contains("href=\"https://"),
+            "and must not drop out of TLS on the way: {anchor}"
+        );
+    }
+
+    #[test]
+    fn the_terminal_reports_the_size_it_negotiated() {
+        // The invisible half of every complaint about this terminal. A shell wrapping at
+        // the wrong width looks like a rendering fault, and there was no way to see what
+        // the shell had been told — so the status line says it now.
+        assert!(
+            PAGE.contains("async function termResize()"),
+            "a window that changes size must tell the shell, or it keeps wrapping at the \
+             width it was opened with"
+        );
+        assert!(
+            PAGE.contains("action: \"resize\""),
+            "and must use the route the console already serves for it"
+        );
+        assert!(
+            PAGE.contains("if (!out || !out.clientWidth) return { rows: 24, columns: 80 };"),
+            "a folded or undrawn screen measures zero, and the floor below turns that into \
+             a shell told it has twenty columns"
+        );
+    }
+
+    #[test]
     fn the_script_declares_no_function_twice() {
         // The other half of the same defect, and the half that made it dangerous. There
         // were two `startInstall` functions in this one script: Plex's and the disk
@@ -1382,23 +1484,32 @@ mod tests {
         // The blanket "no http:// anywhere" rule this replaces was right about assets
         // and wrong about the one link the page has to offer: Plex's own interface, on
         // port 32400 of the appliance itself. It cannot be relative -- it is a different
-        // port -- and it cannot use location.protocol, because Plex serves plain HTTP
-        // whatever the console ends up served over.
+        // port.
         //
-        // So the rule becomes sharper rather than looser: every absolute URL must be
-        // built from the host the page was served from. A CDN or a font still fails,
-        // which is what the original test existed to catch.
-        let occurrences = PAGE.match_indices("http://").count();
-        assert_eq!(occurrences, 1, "exactly one absolute URL is expected");
-
-        let (index, _) = PAGE.match_indices("http://").next().expect("one");
-        let after = &PAGE[index + "http://".len()..];
-        assert!(
-            after.starts_with("${esc(location.hostname)}"),
-            "an absolute URL must be built from this machine's own address, but the page \
-             has: {}",
-            &after[..after.len().min(60)]
-        );
+        // So the rule is sharper rather than looser: every absolute URL, of either
+        // scheme, must be built from the host the page was served from. A CDN or a font
+        // still fails, which is what the original test existed to catch.
+        //
+        // The scheme is `https`, asked for so that a console served over TLS does not
+        // hand out a cleartext link. It is the one claim here this repository cannot
+        // check for itself: whether Plex answers TLS on 32400, and under a certificate a
+        // browser accepts for a bare address, is a question about Plex. If it turns out
+        // not to, the remedy is the scheme in this one anchor.
+        let mut absolute = Vec::new();
+        for scheme in ["http://", "https://"] {
+            for (index, _) in PAGE.match_indices(scheme) {
+                absolute.push(&PAGE[index + scheme.len()..]);
+            }
+        }
+        assert_eq!(absolute.len(), 1, "exactly one absolute URL is expected");
+        for after in absolute {
+            assert!(
+                after.starts_with("${esc(location.hostname)}"),
+                "an absolute URL must be built from this machine's own address, but the \
+                 page has: {}",
+                &after[..after.len().min(60)]
+            );
+        }
     }
 
     #[test]
