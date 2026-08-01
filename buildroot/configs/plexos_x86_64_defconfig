@@ -132,8 +132,18 @@ BR2_PACKAGE_WIRELESS_REGDB=y
 BR2_PACKAGE_WPA_SUPPLICANT=y
 BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
 BR2_PACKAGE_WPA_SUPPLICANT_CLI=y
-# Turns a passphrase into a PSK, so the passphrase itself need not be written to /var.
+# Turns a passphrase into a PSK, so the passphrase itself need not be written to /var --
+# for WPA2. WPA3 derives its key from the passphrase inside the handshake and cannot take
+# a precomputed one, which is why plexosd stores one or the other rather than always the
+# hash.
 BR2_PACKAGE_WPA_SUPPLICANT_PASSPHRASE=y
+# WPA3. **Not on by default**, and the package builds and installs perfectly without it:
+# `wpa_supplicant` is then a program that cannot join a WPA3 network and says so only when
+# it reads a configuration naming SAE — `Line 6: invalid key_mgmt 'SAE'`, after which it
+# exits 255. Third time in this project that a program present in the image turned out not
+# to be a program that can do the job, after busybox tar without xz and mkfs.erofs without
+# a compressor. Check the sub-options; the default is the smallest build.
+BR2_PACKAGE_WPA_SUPPLICANT_WPA3=y
 # `iw` for scanning and for saying what the radio is actually doing. wpa_cli can scan, but
 # a diagnostic that cannot run when the supplicant is not running is not a diagnostic.
 BR2_PACKAGE_IW=y

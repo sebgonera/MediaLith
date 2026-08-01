@@ -631,6 +631,12 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
         )),
     }
 
+    // Created before the network is brought up, because the rejoin below reports into it
+    // and the page polls it: a wireless network that fails to come back has to be visible
+    // in the card rather than only in a log nobody is reading at boot.
+    let served_wifi = std::sync::Arc::new(crate::wifi::Job::new());
+    crate::wifi::spawn_rejoin(&served_wifi);
+
     let configured = match net::configure(&System, net::LINK_TIMEOUT, log) {
         Ok(interface) => {
             log(&format!("network configured on {}", interface.name));
@@ -758,7 +764,6 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
 
     let served_job = std::sync::Arc::clone(&job);
     let installer = std::sync::Arc::new(crate::install::Job::new());
-    let served_wifi = std::sync::Arc::new(crate::wifi::Job::new());
     http::serve_tls(
         &listener,
         &tls,

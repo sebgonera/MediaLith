@@ -994,6 +994,46 @@ fn drainable(stream: impl std::io::Read + Send + 'static) -> Box<dyn std::io::Re
     Box::new(stream)
 }
 
+/// Rejoins the remembered network at boot, in the background.
+///
+/// Nothing happens on a machine that has never been given one, which is every machine
+/// until somebody joins a network from the console.
+///
+/// **In a thread, and this is not tidiness.** Association is allowed twenty-five seconds
+/// and DHCP takes more; doing it before the console binds would delay the one thing a
+/// person needs when the network is not working. The console comes up first and this
+/// reports into the same job the page already polls, so a rejoin that fails is visible in
+/// the Wireless card rather than only in a log.
+///
+/// It runs whether or not a cable has a carrier. Associating only when there is no cable
+/// would mean a machine that had been given a network, and was plugged in, quietly did not
+/// have it — which is what happened on the first appliance to be joined to one and
+/// restarted, and reads as the setting not having been saved.
+pub fn spawn_rejoin(job: &std::sync::Arc<Job>) {
+    let Some(network) = saved() else {
+        return;
+    };
+    if !job.begin(Phase::Associating, &format!("rejoining {}", network.ssid)) {
+        return;
+    }
+    let job = std::sync::Arc::clone(job);
+    std::thread::spawn(move || {
+        let env = plexos_gpu::env::System;
+        let Ok(Some(name)) = interface(&env) else {
+            job.fail("this machine has no wireless interface any more.");
+            return;
+        };
+        let outcome = {
+            let mut note = |line: &str| job.step(Phase::Addressing, line);
+            connect(&env, &name, &network, &mut note)
+        };
+        match outcome {
+            Ok(()) => job.step(Phase::Connected, &format!("connected to {}", network.ssid)),
+            Err(error) => job.fail(&error.to_string()),
+        }
+    });
+}
+
 /// Reads the remembered network, if there is one.
 #[must_use]
 pub fn saved() -> Option<Saved> {
