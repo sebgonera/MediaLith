@@ -779,6 +779,21 @@ and its certificate — sign with the second one.
   which a completely broken script satisfies. `the_pages_script_parses` runs `node --check`
   now, and announces a skip when no engine is installed, because a check nobody knows was
   skipped is a check nobody has.
+- **A name used twice on the console page is not an error anywhere, and both halves of the
+  duplicate keep working — on the wrong thing.** The Plex card's button and the disk
+  installer's section were both `id="install"`, and both click handlers were
+  `function startInstall`. `getElementById` answers with whichever element the markup puts
+  first, which was the button; a repeated function declaration silently replaces the earlier
+  one. So `renderInstall` wrote the whole "Install to a disk" card *into the Install Plex
+  button*, the real section stayed on "Loading...", and the only action the page offered a
+  freshly-installed appliance was erasing a disk — with the button's own handler now pointing
+  at the installer, so one click sent the request twice. Found by a person looking at the
+  served page and asking what there was to press, on a machine where the previous two checks
+  both passed: every element the script addressed existed, and the script parsed. The
+  distinguishing question is not "does this name resolve" but "does it resolve to *one*
+  thing". `no_id_is_given_to_two_elements` and `the_script_declares_no_function_twice` ask
+  it; note that only the `const` flavour of this is a parse error, which is why
+  `the_pages_script_parses` could not see the `function` one.
 - **A render cache keyed on the wrong fields hides the field you just added.** The update
   section redraws only when one of a listed set of values changes, and a newly-verified
   signature is the only thing that changes when a check runs — so the "Signed by" line
