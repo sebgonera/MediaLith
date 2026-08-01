@@ -74,6 +74,8 @@ pub fn prepare(log: &mut dyn FnMut(&str)) -> io::Result<PathBuf> {
     // mode set on a previous boot is not there on this one.
     open_render_nodes_to_plex(log);
 
+    clear_wedged_state(Path::new(PLEX_STATE), log);
+
     for directory in [paths::PLEX_DATA, paths::PLEX_TRANSCODE_DIR] {
         let path = Path::new(directory);
         std::fs::create_dir_all(path)?;
@@ -100,6 +102,62 @@ pub fn prepare(log: &mut dyn FnMut(&str)) -> io::Result<PathBuf> {
     }
 
     plexos_plex::cgroup::apply(Path::new(plexos_plex::cgroup::CGROUP_ROOT), total, log)
+}
+
+/// Where Plex keeps the two files that can stop it starting for good.
+const PLEX_STATE: &str = "/var/lib/plex/Plex Media Server";
+
+/// Removes the leavings of an unclean stop, before they stop Plex for good.
+///
+/// # Why this is not Plex's problem to solve
+///
+/// This appliance **restarts itself by design**. ADR-0005 spends a boot try by rebooting,
+/// and the console offers a restart on a page — so unclean stops are not an accident here,
+/// they are a mechanism. Two of Plex's files do not survive being interrupted mid-write,
+/// and each turns into a machine that never comes back:
+///
+/// * **A zero-length `Preferences.xml`.** Plex truncates and rewrites it, so a stop in
+///   between leaves nothing. It then logs `Failed to load preferences` and does not
+///   recover — it will not replace an empty file with a default one.
+/// * **A stale `plexmediaserver.pid`.** Plex starts, finds it, and waits: the process is
+///   alive with two threads and twenty-six megabytes and never opens its port.
+///
+/// Either one fails the boot health gate, which restarts to spend a try, which is another
+/// unclean stop. **A rollback cannot cure it**, because the fault is on `/var` and `/var`
+/// is precisely what a rollback leaves alone — the reference laptop spent both tries and
+/// landed on the previous release still wedged, which is how this was found.
+///
+/// Nothing here touches a file with anything in it. An empty preferences file carries no
+/// information by definition, and a pid file is only reached when plexosd has already
+/// decided to start Plex, which it only does when none is running.
+fn clear_wedged_state(state: &Path, log: &mut dyn FnMut(&str)) {
+    let preferences = state.join("Preferences.xml");
+    if std::fs::metadata(&preferences).is_ok_and(|meta| meta.len() == 0) {
+        match std::fs::remove_file(&preferences) {
+            Ok(()) => log(
+                "removed an empty Preferences.xml: Plex truncates and rewrites that file, \
+                 so a restart in between empties it, and Plex will not replace an empty \
+                 one with defaults. It writes a fresh one now.",
+            ),
+            Err(error) => log(&format!(
+                "could not remove the empty {}: {error}. Plex will log 'Failed to load \
+                 preferences' and not start. Remedy: delete it by hand.",
+                preferences.display()
+            )),
+        }
+    }
+
+    let pidfile = state.join("plexmediaserver.pid");
+    if pidfile.exists() {
+        match std::fs::remove_file(&pidfile) {
+            Ok(()) => log("removed a stale plexmediaserver.pid left by the previous stop"),
+            Err(error) => log(&format!(
+                "could not remove {}: {error}. Plex may start and never open its port. \
+                 Remedy: delete it by hand.",
+                pidfile.display()
+            )),
+        }
+    }
 }
 
 /// Where DRM devices appear once a driver has bound.
@@ -747,6 +805,81 @@ pub fn supervise(handle: &Handle, mount: &Path, log: &mut dyn FnMut(&str)) -> ! 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Named for the test, because Rust runs tests as threads in one process and a fixed
+    /// scratch path is one test deleting what another is reading.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("plexos-plex-{name}"));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("scratch is writable");
+        path
+    }
+
+    #[test]
+    fn an_empty_preferences_file_is_taken_away_before_it_wedges_plex() {
+        // Plex truncates and rewrites Preferences.xml, so a stop in between empties it --
+        // and this appliance restarts itself by design, so those stops are a mechanism
+        // rather than an accident. Plex will not replace an empty one with defaults: it
+        // logs "Failed to load preferences" and never opens its port, the boot gate fails,
+        // the machine restarts to spend a try, and that is another unclean stop. A
+        // rollback cannot cure it, because the file is on /var.
+        let state = scratch("empty-preferences");
+        std::fs::write(state.join("Preferences.xml"), b"").unwrap();
+        let mut said = Vec::new();
+        clear_wedged_state(&state, &mut |line| said.push(line.to_owned()));
+        assert!(
+            !state.join("Preferences.xml").exists(),
+            "the empty file must go, so Plex writes a fresh one"
+        );
+        assert!(
+            said.iter()
+                .any(|line| line.contains("empty Preferences.xml"))
+        );
+    }
+
+    #[test]
+    fn a_preferences_file_with_anything_in_it_is_left_alone() {
+        // The whole justification for deleting the other one is that an empty file carries
+        // no information. This one carries the machine's identity and its claim.
+        let state = scratch("real-preferences");
+        let path = state.join("Preferences.xml");
+        std::fs::write(
+            &path,
+            b"<?xml version=\"1.0\"?><Preferences MachineIdentifier=\"x\"/>",
+        )
+        .unwrap();
+        clear_wedged_state(&state, &mut |_| {});
+        assert!(
+            path.exists(),
+            "a preferences file with content is not ours to delete"
+        );
+        assert!(std::fs::metadata(&path).unwrap().len() > 0);
+    }
+
+    #[test]
+    fn a_stale_pid_file_is_taken_away_too() {
+        // Plex finds it, waits, and never opens its port -- alive with two threads and
+        // twenty-six megabytes, which reads as a machine where Plex is running and the
+        // network is broken. Only reached when plexosd has already decided to start Plex,
+        // which it only does when none is running, so any pid file here is stale.
+        let state = scratch("stale-pid");
+        std::fs::write(state.join("plexmediaserver.pid"), b"164").unwrap();
+        let mut said = Vec::new();
+        clear_wedged_state(&state, &mut |line| said.push(line.to_owned()));
+        assert!(!state.join("plexmediaserver.pid").exists());
+        assert!(
+            said.iter()
+                .any(|line| line.contains("stale plexmediaserver.pid"))
+        );
+    }
+
+    #[test]
+    fn a_clean_directory_is_not_touched_and_says_nothing() {
+        let state = scratch("clean");
+        let mut said = Vec::new();
+        clear_wedged_state(&state, &mut |line| said.push(line.to_owned()));
+        assert!(said.is_empty(), "nothing to report: {said:?}");
+    }
 
     #[test]
     fn an_unmounted_app_image_is_not_mistaken_for_an_installed_plex() {

@@ -812,6 +812,20 @@ and its certificate — sign with the second one.
   under `node` over chunks split the way a poll splits them — mid escape sequence, and
   between the two halves of a CRLF, both of which were also broken and neither of which
   any assertion about text could have found.
+- **This appliance restarts itself by design, and two of Plex's files do not survive being
+  interrupted mid-write.** A zero-length `Preferences.xml` — Plex truncates and rewrites it,
+  so a stop in between empties it — makes Plex log `Failed to load preferences` and never
+  open its port; it will not replace an empty one with defaults. A stale
+  `plexmediaserver.pid` makes it start and *wait*: alive, two threads, twenty-six megabytes,
+  nothing listening. Either fails the boot health gate, which restarts to spend a try, which
+  is another unclean stop. **A rollback cannot cure either, because the fault is on `/var`
+  and `/var` is exactly what a rollback leaves alone** — the reference laptop spent both
+  tries and came back on the previous release still wedged, which is how this was found and
+  is the sharpest demonstration yet of what that rule costs. `plex::clear_wedged_state`
+  removes both before every start, and touches nothing that has anything in it. The gate's
+  own behaviour was right throughout: it stopped restarting once the entry was permanent,
+  saying that looping would take away the console, which is the only reason the machine was
+  still diagnosable.
 - **A render cache keyed on the wrong fields hides the field you just added.** The update
   section redraws only when one of a listed set of values changes, and a newly-verified
   signature is the only thing that changes when a check runs — so the "Signed by" line
