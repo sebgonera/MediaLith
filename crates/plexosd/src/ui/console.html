@@ -59,14 +59,7 @@
     font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
 
-  /* Everything on this page is a 60rem measure except the terminal, which wants the
-     window. The cap sits on the children rather than on .wrap itself: capping the
-     container and then breaking one child back out of it takes viewport units, and 100vw
-     counts the scrollbar — which buys a permanent horizontal scroll for the sake of
-     fifteen pixels. Block layout is kept, so the margins between cards still collapse the
-     way they did. */
-  .wrap { margin: 0 auto; }
-  .wrap > :not(.wide) { max-width: 60rem; margin-left: auto; margin-right: auto; }
+  .wrap { max-width: 60rem; margin: 0 auto; }
 
   /* A folded card keeps its heading and loses its body, and the heading is the control —
      there is no separate affordance to find, because a chevron on a bar people already
@@ -336,7 +329,7 @@
      Full width, and not in the card grid: 80 columns of monospace inside a 17rem
      column wraps every line, which reads as corruption rather than as a narrow window.
      ------------------------------------------------------------------ */
-  .wide { margin: 1rem auto 0; max-width: 110rem; }
+  .wide { margin-top: 1rem; }
 
   #terminal .screen {
     margin: .85rem 0 0;
@@ -348,8 +341,16 @@
     border: 1px solid var(--line);
     border-radius: 8px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: .82rem;
-    line-height: 1.5;
+    /* Sized so the box holds about ninety columns rather than a hundred and twelve.
+       Shell output is written for eighty: `ls -la` produces lines of about fifty-seven
+       characters, so in a 112-column box it filled half the width in 13px type and read
+       as a narrow strip of small print. The box cannot be narrowed to fit the output —
+       nothing knows how wide the next command's output will be — so the characters get
+       bigger instead, which is the same thing seen from the other end and is also just
+       easier to read. Eighty stays comfortably inside it, which is the number that
+       matters: it is the width everything a shell prints is formatted for. */
+    font-size: 1rem;
+    line-height: 1.4;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     tab-size: 8;
