@@ -1414,6 +1414,39 @@ mod tests {
     }
 
     #[test]
+    fn the_terminal_can_be_given_a_window_of_its_own() {
+        // A shell in a card on a status page is as tall as the card. In a window it is as
+        // tall as the window, and the ResizeObserver already tells the shell when that
+        // changes -- so dragging the window resizes the terminal.
+        //
+        // A query rather than a route, which is why the redirect had to stop dropping the
+        // query string: `http://<address>/?view=terminal` has to survive the bounce to
+        // HTTPS, or the popup lands on the console page instead.
+        assert!(
+            PAGE.contains("\"view\") === \"terminal\""),
+            "the popup is the same page, told what it is by its query"
+        );
+        assert!(
+            PAGE.contains("id=\"term-window\""),
+            "and there is a control that opens it"
+        );
+        assert!(
+            PAGE.contains("\"plexos-terminal\""),
+            "the window is named, so a second click focuses the one already open rather \
+             than opening another onto a shell that allows one session"
+        );
+        assert!(
+            PAGE.contains(".solo > :not(.wide):not(#token-card) { display: none; }"),
+            "the rest of the page is hidden and not removed -- listeners are bound to it \
+             before any of this runs, and a missing element there is a dead script"
+        );
+        assert!(
+            PAGE.contains("if (SOLO) {"),
+            "and the popup polls nothing: it has no status card to redraw"
+        );
+    }
+
+    #[test]
     fn backspace_is_never_spelled_as_a_word_boundary() {
         // The guard for the defect above, in the form somebody would reintroduce it: `\b`
         // reads as "backspace" and is one only inside a character class. This is cheap and

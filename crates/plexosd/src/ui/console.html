@@ -336,6 +336,20 @@
      ------------------------------------------------------------------ */
   .wide { margin-top: 1rem; }
 
+  /* The terminal in a window of its own, so it can be dragged to any size the screen
+     allows. Everything else on the page is hidden rather than removed: the listeners are
+     bound to elements in this markup before any of this runs, and a missing element there
+     is a null and a dead script. The screen takes whatever height is left, and the
+     ResizeObserver on it tells the shell -- so resizing the window resizes the terminal. */
+  body.solo-body { height: 100vh; padding: .6rem; overflow: hidden; }
+  .solo { height: 100%; display: flex; flex-direction: column; max-width: none; }
+  .solo > :not(.wide):not(#token-card) { display: none; }
+  .solo > .wide { flex: 1 1 auto; min-height: 0; margin: 0; }
+  .solo > #token-card { margin: 0 0 .6rem; flex: 0 0 auto; }
+  .solo #terminal { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+  .solo #terminal .warn { display: none; }
+  .solo #terminal .screen { flex: 1 1 auto; height: auto; min-height: 0; }
+
   #terminal .screen {
     width: 100%;
     margin: .85rem 0 0;
@@ -1208,9 +1222,13 @@ async function termLoop() {
   }
 }
 
-function terminalCard() {
+/// The terminal card.
+///
+/// `solo` is the version this page serves to its own popup window: no fold (folding the
+/// only thing in a window leaves an empty window), and no button to open a second one.
+function terminalCard(solo) {
   return `
-    <div class="card form${foldClass("terminal")}" id="terminal" data-fold="terminal">
+    <div class="card form${solo ? "" : foldClass("terminal")}" id="terminal"${solo ? "" : ` data-fold="terminal"`}>
       <div class="bar">
         <h3 style="margin:0">Terminal</h3>
         <span class="state" id="term-status">no session</span>
@@ -1224,6 +1242,7 @@ function terminalCard() {
       <div class="row">
         <button id="term-open">Open a shell</button>
         <button id="term-close" class="ghost">Close</button>
+        ${solo ? "" : `<button id="term-window" class="ghost">Open in a window</button>`}
       </div>
       <pre class="screen" id="term-out"></pre>
       <div class="prompt">
@@ -1232,6 +1251,37 @@ function terminalCard() {
                autocapitalize="off" placeholder="a command, then Enter — Ctrl-C interrupts">
       </div>
     </div>`;
+}
+
+/// Whether this page is the popup that holds nothing but the terminal.
+///
+/// A query rather than a path, so the server needs no new route: `Request::path` drops
+/// the query, so `/?view=terminal` is the console page and this is the only thing that
+/// reads the difference.
+const SOLO = new URLSearchParams(location.search).get("view") === "terminal";
+
+/// Builds the popup: the terminal, filling the window, and nothing else.
+///
+/// It does not poll anything. A window whose whole purpose is a shell has no use for a
+/// status card that redraws every ten seconds, and every poll it does not make is one the
+/// appliance does not answer.
+function startTerminalWindow() {
+  document.title = "PlexOS terminal";
+  document.body.classList.add("solo-body");
+  const wrap = document.querySelector(".wrap");
+  wrap.classList.add("solo");
+
+  const host = document.createElement("div");
+  host.className = "wide";
+  host.innerHTML = terminalCard(true);
+  wrap.append(host);
+  observeTerminalSize();
+  termStatus("no session");
+
+  // A popup is given a copy of the opener's sessionStorage, so the token normally comes
+  // with the window. When it does not, the field is the only way in and has to stay.
+  const card = document.getElementById("token-card");
+  if (card) card.hidden = Boolean(token());
 }
 
 /// Watches the screen and tells the shell whenever its size changes.
@@ -1319,7 +1369,7 @@ function render(status) {
     trial.id = "net-trial";
     document.getElementById("main").after(trial);
 
-    host.innerHTML = terminalCard();
+    host.innerHTML = terminalCard(false);
     trial.after(host);
     observeTerminalSize();
     termStatus("no session");
@@ -2011,6 +2061,12 @@ document.addEventListener("click", event => {
     const host = document.getElementById("settings");
     if (host) host.outerHTML = hostedSettingsCard();
   }
+  if (event.target && event.target.id === "term-window") {
+    // Named, so a second click focuses the window that is already open rather than
+    // opening another one onto a shell that only allows a single session.
+    window.open(location.pathname + "?view=terminal", "plexos-terminal",
+                "width=1100,height=760,resizable=yes");
+  }
   if (event.target && event.target.id === "term-open") termOpen(false);
   if (event.target && event.target.id === "term-takeover") termOpen(true);
   if (event.target && event.target.id === "term-close") {
@@ -2033,19 +2089,23 @@ document.getElementById("restart").addEventListener("click", () => power("restar
 
 // The three sections that fold are static markup, so they are drawn open and folded here
 // once. Everything else comes out of a template that already knows.
-applyFolds();
+if (SOLO) {
+  startTerminalWindow();
+} else {
+  applyFolds();
 
-tick();
-tickSetup();
-tickInstall();
-setInterval(tick, REFRESH_MS);
-setInterval(tickInstall, REFRESH_MS);
-setInterval(tickSetup, REFRESH_MS);
+  tick();
+  tickSetup();
+  tickInstall();
+  setInterval(tick, REFRESH_MS);
+  setInterval(tickInstall, REFRESH_MS);
+  setInterval(tickSetup, REFRESH_MS);
 
-// Fetched once, and re-fetched only after a save. Polling settings would overwrite
-// whatever somebody was halfway through typing into them, which is the one thing a
-// settings form must never do.
-loadSettings();
+  // Fetched once, and re-fetched only after a save. Polling settings would overwrite
+  // whatever somebody was halfway through typing into them, which is the one thing a
+  // settings form must never do.
+  loadSettings();
+}
 
 // A line at a time rather than a keystroke at a time. Character-level input would need
 // the field to stop being a field -- no browser autocomplete, no selection, and a
@@ -2067,9 +2127,11 @@ document.addEventListener("keydown", event => {
     termPost({ action: "input", id: termId, data: "\u0004" }).catch(() => {});
   }
 });
-plexTick();
-updateTick();
-sharesTick();
+if (!SOLO) {
+  plexTick();
+  updateTick();
+  sharesTick();
+}
 </script>
 </body>
 </html>
