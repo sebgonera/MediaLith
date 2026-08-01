@@ -1,0 +1,155 @@
+# `iw dev wlan0 scan` on the reference laptop, 2026-08-01.
+#
+# Five blocks kept out of fifty-five, one of each kind the parser has to tell apart: WPA2,
+# WPA3 (SAE), open, 5 GHz, and one with no SSID line at all -- which is what a hidden
+# network looks like from outside.
+#
+# Only the identifiers were changed -- SSIDs and BSSIDs, because this repository is public
+# and the rest of these are the neighbours'. Every other byte is as `iw` printed it,
+# including the tabs, the field order, and `freq: 2412.0` with its decimal point, which an
+# older `iw` writes without. That is the point of a capture: a fixture somebody imagined is
+# a test that agrees with the code and not with the machine.
+
+BSS 02:00:00:00:00:00(on wlan0)
+	last seen: 459.219s [boottime]
+	TSF: 931603357476 usec (10d, 18:46:43)
+	freq: 2412.0
+	beacon interval: 100 TUs
+	capability: ESS Privacy ShortPreamble ShortSlotTime RadioMeasure (0x1431)
+	signal: -80.00 dBm
+	last seen: 561 ms ago
+	SSID: HomeNetwork
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 6.0 9.0 12.0 18.0 
+	DS Parameter set: channel 1
+	TIM: DTIM Count 0 DTIM Period 1 Bitmap Control 0x0 Bitmap[0] 0x0
+	Country: PL	Environment: bogus
+		Channels [1 - 13] @ 20 dBm
+	TPC report: TX power: 16 dBm
+	ERP: <no flags>
+	Extended supported rates: 24.0 36.0 48.0 54.0 
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: PSK
+		 * Capabilities: 16-PTKSA-RC 1-GTKSA-RC (0x000c)
+	RM enabled capabilities:
+		Capabilities: 0x73 0xda 0x00 0x00 0x0c
+			Link Measurement
+			Neighbor Report
+			Beacon Passive Measurement
+			Beacon Active Measurement
+			Beacon Table Measurement
+			Channel Load
+			Statistics Measurement
+			LCI Measurement
+			Transmit Stream/Category Measurement
+			Triggered Transmit Stream/Category
+			FTM Range Report
+			Civic Location Measurement
+		Nonoperating Channel Max Measurement Duration: 0
+		Measurement Pilot Capability: 4
+	HT capabilities:
+		Capabilities: 0x9ad
+			RX LDPC
+			HT20
+			SM Power Save disabled
+			RX HT20 SGI
+			TX STBC
+			RX STBC 1-stream
+			Max AMSDU length: 7935 bytes
+			No DSSS/CCK HT40
+		Maximum RX AMPDU length 65535 bytes (exponent: 0x003)
+		Minimum RX AMPDU time spacing: No restriction (0x00)
+		HT TX/RX MCS rate indexes supported: 0-15
+	HT operation:
+		 * primary channel: 1
+		 * secondary channel offset: no secondary
+		 * STA channel width: 20 MHz
+		 * RIFS: 0
+		 * HT protection: non-HT mixed
+		 * non-GF present: 1
+		 * O
+BSS 02:00:00:00:00:01(on wlan0)
+	last seen: 459.775s [boottime]
+	TSF: 931598336391 usec (10d, 18:46:38)
+	freq: 2462.0
+	beacon interval: 100 TUs
+	capability: ESS Privacy ShortPreamble ShortSlotTime RadioMeasure (0x1431)
+	signal: -67.00 dBm
+	last seen: 5 ms ago
+	SSID: ModernNetwork
+	Supported rates: 11.0* 12.0 18.0 24.0 36.0 48.0 54.0 
+	DS Parameter set: channel 11
+	TIM: DTIM Count 0 DTIM Period 1 Bitmap Control 0x0 Bitmap[0] 0x0
+	Country: PL	Environment: bogus
+		Channels [1 - 13] @ 20 dBm
+	TPC report: TX power: 16 dBm
+	ERP: Use_Protection
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: SAE
+		 * Capabilities: 16-PTKSA-RC 1-GTKSA-RC MFP-required MFP-capable (0x00cc)
+	
+BSS 02:00:00:00:00:02(on wlan0)
+	last seen: 459.775s [boottime]
+	TSF: 931598336896 usec (10d, 18:46:38)
+	freq: 2462.0
+	beacon interval: 100 TUs
+	capability: ESS ShortPreamble ShortSlotTime RadioMeasure (0x1421)
+	signal: -66.00 dBm
+	last seen: 5 ms ago
+	SSID: OpenGuest
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 6.0 9.0 12.0 18.0 
+	DS Parameter set: channel 11
+	TIM: DTIM Count 0 DTIM Period 1 Bitmap Control 0x0 Bitmap[0] 0x0
+	Country: PL	Environment: bogus
+		Channels [1 - 13] @ 20 dBm
+	TPC report: TX power: 16 dBm
+	ERP: Use_Protection
+	Extended supported rates: 24.0 36.0 48.0 54.0 
+	
+BSS 02:00:00:00:00:03(on wlan0)
+	last seen: 459.775s [boottime]
+	TSF: 931598745660 usec (10d, 18:46:38)
+	freq: 5540.0
+	beacon interval: 100 TUs
+	capability: ESS Privacy SpectrumMgmt RadioMeasure (0x1111)
+	signal: -47.00 dBm
+	last seen: 5 ms ago
+	SSID: HomeNetwork-5G
+	Supported rates: 12.0* 18.0 24.0* 36.0 48.0 54.0 
+	TIM: DTIM Count 0 DTIM Period 3 Bitmap Control 0x0 Bitmap[0] 0x0
+	Country: PL	Environment: bogus
+		Channels [36 - 64] @ 23 dBm
+		Channels [100 - 140] @ 30 dBm
+	Power constraint: 0 dB
+	TPC report: TX power: 24 dBm
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: SAE
+		 * Capabilities: 16-PTKSA-RC 1-GTKSA-RC MFP-required MFP-capable (0x00cc)
+	
+BSS 02:00:00:00:00:04(on wlan0)
+	last seen: 459.775s [boottime]
+	TSF: 931598342288 usec (10d, 18:46:38)
+	freq: 2462.0
+	beacon interval: 100 TUs
+	capability: ESS Privacy ShortPreamble ShortSlotTime RadioMeasure (0x1431)
+	signal: -67.00 dBm
+	last seen: 5 ms ago
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 6.0 9.0 12.0 18.0 
+	DS Parameter set: channel 11
+	TIM: DTIM Count 0 DTIM Period 1 Bitmap Control 0x0 Bitmap[0] 0x0
+	Country: PL	Environment: bogus
+		Channels [1 - 13] @ 20 dBm
+	TPC report: TX power: 16 dBm
+	ERP: Use_Protection
+	Extended supported rates: 24.0 36.0 48.0 54.0 
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: PSK
+		 * Capabilities: 16-PTKSA-RC 1-GTKSA-RC (0x000c)
+	

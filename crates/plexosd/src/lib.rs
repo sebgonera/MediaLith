@@ -63,6 +63,7 @@ pub mod status;
 pub mod terminal;
 pub mod tls;
 pub mod update;
+pub mod wifi;
 
 pub use bootcounter::BootEntry;
 pub use health::{Check, Health, Status};
