@@ -106,11 +106,37 @@ BR2_PACKAGE_LINUX_FIRMWARE=y
 # GuC/HuC. HuC is what gives QuickSync its quality at low bitrates, and its absence is
 # silent — which is the whole reason plexos-gpu::firmware exists.
 BR2_PACKAGE_LINUX_FIRMWARE_I915=y
-# Wireless-AC 9560 on the reference machine.
+# Wireless-AC 9560 on the reference machine. These blobs must reach the *initramfs*, not
+# just /usr -- CONFIG_IWLWIFI=y, so the driver probes before /usr is mounted, and with no
+# firmware it registers no netdev at all. post-image.sh stage 3 copies them.
 BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_9XXX=y
 # Realtek USB Gigabit adapters (r8152). The reference laptop has no built-in Ethernet,
 # and a media server on wireless is not a serious configuration — see the note below.
 BR2_PACKAGE_LINUX_FIRMWARE_RTL_815X=y
+# The wireless regulatory database. cfg80211 asks for it as firmware; without it the
+# kernel uses the world domain, which is legal everywhere and weaker than the card is.
+BR2_PACKAGE_WIRELESS_REGDB=y
+
+# ---------------------------------------------------------------------------
+# Wireless
+# ---------------------------------------------------------------------------
+# The kernel has had CONFIG_IWLWIFI, CFG80211 and MAC80211 built in from the start; what
+# was missing was any userspace to associate with an access point. nl80211 is the current
+# interface and the only one worth building against -- wext is deprecated and iwlwifi does
+# not offer it.
+#
+# wpa_cli matters as much as the daemon: it is how a scan is requested and read, how a
+# network is added, and how the console asks whether association succeeded. It is also
+# what makes wireless configurable from the shell on the attached screen, which is the
+# only way in on a machine with no wired connection at all.
+BR2_PACKAGE_WPA_SUPPLICANT=y
+BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
+BR2_PACKAGE_WPA_SUPPLICANT_CLI=y
+# Turns a passphrase into a PSK, so the passphrase itself need not be written to /var.
+BR2_PACKAGE_WPA_SUPPLICANT_PASSPHRASE=y
+# `iw` for scanning and for saying what the radio is actually doing. wpa_cli can scan, but
+# a diagnostic that cannot run when the supplicant is not running is not a diagnostic.
+BR2_PACKAGE_IW=y
 
 # ---------------------------------------------------------------------------
 # Storage and verity

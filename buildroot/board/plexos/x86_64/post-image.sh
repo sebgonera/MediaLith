@@ -429,6 +429,53 @@ install_gpu_firmware() {
         "check BR2_PACKAGE_LINUX_FIRMWARE_I915 is still set; without these, hardware transcoding runs at reduced quality on every Intel machine and says so only in debugfs"
 
     msg "  GuC/HuC firmware in initrd: ${count} blobs, $(( total / 1024 )) KiB"
+
+    install_wifi_firmware
+}
+
+# iwlwifi, for exactly the same reason and with exactly the same failure.
+#
+# CONFIG_IWLWIFI=y, so the driver probes during do_initcalls and asks for its firmware a
+# second before /usr is mounted. Blobs in /usr are blobs it never sees -- and unlike i915,
+# which carries on in a degraded mode, iwlwifi with no firmware registers no netdev at
+# all. The symptom is that `wlan0` does not exist on a machine whose wireless card is
+# fitted, working and named correctly by lspci, which reads as a card the kernel does not
+# support rather than as a missing file.
+#
+# The blobs in linux-firmware's root are symlinks into intel/iwlwifi, so both the copy and
+# the size have to follow them: `install` does by default and `stat` does not.
+#
+# Not fatal when there are none. Wireless is optional and a build with
+# BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_* turned off is a legitimate build; a machine with no
+# Intel wireless simply never asks.
+install_wifi_firmware() {
+    local from="${TARGET_DIR}/usr/lib/firmware"
+    local total=0
+    local count=0
+
+    for blob in "${from}"/iwlwifi-*.ucode; do
+        [ -e "${blob}" ] || continue
+        install -D -m 0444 "${blob}" "${WORK}/initrd/lib/firmware/$(basename "${blob}")"
+        total=$(( total + $(stat -Lc %s "${blob}") ))
+        count=$(( count + 1 ))
+    done
+
+    # The regulatory database. cfg80211 asks for it as firmware when the first wireless
+    # device registers, which is also during initcalls; without it the kernel falls back to
+    # the world domain, which is legal everywhere and quieter and weaker than the card can
+    # be. Both files or neither: the signature is what the kernel checks it by.
+    for blob in "${from}"/regulatory.db "${from}"/regulatory.db.p7s; do
+        [ -e "${blob}" ] || continue
+        install -D -m 0444 "${blob}" "${WORK}/initrd/lib/firmware/$(basename "${blob}")"
+        total=$(( total + $(stat -Lc %s "${blob}") ))
+        count=$(( count + 1 ))
+    done
+
+    if [ "${count}" -gt 0 ]; then
+        msg "  wireless firmware in initrd: ${count} files, $(( total / 1024 )) KiB"
+    else
+        msg "  no wireless firmware found -- wlan interfaces will not appear"
+    fi
 }
 
 build_initrd() {
