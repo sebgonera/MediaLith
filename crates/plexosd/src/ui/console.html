@@ -666,6 +666,16 @@ let settingsView = null;
 // page comes to show a setting nobody stored.
 let pendingMode = null;
 
+/** The settings card carrying the id every later redraw finds it by.
+ *
+ * One place, because three copies of a literal id is how this page came to have two
+ * elements called "install" -- and `getElementById` answers with whichever the markup
+ * happens to put first.
+ */
+function hostedSettingsCard() {
+  return settingsCard().replace('class="card form"', 'class="card form" id="settings"');
+}
+
 function settingsCard() {
   if (!settingsView) {
     return `<div class="card form"><h3>Settings</h3>
@@ -816,7 +826,7 @@ async function loadSettings() {
     settingsView = { config: {}, timezones: [], error: String(e) };
   }
   const host = document.getElementById("settings");
-  if (host) host.outerHTML = settingsCard().replace('class="card form"', 'class="card form" id="settings"');
+  if (host) host.outerHTML = hostedSettingsCard();
   renderTrial();
 }
 
@@ -1102,7 +1112,7 @@ function render(status) {
        ${devicesCard(status.gpu || {})}
        ${networkCard(status.network || {})}
        ${systemCard(status)}
-       ${settingsCard().replace('class="card form"', 'class="card form" id="settings"')}
+       ${hostedSettingsCard()}
      </div>`;
 
   document.getElementById("uptime").textContent = humanUptime(status.uptime_seconds);
@@ -1201,21 +1211,26 @@ function renderPlexInto(report) {
        downloads the official package from Plex, checks its signature, and turns it into
        an app image on this machine. Doing so means accepting Plex's terms.</p>
     <div class="row">
-      <button id="install" ${busy ? "disabled" : ""}>${phase === "failed" ? "Try again" : "Install Plex"}</button>
+      <button id="plex-install" ${busy ? "disabled" : ""}>${phase === "failed" ? "Try again" : "Install Plex"}</button>
     </div>
     ${progress}`;
 
-  document.getElementById("install").addEventListener("click", startInstall);
+  document.getElementById("plex-install").addEventListener("click", startPlexInstall);
 }
 
-/** Asks the appliance to install Plex. */
-async function startInstall() {
+/** Asks the appliance to install Plex.
+ *
+ * Named apart from the disk installer's `startInstall` deliberately. Both were called
+ * that, in one script, so the later declaration silently replaced the earlier one and
+ * this button asked the appliance to erase a disk instead.
+ */
+async function startPlexInstall() {
   const value = token();
   if (!value) {
     sectionError("plex", "Enter the device token above first. It was printed on the screen attached to this machine when it started.");
     return;
   }
-  document.getElementById("install").disabled = true;
+  document.getElementById("plex-install").disabled = true;
 
   try {
     const response = await fetch(PLEX_ENDPOINT, {
@@ -1253,7 +1268,7 @@ function sectionError(id, message) {
   box.className = "progress failed";
   box.innerHTML = `<span class="now">Failed</span><div>${esc(message)}</div>`;
   if (!existing) section.append(box);
-  const button = document.getElementById("install");
+  const button = document.getElementById("plex-install");
   if (button) button.disabled = false;
 }
 
@@ -1756,7 +1771,7 @@ document.addEventListener("click", event => {
     settingsView.config = settingsView.config || {};
     settingsView.config.network = Object.assign({}, settingsView.config.network, { mode: pendingMode });
     const host = document.getElementById("settings");
-    if (host) host.outerHTML = settingsCard().replace('class="card form"', 'class="card form" id="settings"');
+    if (host) host.outerHTML = hostedSettingsCard();
   }
   if (event.target && event.target.id === "term-open") termOpen(false);
   if (event.target && event.target.id === "term-takeover") termOpen(true);

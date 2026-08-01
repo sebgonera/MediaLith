@@ -1199,6 +1199,79 @@ mod tests {
     }
 
     #[test]
+    fn no_id_is_given_to_two_elements() {
+        // The companion to the test above, and the hole it left. That one asks whether
+        // every id the script reaches for exists; this asks whether it names exactly one
+        // thing. Both were true of `install` -- the disk installer's section and the Plex
+        // card's button were both called that -- and `getElementById` answers with whichever
+        // the markup puts first, which was the button. So `renderInstall` wrote the whole
+        // "Install to a disk" card *into the Install Plex button*: the button vanished, the
+        // real section sat on "Loading...", and there was no way left on the page to install
+        // Plex. Found on the appliance, by somebody looking at the page and asking what to
+        // press.
+        //
+        // Every id here is preceded by a space, so the search needs no parser.
+        let mut ids: Vec<&str> = PAGE
+            .match_indices(" id=\"")
+            .filter_map(|(index, _)| {
+                PAGE[index + " id=\"".len()..]
+                    .split_once('"')
+                    .map(|(id, _)| id)
+            })
+            .collect();
+        ids.sort_unstable();
+        let duplicated: Vec<&str> = ids
+            .windows(2)
+            .filter(|pair| pair[0] == pair[1])
+            .map(|pair| pair[0])
+            .collect();
+        assert!(
+            duplicated.is_empty(),
+            "these ids name more than one element, so getElementById returns whichever \
+             comes first in the markup and every render keyed on them lands on the wrong \
+             one: {duplicated:?}"
+        );
+    }
+
+    #[test]
+    fn the_script_declares_no_function_twice() {
+        // The other half of the same defect, and the half that made it dangerous. There
+        // were two `startInstall` functions in this one script: Plex's and the disk
+        // installer's. A function declaration is not an error to repeat -- the later one
+        // silently replaces the earlier -- so the Install Plex button was wired to the code
+        // that erases a disk. The duplicate `const` that blanked this page once *is* a parse
+        // error and `the_pages_script_parses` catches it; a duplicate `function` is not, and
+        // nothing catches it but this.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+
+        let mut names: Vec<&str> = script
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim_start();
+                let rest = line
+                    .strip_prefix("async function ")
+                    .or_else(|| line.strip_prefix("function "))?;
+                rest.split_once('(').map(|(name, _)| name.trim())
+            })
+            .collect();
+        names.sort_unstable();
+        let duplicated: Vec<&str> = names
+            .windows(2)
+            .filter(|pair| pair[0] == pair[1])
+            .map(|pair| pair[0])
+            .collect();
+        assert!(
+            duplicated.is_empty(),
+            "these functions are declared more than once, so the last one wins and every \
+             earlier caller now runs code it was never pointed at: {duplicated:?}"
+        );
+    }
+
+    #[test]
     fn the_page_leads_a_new_appliance_through_setup_and_then_stops() {
         // A machine five minutes old used to show exactly the page one running for a year
         // showed. The section has to exist, has to be driven by the endpoint rather than by
