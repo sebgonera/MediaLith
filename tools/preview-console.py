@@ -42,6 +42,11 @@ PIXEL = bytes.fromhex("47494638396101000100800000000000ffffff21f90401000000002c0
 PAGE = sys.argv[1]
 APPLIANCE = sys.argv[2]
 PORT = int(sys.argv[3])
+# Optional: a directory of canned replies, one file per route, named after the route with
+# the slashes turned into dashes -- `api-wifi.json` answers `/api/wifi`. For looking at a
+# state the appliance is not in, which is most of them: a card that only appears while
+# something is failing is a card nobody ever looks at before shipping it.
+CANNED = sys.argv[4] if len(sys.argv) > 4 else None
 
 INSECURE = ssl.create_default_context()
 INSECURE.check_hostname = False
@@ -60,6 +65,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(PIXEL)))
             self.end_headers()
             self.wfile.write(PIXEL)
+            return
+        canned = None
+        if CANNED and self.path.startswith("/api/"):
+            import os.path
+            name = self.path.strip("/").replace("/", "-") + ".json"
+            candidate = os.path.join(CANNED, name)
+            if os.path.exists(candidate):
+                canned = candidate
+        if canned:
+            with open(canned, "rb") as handle:
+                body = handle.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if self.path.startswith("/api/") or self.path == "/healthz":
             try:

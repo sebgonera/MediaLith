@@ -71,6 +71,7 @@ pub fn respond(
     plex: &std::sync::Arc<crate::plex::Handle>,
     update: &std::sync::Arc<crate::update::Job>,
     install: &std::sync::Arc<crate::install::Job>,
+    wifi: &std::sync::Arc<crate::wifi::Job>,
 ) -> Response {
     match (request.method.as_str(), request.path.as_str()) {
         // Starting an installation. Returns as soon as the work is handed to a thread:
@@ -133,6 +134,13 @@ pub fn respond(
 
         // Network shares: the library lives on a NAS, and without one there is nothing
         // to play.
+        // Wireless. GET reads state and needs no credential, like every other GET here;
+        // the *key* is deliberately not among what it answers, because this route is
+        // readable by anyone on the LAN and the key sits on /var at 0600 for a reason.
+        // Reading needs no credential and both the scan and the join hold the radio, so
+        // they are POSTs; `http::route` has already enforced that by the time this runs.
+        ("GET" | "HEAD" | "POST", "/api/wifi") => wifi_route(request, env, wifi),
+
         ("GET" | "HEAD", "/api/shares") => match serde_json::to_string(&crate::shares::states()) {
             Ok(json) => Response::json(json),
             Err(error) => Response::text(500, format!("could not serialise shares: {error}\n")),
@@ -750,11 +758,22 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
 
     let served_job = std::sync::Arc::clone(&job);
     let installer = std::sync::Arc::new(crate::install::Job::new());
+    let served_wifi = std::sync::Arc::new(crate::wifi::Job::new());
     http::serve_tls(
         &listener,
         &tls,
         credential,
-        move |request| respond(request, &System, &served_job, &plex, &update, &installer),
+        move |request| {
+            respond(
+                request,
+                &System,
+                &served_job,
+                &plex,
+                &update,
+                &installer,
+                &served_wifi,
+            )
+        },
         log,
     )
 }
@@ -797,6 +816,88 @@ fn report_disks(env: &impl Environment, install: &std::sync::Arc<crate::install:
 /// Split out of [`respond`] because every line of it is a refusal, and a route table is
 /// the wrong place to read them: the decision about erasing somebody's disk should be one
 /// function somebody can look at whole.
+/// Everything at `/api/wifi`, read and write.
+fn wifi_route(
+    request: &Request,
+    env: &impl Environment,
+    wifi: &std::sync::Arc<crate::wifi::Job>,
+) -> Response {
+    if request.method == "POST" {
+        return wifi_action(request, wifi);
+    }
+    match serde_json::to_string(&crate::wifi::report(env, wifi)) {
+        Ok(body) => Response::json(body),
+        Err(error) => Response::text(500, format!("could not describe wireless: {error}\n")),
+    }
+}
+
+/// Scans, joins or forgets, from `POST /api/wifi`.
+///
+/// Its own function because `respond` is a router and this is a decision tree; keeping it
+/// inline pushed that router past the length at which anybody reads it as one.
+///
+/// Nothing here does its work inside the request. `http::IO_TIMEOUT` is fifteen seconds
+/// and an association is allowed twenty-five, so a request that waited would be cut off in
+/// exactly the case worth reporting: a wrong passphrase, which the supplicant retries
+/// rather than refuses, so the timeout *is* the error path.
+fn wifi_action(request: &Request, wifi: &std::sync::Arc<crate::wifi::Job>) -> Response {
+    let body: serde_json::Value =
+        serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
+    match body.get("action").and_then(serde_json::Value::as_str) {
+        Some("scan") => {
+            if !wifi.begin(crate::wifi::Phase::Scanning, "scanning for networks") {
+                return Response::text(
+                    409,
+                    "The radio is busy. Watch it at GET /api/wifi; a second scan \
+                             would interrupt the first.\n",
+                );
+            }
+            crate::wifi::spawn_scan(wifi);
+            Response::json("{\"started\":true}")
+        }
+        Some("join") => {
+            let Some(ssid) = body.get("ssid").and_then(serde_json::Value::as_str) else {
+                return Response::text(
+                    400,
+                    "join needs an ssid. Remedy: choose a network from a scan, or \
+                             type the name of a hidden one.\n",
+                );
+            };
+            if ssid.is_empty() {
+                return Response::text(
+                    400,
+                    "the network name is empty. Remedy: a hidden network still has \
+                             a name, and it has to be typed.\n",
+                );
+            }
+            if !wifi.begin(crate::wifi::Phase::Associating, &format!("joining {ssid}")) {
+                return Response::text(409, "The radio is busy. Watch it at GET /api/wifi.\n");
+            }
+            let passphrase = body
+                .get("passphrase")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let hidden = body
+                .get("hidden")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            crate::wifi::spawn_join(wifi, ssid.to_owned(), passphrase.to_owned(), hidden);
+            Response::json("{\"started\":true}")
+        }
+        Some("forget") => match crate::wifi::forget() {
+            Ok(()) => Response::json("{\"forgotten\":true}"),
+            Err(error) => Response::text(500, format!("could not forget it: {error}\n")),
+        },
+        other => Response::text(
+            400,
+            format!(
+                "{other:?} is not a wireless action. Remedy: one of scan, join, \
+                         forget.\n"
+            ),
+        ),
+    }
+}
+
 fn begin_install(
     request: &Request,
     env: &impl Environment,
@@ -944,6 +1045,7 @@ mod tests {
             &std::sync::Arc::new(crate::plex::Handle::new()),
             &std::sync::Arc::new(crate::update::Job::new()),
             &std::sync::Arc::new(crate::install::Job::new()),
+            &std::sync::Arc::new(crate::wifi::Job::new()),
         )
     }
 
@@ -1064,6 +1166,7 @@ mod tests {
                 &std::sync::Arc::new(crate::plex::Handle::new()),
                 &std::sync::Arc::new(crate::update::Job::new()),
                 &std::sync::Arc::new(crate::install::Job::new()),
+                &std::sync::Arc::new(crate::wifi::Job::new()),
             );
             assert_eq!(response.status, 400, "{body:?}");
         }
@@ -1414,6 +1517,61 @@ mod tests {
     }
 
     #[test]
+    fn the_wireless_route_never_answers_with_the_key() {
+        // This route is readable by anyone on the LAN, because every GET here is. The
+        // pre-shared key is on /var at 0600 precisely so that it is not; serialising the
+        // stored network wholesale would have handed it out on an unauthenticated read,
+        // and it would have looked exactly like every other report on the page.
+        let response = respond_test(&get("/api/wifi"), &Fixture::new());
+        assert_eq!(response.status, 200);
+        let body = String::from_utf8_lossy(&response.body);
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("parsable");
+        assert!(
+            parsed.get("psk").is_none(),
+            "the key must not be in the report: {body}"
+        );
+        assert!(!body.contains("psk"), "nor under any other name: {body}");
+        assert!(
+            parsed.get("configured").is_some(),
+            "the *name* of the remembered network is fine, and is what a page needs"
+        );
+    }
+
+    #[test]
+    fn a_wireless_action_nobody_offers_says_which_ones_exist() {
+        let mut request = get("/api/wifi");
+        request.method = "POST".to_owned();
+        request.body = br#"{"action":"levitate"}"#.to_vec();
+        let response = respond_test(&request, &Fixture::new());
+        assert_eq!(response.status, 400);
+        let body = String::from_utf8_lossy(&response.body);
+        assert!(body.contains("scan"), "{body}");
+        assert!(body.contains("join"), "{body}");
+        assert!(body.contains("forget"), "{body}");
+    }
+
+    #[test]
+    fn joining_nothing_in_particular_is_refused_before_the_radio_is_touched() {
+        // A join with no name would otherwise claim the radio, spawn a thread, and fail
+        // there -- so the refusal would arrive as a job state rather than as an answer to
+        // the request that was wrong.
+        let mut request = get("/api/wifi");
+        request.method = "POST".to_owned();
+        request.body = br#"{"action":"join"}"#.to_vec();
+        let response = respond_test(&request, &Fixture::new());
+        assert_eq!(response.status, 400);
+        assert!(String::from_utf8_lossy(&response.body).contains("ssid"));
+
+        request.body = br#"{"action":"join","ssid":""}"#.to_vec();
+        let response = respond_test(&request, &Fixture::new());
+        assert_eq!(response.status, 400);
+        assert!(
+            String::from_utf8_lossy(&response.body).contains("hidden network still has"),
+            "and says why an empty name is not the way to join a hidden one"
+        );
+    }
+
+    #[test]
     fn the_terminal_can_be_given_a_window_of_its_own() {
         // A shell in a card on a status page is as tall as the card. In a window it is as
         // tall as the window, and the ResizeObserver already tells the shell when that
@@ -1634,6 +1792,7 @@ mod tests {
                 &std::sync::Arc::new(crate::plex::Handle::new()),
                 &std::sync::Arc::new(crate::update::Job::new()),
                 &std::sync::Arc::new(crate::install::Job::new()),
+                &std::sync::Arc::new(crate::wifi::Job::new()),
             );
             assert_ne!(response.status, 404, "{method} {path}");
         }
@@ -1787,6 +1946,7 @@ mod tests {
             &std::sync::Arc::new(crate::plex::Handle::new()),
             &std::sync::Arc::new(crate::update::Job::new()),
             &std::sync::Arc::new(crate::install::Job::new()),
+            &std::sync::Arc::new(crate::wifi::Job::new()),
         );
         assert_eq!(response.status, 409);
         assert!(

@@ -393,7 +393,7 @@ pub fn scan(env: &impl Environment, name: &str) -> io::Result<Vec<Network>> {
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
-        let output = env.run("/usr/sbin/iw", &["dev", name, "scan"])?;
+        let output = env.run(&program(env, "iw")?, &["dev", name, "scan"])?;
         let found = parse_scan(&output);
         if !found.is_empty() {
             return Ok(found);
@@ -412,6 +412,408 @@ pub fn scan(env: &impl Environment, name: &str) -> io::Result<Vec<Network>> {
         )));
     }
     Ok(Vec::new())
+}
+
+/// Where a join has got to.
+///
+/// A job rather than a synchronous request, and not for tidiness: `http::IO_TIMEOUT` is
+/// fifteen seconds and an association is allowed twenty-five, so a request that did the
+/// work would have its answer cut off precisely in the case worth reporting — the one
+/// where the passphrase is wrong and the supplicant is still retrying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Phase {
+    /// Nothing has been asked for.
+    Idle,
+    /// Looking for what is in range.
+    Scanning,
+    /// Handshaking with the access point.
+    Associating,
+    /// Associated; asking for an address.
+    Addressing,
+    /// On the network.
+    Connected,
+    /// It did not work, and `error` says what happened.
+    Failed,
+}
+
+impl Phase {
+    /// Whether a run holds the radio right now.
+    #[must_use]
+    pub fn is_running(self) -> bool {
+        matches!(self, Self::Scanning | Self::Associating | Self::Addressing)
+    }
+}
+
+/// The state of the one wireless job this daemon runs.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Progress {
+    /// Where the run has got to, or `Idle` when there has not been one.
+    pub phase: Phase,
+    /// One line saying what is happening, in the words a person would use.
+    pub detail: String,
+    /// What went wrong, with a remedy. `None` unless the phase is `Failed`.
+    pub error: Option<String>,
+    /// What was in range at the last scan. Kept between requests so the page can show a
+    /// list without holding the radio open on every poll.
+    pub networks: Vec<Network>,
+    /// A running commentary, bounded.
+    pub log: Vec<String>,
+}
+
+impl Default for Progress {
+    fn default() -> Self {
+        Self {
+            phase: Phase::Idle,
+            detail: "nothing has been asked for".to_owned(),
+            error: None,
+            networks: Vec::new(),
+            log: Vec::new(),
+        }
+    }
+}
+
+/// The one wireless job, and its progress.
+#[derive(Debug, Default)]
+pub struct Job {
+    state: std::sync::Mutex<Progress>,
+}
+
+impl Job {
+    /// A job that has never run.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The current state.
+    ///
+    /// # Panics
+    /// If a previous holder panicked. The state is a plain struct no operation can leave
+    /// half-written, so taking it back is correct rather than merely convenient.
+    #[must_use]
+    pub fn snapshot(&self) -> Progress {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&mut Progress) -> R) -> R {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(&mut state)
+    }
+
+    /// Claims the radio, if no other run holds it.
+    ///
+    /// Checked and set under one lock, so two requests arriving together cannot both be
+    /// told to proceed — and two supplicants on one interface is a machine that
+    /// associates and immediately disassociates, repeatedly, for no visible reason.
+    pub fn begin(&self, phase: Phase, detail: &str) -> bool {
+        self.with(|state| {
+            if state.phase.is_running() {
+                return false;
+            }
+            state.phase = phase;
+            detail.clone_into(&mut state.detail);
+            state.error = None;
+            state.log = vec![detail.to_owned()];
+            true
+        })
+    }
+
+    /// Moves to a phase and records the line describing it.
+    pub fn step(&self, phase: Phase, detail: &str) {
+        self.with(|state| {
+            state.phase = phase;
+            detail.clone_into(&mut state.detail);
+            if state.log.len() > 40 {
+                state.log.remove(0);
+            }
+            state.log.push(detail.to_owned());
+        });
+    }
+
+    /// Records what was found, without changing the phase.
+    pub fn found(&self, networks: Vec<Network>) {
+        self.with(|state| state.networks = networks);
+    }
+
+    /// Ends the run badly, keeping the reason.
+    pub fn fail(&self, error: &str) {
+        self.with(|state| {
+            state.phase = Phase::Failed;
+            "the network was not joined".clone_into(&mut state.detail);
+            state.error = Some(error.to_owned());
+            if state.log.len() > 40 {
+                state.log.remove(0);
+            }
+            state.log.push(error.to_owned());
+        });
+    }
+}
+
+/// Finds one of the wireless programs, or says which is missing and what it does.
+///
+/// Through `net::resolve` rather than a literal path, for the reason recorded there: this
+/// runs from a process with no `PATH`, and the glibc fallback covers `/bin:/usr/bin` while
+/// these live in `/usr/sbin`.
+fn program(env: &impl Environment, name: &str) -> io::Result<String> {
+    crate::net::resolve(env, name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "`{name}` is not in this image, so wireless cannot be configured from here. \
+                 Remedy: this is a build problem rather than a setting -- check \
+                 BR2_PACKAGE_WPA_SUPPLICANT, its _CLI and _PASSPHRASE sub-options, and \
+                 BR2_PACKAGE_IW in the defconfig."
+            ),
+        )
+    })
+}
+
+/// Turns a passphrase into the key that gets stored.
+///
+/// Done by `wpa_passphrase` rather than here: it is PBKDF2 over the SSID, and an
+/// implementation of that written from memory is one whose mistakes only show up as a
+/// network that will not accept a correct password.
+///
+/// # Errors
+/// Fails if `wpa_passphrase` is missing, cannot be run, or rejects the passphrase — which
+/// it does, in prose on stdout, for anything outside 8 to 63 characters.
+pub fn psk_for(env: &impl Environment, ssid: &str, passphrase: &str) -> io::Result<String> {
+    let output = env.run(&program(env, "wpa_passphrase")?, &[ssid, passphrase])?;
+    parse_psk(&output).ok_or_else(|| {
+        io::Error::other(format!(
+            "the passphrase was not accepted: {}. Remedy: a WPA passphrase is between 8 \
+             and 63 characters.",
+            output.trim()
+        ))
+    })
+}
+
+/// How long to wait for the supplicant to associate before giving up.
+///
+/// Association is a handshake with an access point, and 25 seconds is long enough for a
+/// slow one and short enough that a wrong passphrase is reported while somebody is still
+/// looking at the page. A wrong key does not fail fast: the supplicant retries, so the
+/// timeout *is* the error path.
+const ASSOCIATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// Associates with a network and takes an address on it.
+///
+/// # Errors
+/// Fails if the programs are missing, if the supplicant will not start, or if it has not
+/// associated within [`ASSOCIATE_TIMEOUT`].
+pub fn connect(
+    env: &impl Environment,
+    name: &str,
+    network: &Saved,
+    log: &mut dyn FnMut(&str),
+) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    bring_up(name)?;
+
+    let conf = Path::new(SUPPLICANT_CONF);
+    if let Some(parent) = conf.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(conf, supplicant_conf(network))?;
+    std::fs::set_permissions(conf, std::fs::Permissions::from_mode(0o600))?;
+
+    // Whatever was running is for the previous network. Terminating it is allowed to fail:
+    // on the first connection of a boot there is nothing there, and that is the ordinary
+    // case rather than a problem.
+    let cli = program(env, "wpa_cli")?;
+    let _ = env.run(&cli, &["-i", name, "terminate"]);
+
+    let supplicant = program(env, "wpa_supplicant")?;
+    let child = std::process::Command::new(&supplicant)
+        .args(["-B", "-i", name, "-c", SUPPLICANT_CONF, "-D", "nl80211"])
+        .spawn()
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "could not start {supplicant} on {name}: {error}. Remedy: the radio is \
+                     present, so try `wpa_supplicant -i {name} -c {SUPPLICANT_CONF} -D \
+                     nl80211` in the terminal, without -B, to see what it says."
+                ),
+            )
+        })?;
+
+    // -B forks, so the process spawned above exits at once and the resident supplicant is
+    // its child. Exactly the shape that left one zombie per plexosd start for the life of
+    // the project when udhcpc was started the same way -- see net::dhcp.
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+
+    log(&format!("associating with {}", network.ssid));
+    let deadline = std::time::Instant::now() + ASSOCIATE_TIMEOUT;
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let status = parse_status(&env.run(&cli, &["-i", name, "status"]).unwrap_or_default());
+        if associated(&status) {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "{} did not associate within {} seconds. Remedy: a wrong passphrase \
+                     looks exactly like this, because the supplicant keeps retrying rather \
+                     than refusing -- check it, and check the network is in range with a \
+                     scan.",
+                    network.ssid,
+                    ASSOCIATE_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+    }
+
+    log(&format!("associated with {}", network.ssid));
+    crate::net::dhcp(env, name, log)
+}
+
+/// What `GET /api/wifi` answers.
+///
+/// The job alone is not enough, for the same reason provisioning's is not: after a reboot
+/// the job is idle on a machine that is perfectly well connected, and a page reading only
+/// the job would offer to join a network it is already on.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Report {
+    /// The wireless interface, or `None` on a machine with no radio.
+    pub interface: Option<String>,
+    /// The name of the remembered network. **Never the key** — this route needs no
+    /// credential to read, and the key is on `/var` at 0600 for a reason.
+    pub configured: Option<String>,
+    /// Whether the supplicant has finished associating.
+    pub connected: bool,
+    /// The network it is on, which is not always the one that is remembered.
+    pub ssid: Option<String>,
+    /// The address held on the wireless interface, if any.
+    pub address: Option<String>,
+    /// The run in flight, or the last one.
+    #[serde(flatten)]
+    pub progress: Progress,
+}
+
+/// The state of wireless on this machine, right now.
+#[must_use]
+pub fn report(env: &impl Environment, job: &Job) -> Report {
+    let interface = interface(env).ok().flatten();
+    let status = interface.as_ref().map_or_else(Vec::new, |name| {
+        crate::net::resolve(env, "wpa_cli").map_or_else(Vec::new, |cli| {
+            parse_status(&env.run(&cli, &["-i", name, "status"]).unwrap_or_default())
+        })
+    });
+    let field = |key: &str| {
+        status
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, value)| value.clone())
+    };
+    let address = interface.as_ref().and_then(|name| {
+        crate::net::addresses(env)
+            .into_iter()
+            .find(|a| &a.interface == name)
+            .map(|a| a.cidr)
+    });
+
+    Report {
+        connected: associated(&status),
+        ssid: field("ssid"),
+        address,
+        configured: saved().map(|s| s.ssid),
+        interface,
+        progress: job.snapshot(),
+    }
+}
+
+/// Scans, in the background, reporting into the job.
+///
+/// Backgrounded because a scan takes several seconds with the radio held open, which is
+/// most of `http::IO_TIMEOUT` before anything else has happened.
+pub fn spawn_scan(job: &std::sync::Arc<Job>) {
+    let job = std::sync::Arc::clone(job);
+    std::thread::spawn(move || {
+        let env = plexos_gpu::env::System;
+        let Ok(Some(name)) = interface(&env) else {
+            job.fail(
+                "this machine has no wireless interface. Remedy: if it has a card, the \
+                 driver has not bound to it -- check `dmesg | grep -i iwlwifi` in the \
+                 terminal, because a driver with no firmware registers nothing and looks \
+                 exactly like a machine with no card.",
+            );
+            return;
+        };
+        match scan(&env, &name) {
+            Ok(found) => {
+                let count = found.len();
+                job.found(best_per_ssid(found));
+                job.step(Phase::Idle, &format!("{count} networks in range"));
+            }
+            Err(error) => job.fail(&error.to_string()),
+        }
+    });
+}
+
+/// Joins a network, in the background, and remembers it if it works.
+///
+/// Remembered **after** it associates, never before. A network recorded first is one the
+/// machine tries again at every boot on the strength of a passphrase nobody has yet shown
+/// to work — the same ordering rule as the anti-rollback sequence, for the same reason.
+pub fn spawn_join(job: &std::sync::Arc<Job>, ssid: String, passphrase: String, hidden: bool) {
+    let job = std::sync::Arc::clone(job);
+    std::thread::spawn(move || {
+        let env = plexos_gpu::env::System;
+        let Ok(Some(name)) = interface(&env) else {
+            job.fail("this machine has no wireless interface.");
+            return;
+        };
+
+        let network = if passphrase.is_empty() {
+            Saved {
+                ssid: ssid.clone(),
+                psk: String::new(),
+                hidden,
+            }
+        } else {
+            match psk_for(&env, &ssid, &passphrase) {
+                Ok(psk) => Saved {
+                    ssid: ssid.clone(),
+                    psk,
+                    hidden,
+                },
+                Err(error) => {
+                    job.fail(&error.to_string());
+                    return;
+                }
+            }
+        };
+
+        job.step(Phase::Associating, &format!("joining {ssid}"));
+        let mut note = |line: &str| job.step(Phase::Addressing, line);
+        if let Err(error) = connect(&env, &name, &network, &mut note) {
+            job.fail(&error.to_string());
+            return;
+        }
+        if let Err(error) = save(&network) {
+            job.fail(&format!(
+                "joined {ssid}, but it could not be remembered: {error}. Remedy: the \
+                 connection works now and will not survive a restart; check that /var is \
+                 writable."
+            ));
+            return;
+        }
+        job.step(Phase::Connected, &format!("connected to {ssid}"));
+    });
 }
 
 /// Reads the remembered network, if there is one.

@@ -105,7 +105,7 @@ const PROGRAM_DIRS: [&str; 4] = ["/sbin", "/usr/sbin", "/bin", "/usr/bin"];
 ///
 /// See [`PROGRAM_DIRS`] for why. Returns `None` when it is in none of them, which is an
 /// image problem rather than a runtime one — busybox is supposed to provide both.
-fn resolve(env: &impl Environment, program: &str) -> Option<String> {
+pub fn resolve(env: &impl Environment, program: &str) -> Option<String> {
     PROGRAM_DIRS.iter().find_map(|dir| {
         let candidate = PathBuf::from(dir).join(program);
         env.list_dir(std::path::Path::new(dir))
@@ -634,19 +634,29 @@ pub fn configure(
     // No bring-up pass here. wait_for_link does it on every iteration, which is the
     // only placement that works when the interface arrives during the wait.
     let interface = wait_for_link(env, timeout, log)?;
+    dhcp(env, &interface.name, log)?;
+    Ok(interface)
+}
 
+/// Runs a DHCP client on one interface, and leaves it running.
+///
+/// Split out of [`configure`] so that wireless can use it: everything below was learnt
+/// from a machine, and a second copy of it would be a second place to learn it all again.
+/// The caller decides *which* interface and *whether* it is ready; this decides nothing.
+///
+/// # Errors
+/// Fails if `udhcpc` is not installed or cannot be started.
+pub fn dhcp(env: &impl Environment, name: &str, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     // Absolute, for the reason in PROGRAM_DIRS: this is spawned from a process with no
     // PATH, and udhcpc lives in /sbin, which the glibc fallback does not include.
     let udhcpc = resolve(env, "udhcpc").ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "`udhcpc` is in none of {}. {} has a carrier, so the link itself is \
-                 fine; give it an address by hand with `ip addr add <a.b.c.d/nn> dev {}` \
+                "`udhcpc` is in none of {}. {name} has a carrier, so the link itself is \
+                 fine; give it an address by hand with `ip addr add <a.b.c.d/nn> dev {name}` \
                  until the image carries a DHCP client.",
                 PROGRAM_DIRS.join(", "),
-                interface.name,
-                interface.name
             ),
         )
     })?;
@@ -662,16 +672,15 @@ pub fn configure(
     // unset, so this is belt and braces rather than a fix -- but the whole reason this
     // module now resolves absolute paths is that the same assumption was wrong once.
     let child = std::process::Command::new(&udhcpc)
-        .args(["-i", &interface.name, "-b", "-R"])
+        .args(["-i", name, "-b", "-R"])
         .env("PATH", PROGRAM_DIRS.join(":"))
         .spawn()
         .map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!(
-                    "could not start {udhcpc} on {}: {error}. The link is up, so a static \
-                     address can still be set by hand with `ip addr add`.",
-                    interface.name
+                    "could not start {udhcpc} on {name}: {error}. The link is up, so a \
+                     static address can still be set by hand with `ip addr add`."
                 ),
             )
         })?;
@@ -694,11 +703,8 @@ pub fn configure(
         let _ = child.wait();
     });
 
-    log(&format!(
-        "{} has a carrier; udhcpc is running",
-        interface.name
-    ));
-    Ok(interface)
+    log(&format!("{name} has a carrier; udhcpc is running"));
+    Ok(())
 }
 
 #[cfg(test)]

@@ -285,6 +285,22 @@
     align-items: center;
     margin-top: .7rem;
   }
+  /* The wireless card is not a `.form` -- it is a list with two fields under it -- but a
+     label beside a shrunken input is how the name and the passphrase came out, with both
+     placeholders cut off mid-word. Scoped to this card rather than broadened to every
+     `.field`, because the install card's confirmation field has been looked at on a
+     machine in its present shape and this is not the change to alter it in. */
+  #wifi .field { margin-top: .9rem; }
+  #wifi .field > label {
+    display: block;
+    margin-bottom: .3rem;
+    color: var(--muted);
+    font-size: .75rem;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+  #wifi .field input { width: 100%; min-width: 0; }
+
   .form .field { margin-top: .9rem; }
   .form .field > label {
     display: block;
@@ -494,6 +510,11 @@
     <p class="empty">Loading…</p>
   </section>
 
+  <section class="card plex" id="wifi" data-fold="wifi" aria-live="polite">
+    <h3>Wireless</h3>
+    <p class="empty">Loading…</p>
+  </section>
+
   <section class="card plex" id="update" data-fold="update" aria-live="polite">
     <h3>System update</h3>
     <p class="empty">Loading…</p>
@@ -546,6 +567,7 @@ const UPDATE_ENDPOINT = "/api/update";
 const INSTALL_ENDPOINT = "/api/install";
 const SETUP_ENDPOINT = "/api/setup";
 const SHARES_ENDPOINT = "/api/shares";
+const WIFI_ENDPOINT = "/api/wifi";
 
 function token() { return sessionStorage.getItem(TOKEN_KEY) || ""; }
 function rememberToken(value) { sessionStorage.setItem(TOKEN_KEY, value); }
@@ -561,7 +583,7 @@ function rememberToken(value) { sessionStorage.setItem(TOKEN_KEY, value); }
 // wholesale several times a minute -- #main is redrawn on every status poll, and the
 // shares, update and install sections each redraw on their own. State kept in the DOM
 // would be state the next poll throws away.
-const folded = new Set(["system", "settings", "shares", "update", "install"]);
+const folded = new Set(["system", "settings", "shares", "wifi", "update", "install"]);
 
 /// The class a generated card carries, so it is drawn folded the first time rather than
 /// drawn open and then corrected -- which is a visible flinch on every redraw.
@@ -1251,6 +1273,164 @@ function terminalCard(solo) {
                autocapitalize="off" placeholder="a command, then Enter — Ctrl-C interrupts">
       </div>
     </div>`;
+}
+
+// ------------------------------------------------------------------------------------
+// Wireless.
+//
+// The card shows what the machine is on, what is in range, and a way to join. Scanning is
+// asked for rather than done on every poll: it holds the radio for several seconds, and a
+// page that scanned by itself would be a page that interrupts a connection to draw a list.
+let lastWifiRendered = null;
+
+function wifiBars(strength) {
+  const bars = Math.max(1, Math.round(strength * 4));
+  return "█".repeat(bars) + "░".repeat(4 - bars);
+}
+
+function wifiRender(report) {
+  const section = document.getElementById("wifi");
+  const phase = report.phase || "idle";
+  const busy = ["scanning", "associating", "addressing"].includes(phase);
+  if (busy || phase === "failed") unfold("wifi");
+
+  // Nothing is redrawn under somebody's cursor: the passphrase field is the one place on
+  // this page where a redraw loses work that cannot be retyped from what is on screen.
+  const typing = document.activeElement &&
+    ["wifi-pass", "wifi-ssid"].includes(document.activeElement.id);
+  const signature = JSON.stringify([
+    report.interface, report.configured, report.connected, report.ssid, report.address,
+    phase, report.detail, report.error, (report.networks || []).length,
+  ]);
+  if (signature === lastWifiRendered && !busy) return;
+  if (typing) return;
+  lastWifiRendered = signature;
+
+  if (!report.interface) {
+    section.innerHTML = `
+      <h3>Wireless</h3>
+      <p class="empty">This machine has no wireless interface. If it has a card, the driver
+         has not bound to it — a driver with no firmware registers nothing and looks
+         exactly like a machine with no card.</p>`;
+    return;
+  }
+
+  const networks = report.networks || [];
+  const rows = networks.map(n => `
+    <li class="usable">
+      <label>
+        <input type="radio" name="wifi-network" value="${esc(n.ssid)}"
+               data-security="${esc(n.security)}">
+        <span class="mono">${wifiBars(Math.max(0, Math.min(1, (n.signal_dbm + 90) / 60)))}</span>
+        <strong>${esc(n.ssid)}</strong>
+        <span class="hint">${esc(n.security)}${n.frequency_mhz >= 4900 ? " · 5 GHz" : ""}</span>
+      </label>
+    </li>`).join("");
+
+  const progress = report.error
+    ? `<div class="progress failed"><span class="now">Failed</span><div>${esc(report.error)}</div></div>`
+    : busy
+      ? `<div class="progress"><span class="now">${esc(report.detail || phase)}…</span></div>`
+      : "";
+
+  section.innerHTML = `
+    <h3>Wireless</h3>
+    <p>${report.connected
+          ? `<strong>Connected to ${esc(report.ssid || report.configured || "a network")}.</strong>
+             ${report.address ? `Address <span class="mono">${esc(report.address)}</span>.` : ""}`
+          : report.configured
+            ? `<strong>${esc(report.configured)}</strong> is remembered but not connected.`
+            : "Not configured. A wired connection is used when there is one."}</p>
+    <p class="hint">Wireless is used when no cable has a carrier. Joining stores the
+       network's key, not the passphrase, and only after it has been shown to work.</p>
+    <div class="row">
+      <button id="wifi-scan" ${busy ? "disabled" : ""}>Scan</button>
+      ${report.configured ? `<button id="wifi-forget" class="ghost">Forget it</button>` : ""}
+    </div>
+    ${networks.length ? `<ul class="disks">${rows}</ul>` : ""}
+    <div class="field">
+      <label for="wifi-ssid">Network name</label>
+      <input type="text" id="wifi-ssid" autocomplete="off" spellcheck="false"
+             placeholder="pick one above, or type a hidden network's name">
+    </div>
+    <div class="field">
+      <label for="wifi-pass">Passphrase</label>
+      <input type="password" id="wifi-pass" autocomplete="off"
+             placeholder="leave empty for an open network">
+    </div>
+    <div class="row">
+      <button id="wifi-join" ${busy ? "disabled" : ""}>Join</button>
+    </div>
+    ${progress}`;
+
+  for (const radio of section.querySelectorAll('input[name="wifi-network"]')) {
+    radio.addEventListener("change", event => {
+      document.getElementById("wifi-ssid").value = event.target.value;
+      document.getElementById("wifi-pass").focus();
+    });
+  }
+}
+
+async function wifiPost(payload) {
+  const value = token();
+  if (!value) {
+    sectionError("wifi", "The device token is needed to change the network. Enter it in the Device token box at the top of this page.");
+    return false;
+  }
+  try {
+    const response = await fetch(WIFI_ENDPOINT, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      sectionError("wifi", (await response.text()).trim() || ("HTTP " + response.status));
+      return false;
+    }
+  } catch (error) {
+    sectionError("wifi", error.message || String(error));
+    return false;
+  }
+  lastWifiRendered = null;
+  wifiTick();
+  return true;
+}
+
+function wifiJoin() {
+  const ssid = (document.getElementById("wifi-ssid").value || "").trim();
+  if (!ssid) {
+    sectionError("wifi", "Choose a network above, or type the name of a hidden one.");
+    return;
+  }
+  const chosen = document.querySelector('input[name="wifi-network"]:checked');
+  // Hidden only when the name was typed rather than chosen: a network that was in the
+  // scan broadcasts its name by definition, and probing for one that does not need it
+  // is slower and noisier.
+  wifiPost({
+    action: "join",
+    ssid,
+    passphrase: document.getElementById("wifi-pass").value || "",
+    hidden: !chosen || chosen.value !== ssid,
+  });
+}
+
+let wifiTimer = null;
+
+async function wifiTick() {
+  try {
+    const response = await fetch(WIFI_ENDPOINT, { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const report = await response.json();
+    wifiRender(report);
+    const busy = ["scanning", "associating", "addressing"].includes(report.phase || "idle");
+    clearTimeout(wifiTimer);
+    wifiTimer = setTimeout(wifiTick, busy ? 1000 : REFRESH_MS);
+  } catch (error) {
+    sectionError("wifi", error.message || String(error));
+    clearTimeout(wifiTimer);
+    wifiTimer = setTimeout(wifiTick, REFRESH_MS);
+  }
 }
 
 /// Whether this page is the popup that holds nothing but the terminal.
@@ -2061,6 +2241,13 @@ document.addEventListener("click", event => {
     const host = document.getElementById("settings");
     if (host) host.outerHTML = hostedSettingsCard();
   }
+  if (event.target && event.target.id === "wifi-scan") wifiPost({ action: "scan" });
+  if (event.target && event.target.id === "wifi-join") wifiJoin();
+  if (event.target && event.target.id === "wifi-forget") {
+    if (confirm("Forget the stored wireless network? The machine will not rejoin it after a restart.")) {
+      wifiPost({ action: "forget" });
+    }
+  }
   if (event.target && event.target.id === "term-window") {
     // Named, so a second click focuses the window that is already open rather than
     // opening another one onto a shell that only allows a single session.
@@ -2131,6 +2318,7 @@ if (!SOLO) {
   plexTick();
   updateTick();
   sharesTick();
+  wifiTick();
 }
 </script>
 </body>
