@@ -133,16 +133,18 @@ no route reaches it, so a share once mounted cannot be unmounted from the page; 
 remain readable only on the attached screen, which is the condition it was written
 to end.
 
-### 2.2 A test fails deterministically on a host whose `/bin/sh` is not busybox
+### 2.2 A test's outcome depends on the host's shell, and one host has been found where it always fails
 
 `terminal::tests::a_poll_waits_for_output_rather_than_returning_immediately_empty`
 (`crates/plexosd/src/terminal.rs:485`) failed on every run in this audit's
-environment (three of three), while 331 other tests passed. The test opens the real
-`SHELL` (`/bin/sh -l`) and asserts the second poll blocks ≥250 ms; a host shell that
-emits prompt or profile output after the first poll returns the second one early.
-The suite is green on the machines it was written on, which is the trap list's
-fixture rule wearing a new coat: the test depends on the host's shell behaving like
-busybox's. Separately, the known one-in-twenty-five flake
+environment (three of three), while 331 other tests passed — and then passed in CI
+on ubuntu-latest the same day, which sharpens the diagnosis rather than dismissing
+it. The test opens the real `SHELL` (`/bin/sh -l`) and asserts the second poll
+blocks ≥250 ms; whether it does depends on when the host's shell emits prompt or
+profile output relative to the first poll, which is a property of the host, not of
+the code under test. A test that is green on two machines and reliably red on a
+third is the trap list's fixture rule wearing a new coat: it measures the shell it
+happens to run against. Separately, the known one-in-twenty-five flake
 (`plexos-plex::a_mkfs_without_the_compressor`, suspected `ETXTBSY`) remains
 unreproduced and unresolved; a suite that must gate releases cannot carry a known
 flake indefinitely.
