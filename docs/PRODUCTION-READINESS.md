@@ -1,0 +1,322 @@
+# Production readiness audit — 2026-08-06
+
+What stands between the system in this repository and one that can be handed to a
+person who did not build it. Compiled by reading the tree against the working notes,
+running the full test suite on a clean host, and sweeping for the failure shapes this
+project has already recorded: features that are complete, tested and uncalled; notices
+that stopped being true; and lists that describe one machine.
+
+A summary of what already demonstrably works is at the end, because the point of this
+document is the gap, not the achievement. The short version of the verdict: **the
+appliance works end to end on real hardware, and nothing about its trust chain,
+distribution, or legal identity is production-shaped yet.** The distance is mostly
+operational and procedural, not architectural — which is the good position to be in,
+and also the kind of work that does not show up by itself.
+
+---
+
+## 1. Release blockers
+
+Things that must be resolved before a unit ships to anybody who is not the author.
+None of them is optional and none is architectural.
+
+### 1.1 The root key is a development key, and swapping it is a project, not an edit
+
+`plexos_update::trust::ROOT_KEYS` (`crates/plexos-update/src/trust.rs:83`) holds one
+key, marked `development: true`, whose private half is an unencrypted file on the
+build host. Every layer honestly reports this — the console page says "this update
+chain ends in a development root key" — which is exactly right for now and exactly
+what cannot ship.
+
+Moving to a production root involves more than replacing the constant:
+
+- **Key ceremony and custody.** `plexos-sign` writes private keys as bare base64
+  seeds — no passphrase, no encrypted container (`plexos-sign.rs:21`). A production
+  root needs offline generation and storage that a build-host compromise cannot
+  reach; ADR-0006 already asks for this and nothing provides it.
+- **The fleet problem.** Root keys ship inside the image, so a device only trusts
+  roots that were compiled in when it was flashed. Introducing a new root means
+  shipping a release that carries *both* keys, signed by the old one, and removing
+  the old key only after the fleet has taken it. There is no in-band root
+  revocation — the revocation list covers signing keys only
+  (`trust.rs:425`) — so a compromised root means reflashing. This is inherent to
+  the design and fine, but the sequence needs writing down before the first
+  production key exists, because a mistake here strands devices.
+- **Two pieces of code assume the dev key.** The test at `trust.rs:794` asserts that
+  *every* compiled-in root is a development key, and will fail — correctly, loudly —
+  the moment a real one is added. `root_id_hint()` in `plexos-sign.rs:177` hardcodes
+  `plexos-root-dev` and its own comment says it must become an argument when rotation
+  is real.
+
+### 1.2 Secure Boot: the one undecided decision ADR-0004 says must precede a public image
+
+The dm-verity half of verified boot is done and proven. The signing half is not
+started: `post-image.sh` signs the UKI only if `PLEXOS_SB_KEY`/`PLEXOS_SB_CERT` are
+set, they never are, and every image so far has required Secure Boot off in firmware.
+ADR-0004 explicitly defers the key-handling decision — enrol our own keys versus
+Microsoft's shim process — and says it "must be resolved before the first public
+image". It is still unresolved, and it has a long lead time if the answer is shim.
+
+Two consequences worth naming:
+
+- Until the UKI is signed, the kernel command line is attacker-editable, which
+  weakens statements elsewhere in the tree that lean on "the command line lives
+  inside the signed UKI" — including the comment in `plexos-init/src/cmdline.rs:97`.
+- `plexos.debug_shell` is parsed (`cmdline.rs:107`) and acted on by nothing but a
+  `--dry-run` printout. ADR-0004 asks for a *separate build variant* for debug
+  boots, never a runtime flag on a production image. Before this parameter acquires
+  a consumer it should be deleted or moved behind a compile-time feature.
+
+### 1.3 There is no production update channel
+
+`tools/publish-update.sh` is `python3 -m http.server` over a directory, says so, and
+is right to be that for development. The design already permits a trivial production
+channel — the manifest is signed over exact bytes and sources are bare file names,
+so any static HTTPS host or object store works with no re-signing — but nothing
+provides one, and three pieces around it are missing:
+
+- **Channels.** The manifest has a `channel` field; `sign-bundle.sh:97` hardcodes
+  `"dev"`. Nothing selects a channel on the appliance.
+- **Discovery.** Every update today is an operator POST with an explicit source URL.
+  There is no configured default source (`DEFAULT_SOURCE` is deliberately empty),
+  no periodic check, and no notification that an update exists. For an appliance
+  whose owner is not its builder, "updates happen when someone types a URL" is not
+  an update story.
+- **Revocation publishing.** The appliance fetches `revocations.json` from the update
+  source, and nothing in `tools/` publishes one — issuing a revocation is a manual
+  `plexos-sign revoke` plus hand-copying. The one mechanism that exists for a
+  compromised signing key needs to be as routine as publishing an update, because it
+  will be needed at the worst possible moment.
+
+### 1.4 The appliance cannot tell the time, and the trust chain consults the clock
+
+There is no time synchronisation of any kind — `plexos-update/src/clock.rs` says so
+in its header. The clock decides certificate expiry in the update trust chain, TLS
+validation when fetching Plex from `downloads.plex.tv`, the validity of the
+console's own certificate as a browser sees it, and every timestamp Plex writes.
+The clock-plausibility check (an image cannot predate its own build stamp) bounds
+the damage but does not correct anything. A machine with a dead RTC — the case the
+console certificate's 1975–4096 validity was designed around — currently has a wrong
+clock forever. An SNTP step at network bring-up, with the same "failure is not
+fatal" posture as the rest of boot, closes this.
+
+### 1.5 Name and licence
+
+Both already recorded as open decisions, both now blocking rather than deferrable:
+
+- **"PlexOS" uses a third-party trademark.** Renaming after release is a state
+  migration — `/var/lib/plexos` is in the frozen layout — so the last cheap moment
+  to decide is before the first unit ships, not after.
+- **No licence is chosen.** Nothing can be distributed at all until one is. The
+  image also aggregates GPL components (kernel, Buildroot packages), so shipping
+  binaries carries source-offer obligations that need an answer (Buildroot's
+  `legal-info` machinery exists for exactly this and is unused).
+
+---
+
+## 2. Defects found by this audit
+
+### 2.1 Share credentials can never be stored — the fourth "complete, tested, uncalled" feature
+
+`plexosd::shares::remember_password` (`crates/plexosd/src/shares.rs:340`) writes a
+NAS password to `/var/lib/plexos/share-credentials.json` with the right permissions,
+is tested, and **has no caller**. Nothing on the `/api/shares` route accepts a
+password, so `CREDENTIALS` is never written and an SMB share that requires
+authentication cannot be mounted through the console at all. This is the same shape
+as the `auth` gate, `cgroup::delegation` and the ADR-0008 configuration model — the
+trap list's own grep-for-callers rule, confirmed a fourth time.
+
+Two smaller instances in the same file: `unmount_one` (`shares.rs:573`) exists and
+no route reaches it, so a share once mounted cannot be unmounted from the page; and
+`kernel_says` (`shares.rs:612`) — written specifically so NFS refusals from
+`/dev/kmsg` could be read over the network — is never invoked, so those messages
+remain readable only on the attached screen, which is the condition it was written
+to end.
+
+### 2.2 A test fails deterministically on a host whose `/bin/sh` is not busybox
+
+`terminal::tests::a_poll_waits_for_output_rather_than_returning_immediately_empty`
+(`crates/plexosd/src/terminal.rs:485`) failed on every run in this audit's
+environment (three of three), while 331 other tests passed. The test opens the real
+`SHELL` (`/bin/sh -l`) and asserts the second poll blocks ≥250 ms; a host shell that
+emits prompt or profile output after the first poll returns the second one early.
+The suite is green on the machines it was written on, which is the trap list's
+fixture rule wearing a new coat: the test depends on the host's shell behaving like
+busybox's. Separately, the known one-in-twenty-five flake
+(`plexos-plex::a_mkfs_without_the_compressor`, suspected `ETXTBSY`) remains
+unreproduced and unresolved; a suite that must gate releases cannot carry a known
+flake indefinitely.
+
+### 2.3 CI never runs on push, because it watches a branch that does not exist
+
+`.github/workflows/ci.yml` triggers on `push: branches: [main]` and on pull
+requests. The remote has no `main`: current work lives on `worktree-net-link-up-fix`,
+with an older diverged `claude/linux-plex-media-distro-mowdbe` (9 commits not in the
+current line) and `claude/image-assembly` beside it. So the push trigger has never
+fired, and the repository's history has no canonical branch. Production needs: a
+default branch that exists, CI that runs on it, the stale branches reconciled or
+deleted — and, longer-term, an image build in CI, because today `post-image-test.sh`'s
+47 checks run only on a build host that has the Buildroot tree, by hand.
+
+### 2.4 Firmware lists that describe the machines already owned
+
+- **`xe` has no firmware in the image at all** — `install_gpu_firmware` in
+  `post-image.sh` globs `i915/` only. `CONFIG_DRM_XE=y`, so an Arc card binds and
+  then runs degraded or not at all: the exact defect the GuC/HuC glob was widened to
+  fix, one directory over. Any claim that current Arc works today is unverified and
+  probably false.
+- **Wi-Fi firmware covers two chips** — `BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_9XXX`
+  and `RTL_815X` are the reference laptop's parts. Every other radio will probe,
+  find nothing, and produce a machine whose Wi-Fi silently does not exist. Same
+  one-machine-list trap, third appearance.
+
+---
+
+## 3. Robustness gaps to close before production
+
+### 3.1 `/var` grows in one place nothing manages, and nothing checks free space
+
+App images are pruned (`KEEP = 2`), update staging is cleared, superseded boot
+entries are removed — those lessons are encoded. But `/var/cache/plex-transcode`,
+Plex's `TMPDIR`, is never cleaned by anything, and it is the largest and least
+bounded writer on the partition. And there is no free-space check anywhere: no
+`statvfs` before staging an ~85 MB download, no `ENOSPC`-specific remedy in the
+update or provisioning paths. The ESP already demonstrated what an unwatched
+partition does at 100% (the truncated `+3` UKI); `/var` is the same story waiting,
+with Plex's database on it. The migration-backup cap ADR-0009 promises ("capped at
+three, oldest pruned") is also not implemented — currently moot with one layout
+version, but it is policy without code.
+
+### 3.2 Nothing persists a log, so a crash loop erases its own evidence
+
+`/var/log` is in the ADR-0009 layout and nothing has ever written to it. All
+diagnostics — Plex's captured output, update progress, provisioning logs — live in
+bounded in-memory rings that die with the daemon. `rollback.json` preserves the
+gate's verdict, which is the single most important record and is handled; everything
+around it is gone after a power cycle. For a machine in somebody's cupboard, the
+question "what happened last Tuesday" currently has no answer. A small, bounded,
+rotated on-disk ring for the supervisor and gate would close most of it.
+
+### 3.3 The HTTP server spawns a thread per connection with no ceiling
+
+`http.rs` accepts and spawns unboundedly (`listener.incoming()` →
+`thread::spawn`). Head and body limits and the 15 s I/O timeout bound each request;
+nothing bounds their count, and the long-polling terminal and update routes hold
+threads for tens of seconds by design. Anyone on the LAN can exhaust memory without
+a credential. The threat model is a trusted LAN, but "trusted" has so far meant
+"does not attack", not "contains no misbehaving device". A simple counted semaphore
+around accept would do.
+
+### 3.4 The kernel tracks "latest" and nobody has decided the maintenance cadence
+
+`BR2_LINUX_KERNEL_LATEST_VERSION=y`, with the defconfig's own TODO ("revisit whether
+an LTS series is wanted before the first public image") still open. Two problems in
+one: builds are not reproducible over time (the kernel changes under the same
+defconfig), and there is no stated policy for shipping CVE fixes in the kernel,
+OpenSSL, curl, or wpa_supplicant. An appliance that updates unattended needs a
+declared cadence — "we rebuild and publish monthly and on severity" or similar — and
+a pinned kernel series is the precondition for saying it honestly.
+
+### 3.5 Two in-kernel file servers are compiled in and nothing manages them
+
+`CONFIG_SMB_SERVER=y` (ksmbd) and `CONFIG_NFSD*=y` are built in for the planned
+export feature; the management layer (`plexos-shares` in the old plan) does not
+exist, and `plexosd::shares` is the *client* side (mounting a NAS). Dormant today —
+nothing starts them — but they are the largest remote attack surface in the kernel
+config, present in every image, covered by no ADR. Either the export feature gets
+scheduled or these come out until it does.
+
+### 3.6 Hardware coverage is honest but narrow
+
+One confirmed GPU entry (`8086:3ea0`); the other four in the table are marked
+"documented, unverified". Four machines ever booted, all Intel. NVIDIA is planned
+in detail (ADR-0015) and unscheduled; AMD is off. That is a defensible v1 scope —
+but the trap list's own summary ("a thing that is true about the machine it was
+written on is not a thing that is true") says what to expect from machine five.
+Production needs a supported-hardware statement users can read *before* buying,
+and ideally the ADR-0015 steps 1–2 spike, since the RTX 5060 desktop exists to
+verify it on.
+
+---
+
+## 4. Acknowledged feature gaps, restated so they are not lost
+
+- **Upload from local disk / removable media** (ADR-0010): asked for, deferred; the
+  streaming route `http.rs`'s `MAX_BODY` comment describes does not exist.
+- **Wi-Fi**: joined a real WPA3 network on the appliance per the recent commits, but
+  the module's own notice still claims association has never run — reconcile it, and
+  record which security modes have actually been demonstrated.
+- **Power off** (`RB_POWER_OFF`) has never been exercised on hardware; restart has.
+- **Delta updates**: designed for in the manifest, not implemented — fine, full
+  images are ~85 MB.
+- **First-trust of the console fingerprint** still requires the attached screen once
+  (ADR-0014, deliberately unresolved). Worth revisiting only when there is a
+  companion channel to pin through; until then it stays a documented limit.
+
+---
+
+## 5. Documentation drift
+
+In this project the prose is the spec, so a stale sentence is a defect, and the
+audit found the notices badly behind the machine. The rule in the working notes —
+"keep those notices accurate; delete them only when the thing has actually run" —
+is currently violated in both directions.
+
+- **`README.md` is the worst and the most public.** It still says updates are
+  unsigned, there is no supervisor, no installer and no first-boot wizard; that the
+  console is a bearer token over plain HTTP; and it lists `plexos-storage` and
+  `plexos-shares` as if they were coming. Every one of those statements is now
+  false, and the security warning it carries misdescribes the actual (better)
+  posture. A newcomer reading the front page learns the state of June.
+- **Stale "What has run: Nothing on hardware" notices** contradicted by the working
+  notes and commit record, at least: `plexosd/src/tls.rs` (TLS proven on the wire
+  2026-07-30), `install.rs` (the installer wrote the internal disk),
+  `rollback.rs` (rollback has run twice), `terminal.rs`, `settings.rs`,
+  `wifi.rs`, `plexos-update/src/trust.rs` and `sequence.rs` (a signed update was
+  installed end to end), `plexos-sys/src/landlock.rs` and `pty.rs`,
+  `plexos-init/src/supervise.rs`. Each should be deleted or rewritten to say what
+  actually ran.
+- **`plexos-sign.rs:33` says `ROOT_KEYS` "is still empty"**; it has held the dev key
+  since trust landed.
+- **ADR-0013 disagrees with the code twice**: it specifies a 256-bit token where
+  the code ships 80 bits (well-reasoned in `auth.rs:60`, never amended in the ADR),
+  and its Context still says "there is no TLS". ADR-0014 got a revision note for
+  the TLS change; ADR-0013 needs the same treatment.
+- **`docs/ARCHITECTURE.md`** still lists planned crates and the old component
+  table.
+
+---
+
+## 6. What is demonstrably done
+
+For balance, and because it is most of the system: A/B updates signed end to end
+with anti-rollback and root-signed revocation, exercised on hardware including the
+refusal cases; automatic rollback in both failure modes (unbootable image, booted
+but unhealthy), each proven with nobody touching the machine; verified `/usr` under
+dm-verity; an installer that wrote a real disk and the first-boot flow that follows
+it; Plex provisioned from Plex's own signed packages, confined by Landlock and
+cgroup v2 as uid 900, transcoding 4K HDR10 on the GPU; PID 1 that reaps, restarts
+and survived having its services killed one by one; a TLS-only console with a
+device token, terminal, network diagnostics, Wi-Fi, settings that report
+stored-versus-applied; and 331 passing tests whose fixtures are captures rather
+than guesses. The trap list exists because each of those was earned.
+
+---
+
+## 7. Suggested order
+
+1. **Decide Secure Boot key handling** (§1.2) — longest lead time, blocks the image
+   format conversation, and the shim path has external dependencies.
+2. **Production root key ceremony and the rotation runbook** (§1.1), reworking the
+   two dev-key assumptions in code.
+3. **Name and licence** (§1.5) — the name feeds the key ceremony (certificates and
+   `/var` paths carry it) and the licence gates any distribution at all.
+4. **Repository hygiene: a real default branch, CI that fires, stale branches
+   reconciled** (§2.3) — cheap, and everything after it benefits.
+5. **The shares dead code** (§2.1) and the two firmware lists (§2.4) — small,
+   already-diagnosed defects.
+6. **Time sync, `/var` space management, persistent logs, connection ceiling**
+   (§1.4, §3.1–3.3) — the operational hardening batch.
+7. **Kernel series decision and CVE cadence** (§3.4), then the update channel and
+   discovery (§1.3), which depend on knowing what will be published and how often.
+8. **Documentation reconciliation** (§5) — continuously, starting with README.md.
