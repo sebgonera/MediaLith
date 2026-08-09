@@ -646,6 +646,32 @@ and its certificate — sign with the second one.
   `/usr` the whole time. It globs every GuC and HuC blob now, about 25 MiB, which lands
   in both UKIs and twice in every bundle — the price of an image that works on the
   hardware it is put on rather than the hardware it was built on.
+- **A Buildroot firmware symbol's number is not the generation it sounds like, and the
+  wrong one is silent in both directions.** The same Alder Lake laptop, this time with no
+  `wlan0` at all, got `BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_22000` — which reads like the
+  modern family and installs `iwlwifi-Qu-*` and `iwlwifi-QuZ-*` alone. AX210 and AX211 are
+  `iwlwifi-{so,ty}-a0-gf-a0*` and come from `IWLWIFI_6E`; `22260` is `cc-a0`. So the image
+  gained 53 MiB of firmware for a card that is not fitted and the machine came up exactly
+  as before — a fix that is expensive, plausible and inert. Nothing names the product
+  anywhere: the files are named for the silicon, so `AX211` is not greppable in
+  `linux-firmware` or in Buildroot. **Read `package/linux-firmware/linux-firmware.mk` for
+  what a symbol installs**, the way `CONFIG_*` sub-symbols already have to be read.
+- **Shipping every API revision is most of the size and none of the benefit.** iwlwifi
+  asks for one revision per device and counts down to its minimum — and for every family
+  in this image `IWL_*_UCODE_API_MIN` *equals* its `_MAX`, so exactly one file per variant
+  is ever opened while `linux-firmware` ships seven of each Qu part and thirteen of
+  `ty-a0-gf-a0`. Keeping the newest per variant took the wireless set from 70 MiB to
+  17 MiB *while covering more cards*, and the UKI from 112 MiB to 59 MiB — against the
+  128 MiB `partition.rs` budgets and three of them on a 512 MiB ESP. A firmware list is
+  charged four times: initrd, both UKIs, every bundle.
+- **The AX210 family needs a `.pnvm`, which is not a `.ucode`.** A glob written when the
+  image carried only 9000-series firmware ships an AX211 that loads its firmware and
+  associates with nothing — the missing-file failure one directory further on, wearing a
+  firmware directory that is visibly not empty.
+- **Stage 3 of `post-image.sh` had no test at all**, which is how all three of the above
+  passed a build, a boot and a clean run of `post-image-test.sh` reporting 47 checks and
+  no skips. A stage nothing exercises reports nothing when it is wrong; count the stages
+  against the tests rather than trusting the total.
 - **`Unknown` is not licence to guess a cause.** The GPU report saw a debugfs value it
   did not recognise and reported "debugfs is not mounted" — about a file it had just read
   successfully. That guess hid the missing firmware above for as long as nobody changed
