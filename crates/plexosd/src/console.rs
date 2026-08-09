@@ -1463,6 +1463,121 @@ mod tests {
     }
 
     #[test]
+    fn the_pages_token_field_folds_exactly_as_the_server_does() {
+        // One rule, now written twice in two languages, and the failure is silent in the
+        // worst way: the field would show one token while the server computed another,
+        // and the only symptom is 403 on a token that was typed correctly off the screen.
+        // Nobody debugging that would suspect the input field.
+        //
+        // So the page's own functions are run under a real engine and compared against
+        // auth::normalise and auth::grouped, which are the definition.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has exactly one script block");
+
+        let function = |name: &str| {
+            let start = script
+                .find(&format!("function {name}("))
+                .unwrap_or_else(|| panic!("{name} is a named function so it can be tested"));
+            let end = script[start..]
+                .find("\n}\n")
+                .map(|at| start + at + "\n}".len())
+                .expect("and ends at a brace in the first column");
+            script[start..end].to_owned()
+        };
+        let constant = |name: &str| {
+            script
+                .lines()
+                .find(|line| line.starts_with(&format!("const {name} = ")))
+                .unwrap_or_else(|| panic!("{name} is declared on one line"))
+                .to_owned()
+        };
+
+        // Everything a person actually does: the printed form, the form with no dashes,
+        // lower case, spaces instead of dashes, and the three characters the alphabet
+        // leaves out precisely because they are misread.
+        let cases = [
+            "4K7Q-M2XR-9T8B-HVWP",
+            "4k7q-m2xr-9t8b-hvwp",
+            "4K7QM2XR9T8BHVWP",
+            " smz7 7rs1 wn9h zvvz ",
+            "oOiIlL0011",
+            "4k7q_m2xr!!9t8b",
+            "",
+        ];
+
+        let Some(engine) = ["node", "deno", "qjs"].into_iter().find(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        }) else {
+            println!(
+                "skip: the token field's folding was not compared against auth::normalise \
+                 -- no node, deno or qjs on this host. Install one, or a field that \
+                 disagrees with the server will only be found by somebody being refused a \
+                 token they typed correctly."
+            );
+            return;
+        };
+
+        let program = format!(
+            "{}\n{}\n{}\n{}\n{}\nconst cases = {};\nconsole.log(cases.map(c => \
+             normaliseToken(c) + \"|\" + groupToken(normaliseToken(c))).join(\"\\n\"));",
+            constant("TOKEN_ALPHABET"),
+            constant("TOKEN_CHARS"),
+            constant("TOKEN_GROUP"),
+            function("normaliseToken"),
+            function("groupToken"),
+            serde_json::to_string(&cases).expect("a list of strings"),
+        );
+
+        let output = std::process::Command::new(engine)
+            .args(["-e", &program])
+            .output()
+            .expect("the engine runs");
+        assert!(
+            output.status.success(),
+            "the page's token functions did not run: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let got = String::from_utf8_lossy(&output.stdout);
+        for (case, line) in cases.iter().zip(got.lines()) {
+            let canonical = crate::auth::normalise(case);
+            let expected = format!("{canonical}|{}", crate::auth::grouped(&canonical));
+            assert_eq!(
+                line, expected,
+                "the page and auth:: disagree about {case:?}; the page is what changes"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pages_token_field_stops_at_a_whole_token() {
+        // The one place the page deliberately does *more* than auth::normalise, which
+        // does not cap: sixteen characters is a whole token, and a field that kept
+        // accepting them would let somebody type past the end and never see why the
+        // result was refused. Recorded here so the divergence above is a decision rather
+        // than a gap in the comparison.
+        assert!(
+            PAGE.contains("if (out.length === TOKEN_CHARS) break;"),
+            "the field must stop at a whole token"
+        );
+        assert!(
+            PAGE.contains("const TOKEN_CHARS = 16;"),
+            "and sixteen is what auth::TOKEN_CHARS computes to"
+        );
+        assert_eq!(
+            crate::auth::TOKEN_CHARS,
+            16,
+            "if this changed, the page's copy has to change with it"
+        );
+    }
+
+    #[test]
     fn the_pages_script_parses() {
         // The console is one inline script, so **a syntax error anywhere in it stops the
         // whole page**: every section stays on "Loading..." and the machine looks dead
