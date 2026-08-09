@@ -572,6 +572,75 @@ const WIFI_ENDPOINT = "/api/wifi";
 function token() { return sessionStorage.getItem(TOKEN_KEY) || ""; }
 function rememberToken(value) { sessionStorage.setItem(TOKEN_KEY, value); }
 
+// The token alphabet, and it is not the obvious one: Crockford base32, which leaves out
+// I, L, O and U so that nothing in a printed token can be misread as something else.
+// These four values are auth.rs's ALPHABET, TOKEN_CHARS and GROUP, and a test compares
+// this function against auth::normalise rather than trusting the copy.
+const TOKEN_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const TOKEN_CHARS = 16;
+const TOKEN_GROUP = 4;
+
+/**
+ * Anything a person might type, reduced to the canonical token.
+ *
+ * Exactly auth::normalise: upper-case, fold the characters the alphabet excludes onto the
+ * ones they are mistaken for -- O is a zero, I and L are ones -- and drop everything else,
+ * dashes and spaces included. Two implementations of one rule is the risk here, so they
+ * are compared in a test rather than kept in step by hand.
+ *
+ * Folding rather than rejecting is the point: somebody reading 4K7Q off a screen and
+ * typing 4K70 has made no mistake worth punishing, and a field that silently refused the
+ * keystroke would look broken.
+ */
+function normaliseToken(input) {
+  let out = "";
+  for (const character of String(input)) {
+    const upper = character.toUpperCase();
+    const folded = upper === "O" ? "0" : (upper === "I" || upper === "L") ? "1" : upper;
+    if (TOKEN_ALPHABET.indexOf(folded) >= 0) out += folded;
+    if (out.length === TOKEN_CHARS) break;
+  }
+  return out;
+}
+
+/** The canonical token as it is printed: groups of four, dashes between. auth::grouped. */
+function groupToken(canonical) {
+  const groups = [];
+  for (let at = 0; at < canonical.length; at += TOKEN_GROUP) {
+    groups.push(canonical.slice(at, at + TOKEN_GROUP));
+  }
+  return groups.join("-");
+}
+
+/**
+ * Rewrites the field to the grouped form as it is typed, and puts the caret back.
+ *
+ * The caret is the whole difficulty. Assigning to `value` moves it to the end, so a
+ * correction made in the middle of a token would throw the typist to the end of the line
+ * on every keystroke -- worse than no formatting at all. So the position is carried across
+ * in the only unit that survives reformatting: how many *token* characters precede it.
+ * The dashes are then counted back in, one per completed group.
+ *
+ * Returns the canonical form, which is what gets remembered; the field shows the grouped
+ * one. The server would accept either, since it normalises what it is given.
+ */
+function formatTokenField(field) {
+  const before = field.value;
+  const caret = field.selectionStart === null ? before.length : field.selectionStart;
+  const typedBeforeCaret = normaliseToken(before.slice(0, caret)).length;
+
+  const canonical = normaliseToken(before);
+  const grouped = groupToken(canonical);
+
+  if (grouped !== before) {
+    field.value = grouped;
+    const dashes = typedBeforeCaret === 0 ? 0 : Math.floor((typedBeforeCaret - 1) / TOKEN_GROUP);
+    const at = Math.min(typedBeforeCaret + dashes, grouped.length);
+    if (field.setSelectionRange) field.setSelectionRange(at, at);
+  }
+  return canonical;
+}
+
 // ------------------------------------------------------------------------------------
 // Folding.
 //
@@ -936,7 +1005,7 @@ async function rotateToken() {
     // showed the new token and then refused every button would be a poor trade.
     rememberToken(issued);
     const field = document.getElementById("token");
-    if (field) field.value = issued;
+    if (field) field.value = groupToken(normaliseToken(issued));
     if (out) out.innerHTML = `<div class="progress"><span class="now">New device token</span>
       <div class="mono" style="font-size:1.1rem;letter-spacing:.06em">${esc(issued)}</div>
       <div>Write it down. It is not stored anywhere it can be read back, and it is also
@@ -2277,8 +2346,8 @@ document.getElementById("restart").addEventListener("click", () => power("restar
 // which is also why it no longer loses what is being typed into it.
 {
   const field = document.getElementById("token");
-  field.value = token();
-  field.addEventListener("input", event => rememberToken(event.target.value.trim()));
+  field.value = groupToken(normaliseToken(token()));
+  field.addEventListener("input", event => rememberToken(formatTokenField(event.target)));
 }
 
 // The three sections that fold are static markup, so they are drawn open and folded here
