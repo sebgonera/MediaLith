@@ -272,6 +272,80 @@ else
 fi
 
 # --------------------------------------------------------------------------
+stage "stage 3 — wireless firmware in the initrd"
+# This stage had no test at all, which is how a firmware list naming the wrong family
+# survived a build, a boot and a clean run of this file. Every failure it can produce wears
+# the same disguise -- a card that lspci names correctly and that registers no netdev -- so
+# the checks are about the *set* of blobs rather than about any single one of them.
+FW_SRC="${OUTPUT}/target/usr/lib/firmware"
+KCFG="$(ls -d "${OUTPUT}"/build/linux-*/drivers/net/wireless/intel/iwlwifi/cfg 2>/dev/null | head -1)"
+if ! ls "${FW_SRC}"/iwlwifi-*.ucode >/dev/null 2>&1; then
+    skipped "the whole stage" "needs linux-firmware installed into ${OUTPUT}/target"
+else
+    saved_work="${WORK}"; saved_target="${TARGET_DIR:-}"
+    WORK="${TMP}/fw"; TARGET_DIR="${OUTPUT}/target"
+    mkdir -p "${WORK}"
+    install_wifi_firmware >/dev/null
+    WORK="${saved_work}"; TARGET_DIR="${saved_target}"
+    GOT="${TMP}/fw/initrd/lib/firmware"
+
+    assert "firmware reaches the initrd at all" "ls '${GOT}'/iwlwifi-*.ucode >/dev/null 2>&1" \
+           "blobs in /usr are blobs iwlwifi never sees; it probes before /usr is mounted"
+
+    # The pruning. Two revisions of one variant means the selection stopped working, and
+    # the cost is paid twice per bundle rather than reported.
+    dupes=$(ls "${GOT}"/iwlwifi-*.ucode 2>/dev/null | xargs -n1 basename \
+            | sed 's/-[0-9]\+\.ucode$//' | sort | uniq -d | tr '\n' ' ')
+    check "one API revision of each variant is carried" "${dupes:-none}" "none"
+
+    # And the half that pruning can get wrong. iwlwifi asks for revisions from its
+    # UCODE_API_MAX downwards, so a blob numbered above every MAX this kernel defines is
+    # one it will never open -- and keeping only that one puts the card back to having no
+    # firmware, on an image whose firmware directory is visibly not empty. The code that
+    # changes when this fails is install_wifi_firmware: keep the newest revision the
+    # kernel still asks for, not the newest that exists.
+    #
+    # The bound is the highest MAX across all families rather than the one belonging to
+    # each variant, so what it catches is linux-firmware outrunning the kernel outright.
+    # A single family running ahead while another lags would pass. Pinning per family
+    # needs a variant-to-cfg table, and a hardcoded table that drifts is the failure this
+    # is trying to prevent rather than a stricter version of it.
+    if [ -z "${KCFG}" ]; then
+        skipped "revisions are ones this kernel asks for" "no kernel source under ${OUTPUT}/build"
+    else
+        api_max=$(grep -h 'UCODE_API_MAX' "${KCFG}"/*.c 2>/dev/null | grep -oE '[0-9]+$' | sort -n | tail -1)
+        too_new=$(for f in "${GOT}"/iwlwifi-*.ucode; do
+                      r=$(basename "${f}" | sed -n 's/.*-\([0-9]\+\)\.ucode$/\1/p')
+                      [ -n "${r}" ] && [ "${r}" -gt "${api_max:-0}" ] && basename "${f}"
+                  done | tr '\n' ' ')
+        check "no blob is numbered above any API this kernel asks for (max ${api_max:-?})" \
+              "${too_new:-none}" "none"
+    fi
+
+    # The families themselves. 6E is the one that is easy to leave out and the one an
+    # Alder Lake machine needs; its blobs are named for the silicon rather than for the
+    # product, so nothing about "AX211" appears anywhere in the filename.
+    assert "the AX210 family is covered (AX210, AX211)" \
+           "ls '${GOT}'/iwlwifi-*-gf-a0-*.ucode >/dev/null 2>&1" \
+           "set BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_6E; without it those laptops have no wlan0"
+    assert "and the PNVM those parts need" "ls '${GOT}'/*.pnvm >/dev/null 2>&1" \
+           "not a .ucode, so a glob written for ucode alone drops it and the card associates with nothing"
+
+    # Both files or neither: the signature is what the kernel checks the database by.
+    assert "the regulatory database is carried whole" \
+           "[ -e '${GOT}/regulatory.db' ] && [ -e '${GOT}/regulatory.db.p7s' ]" \
+           "without it the kernel falls back to the world domain, which is weaker than the card"
+
+    # This rides in both UKIs and in every update bundle, so it is charged four times over.
+    # At 70 MiB it took the UKI to 112 MiB against the 128 MiB budget partition.rs asserts
+    # the ESP against, and three of those on a 512 MiB ESP is the failure already in the
+    # trap list. The bound is generous; what it catches is the pruning silently stopping.
+    kib=$(du -Lsk "${GOT}" | cut -f1)
+    assert "the set stays inside its budget (${kib} KiB)" "[ '${kib}' -lt 32768 ]" \
+           "grew past 32 MiB: check install_wifi_firmware still keeps one revision per variant"
+fi
+
+# --------------------------------------------------------------------------
 stage "stage 0b — the version stamp"
 # build_uki reads ${WORK}/os-release, which stage_os_release writes before the /usr image
 # is built. Calling build_uki without it used to work and now dies -- deliberately, since

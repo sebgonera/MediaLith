@@ -106,10 +106,31 @@ BR2_PACKAGE_LINUX_FIRMWARE=y
 # GuC/HuC. HuC is what gives QuickSync its quality at low bitrates, and its absence is
 # silent — which is the whole reason plexos-gpu::firmware exists.
 BR2_PACKAGE_LINUX_FIRMWARE_I915=y
-# Wireless-AC 9560 on the reference machine. These blobs must reach the *initramfs*, not
-# just /usr -- CONFIG_IWLWIFI=y, so the driver probes before /usr is mounted, and with no
-# firmware it registers no netdev at all. post-image.sh stage 3 copies them.
+# Intel wireless. These blobs must reach the *initramfs*, not just /usr -- CONFIG_IWLWIFI=y,
+# so the driver probes before /usr is mounted, and with no firmware it registers no netdev
+# at all. post-image.sh stage 3 copies them.
+#
+# One symbol per card family, and the mapping is not guessable from the names: each of
+# these was read out of linux-firmware.mk rather than inferred, after a symbol chosen by
+# its number turned out to ship a family nothing here has. What each installs:
+#
+#   9XXX   iwlwifi-9???-*, so-a0-jf-b0-*      Wireless-AC 9560 -- the reference laptop
+#   22000  iwlwifi-Qu-*, iwlwifi-QuZ-*        AX200/AX201 as CNVi (Comet Lake, Tiger Lake)
+#   22260  iwlwifi-cc-a0-*                    AX200/AX201 discrete (Cyclone Peak)
+#   6E     iwlwifi-{so,ty}-a0-gf-a0*          AX210 and AX211 -- Alder Lake and later
+#
+# 6E is the one that is easy to miss and the one the second laptop needs: an Alder Lake
+# machine's built-in card is an AX211, whose blobs are named for the silicon (`so-a0-gf-a0`)
+# and not for anything a person would search for. "22000" reads like the modern family and
+# is in fact the Qu parts alone -- so a defconfig carrying 22000 and not 6E ships 53 MiB of
+# firmware to a machine that asks for none of it and still comes up with no wlan0.
+#
+# 6E is also the only one whose devices need a `.pnvm` file, which is not a `.ucode` and so
+# is not matched by anything looking for one. install_wifi_firmware carries them.
 BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_9XXX=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_22000=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_22260=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_6E=y
 # Realtek USB Gigabit adapters (r8152). The reference laptop has no built-in Ethernet,
 # and a media server on wireless is not a serious configuration — see the note below.
 BR2_PACKAGE_LINUX_FIRMWARE_RTL_815X=y

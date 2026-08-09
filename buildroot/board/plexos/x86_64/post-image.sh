@@ -445,6 +445,23 @@ install_gpu_firmware() {
 # The blobs in linux-firmware's root are symlinks into intel/iwlwifi, so both the copy and
 # the size have to follow them: `install` does by default and `stat` does not.
 #
+# Only the newest API revision of each variant is carried, and that is what makes covering
+# more than one machine affordable. iwlwifi asks for one revision and counts down to its
+# minimum -- and for every family this image enables the kernel's IWL_*_UCODE_API_MIN is
+# equal to its _MAX (6.19.14: 46 for the 9000s, 77 for Qu, QuZ and cc-a0, 89 for the AX210
+# family), so exactly one file per variant is ever opened and every other revision is a
+# megabyte and a half riding in both UKIs and in every update bundle. linux-firmware ships
+# seven revisions of each Qu part and thirteen of ty-a0-gf-a0. Shipping all of them came to
+# 70 MiB and covered neither AX210 nor AX211; shipping the newest comes to 22 MiB and
+# covers both.
+#
+# "Newest available" is the right file only for as long as linux-firmware does not run
+# ahead of the kernel. If it ever does -- a revision shipped that this kernel will not ask
+# for -- the card goes back to registering no netdev at all, which is the failure above
+# wearing the disguise of a firmware directory that is visibly full. post-image-test.sh
+# pins the kept revision of each variant against the kernel's own UCODE_API_MIN/MAX so that
+# arrives as a failed build rather than as a laptop with no wlan0.
+#
 # Not fatal when there are none. Wireless is optional and a build with
 # BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_* turned off is a legitimate build; a machine with no
 # Intel wireless simply never asks.
@@ -452,8 +469,45 @@ install_wifi_firmware() {
     local from="${TARGET_DIR}/usr/lib/firmware"
     local total=0
     local count=0
+    local blob base variant revision
 
+    # variant -> highest revision seen. A name that does not parse is keyed whole with an
+    # empty revision and shipped as it is: one this cannot read is one to carry rather
+    # than to drop, since dropping it is the silent half of the failure.
+    local -A newest=()
     for blob in "${from}"/iwlwifi-*.ucode; do
+        [ -e "${blob}" ] || continue
+        base="$(basename "${blob}")"
+        if [[ "${base}" =~ ^(iwlwifi-.+)-([0-9]+)\.ucode$ ]]; then
+            variant="${BASH_REMATCH[1]}"
+            revision="${BASH_REMATCH[2]}"
+            if [ -z "${newest[${variant}]:-}" ] || [ "${revision}" -gt "${newest[${variant}]}" ]; then
+                newest["${variant}"]="${revision}"
+            fi
+        else
+            newest["${base}"]=""
+        fi
+    done
+
+    for variant in "${!newest[@]}"; do
+        revision="${newest[${variant}]}"
+        if [ -n "${revision}" ]; then
+            blob="${from}/${variant}-${revision}.ucode"
+        else
+            blob="${from}/${variant}"
+        fi
+        [ -e "${blob}" ] || continue
+        install -D -m 0444 "${blob}" "${WORK}/initrd/lib/firmware/$(basename "${blob}")"
+        total=$(( total + $(stat -Lc %s "${blob}") ))
+        count=$(( count + 1 ))
+    done
+
+    # The AX210 family wants a platform NVM file beside its ucode, and the device does not
+    # come up without one. These are not `.ucode`, so a glob written when the image carried
+    # only 9000-series firmware ships an AX211 that loads its firmware and still associates
+    # with nothing -- the same missing-file failure, one directory further on. They are
+    # 28 to 56 KiB each, so all of them are carried rather than matched to a card.
+    for blob in "${from}"/*.pnvm; do
         [ -e "${blob}" ] || continue
         install -D -m 0444 "${blob}" "${WORK}/initrd/lib/firmware/$(basename "${blob}")"
         total=$(( total + $(stat -Lc %s "${blob}") ))
