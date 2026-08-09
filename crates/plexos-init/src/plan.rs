@@ -121,6 +121,17 @@ pub enum BootStep {
         /// Where the assembled result appears.
         target: String,
     },
+    /// Raise the system clock to the image's build time if it reads earlier (see
+    /// [`crate::clock`]).
+    ///
+    /// Placed after `/usr` is mounted because the build stamp lives inside it, and
+    /// deliberately before anything that speaks TLS: a clock corrected later is a clock
+    /// corrected after the first handshake has already failed.
+    RaiseClock {
+        /// The image's `os-release`, under the sysroot rather than at `/`, because the
+        /// switch has not happened yet when this runs.
+        os_release: String,
+    },
     /// Reconcile the persistent state layout (ADR-0009).
     ApplyState(StateAction),
     /// Move an already-mounted filesystem into the new root.
@@ -174,10 +185,28 @@ impl fmt::Display for BootStep {
                 "mount -t overlay -o lowerdir={lower},upperdir={upper},workdir={work} \
                  overlay {target}"
             ),
+            Self::RaiseClock { os_release } => {
+                write!(
+                    f,
+                    "clock: raise to the build time in {os_release} if behind"
+                )
+            }
             Self::ApplyState(action) => write!(f, "state: {action}"),
             Self::MoveMount { from, to } => write!(f, "mount --move {from} {to}"),
             Self::SwitchRoot { new_root, init } => write!(f, "switch_root {new_root} {init}"),
         }
+    }
+}
+
+/// The step that keeps the clock from being absurd, once `/usr` can be read.
+///
+/// A machine whose CMOS battery has died boots believing it is 1970, and a machine that
+/// believes that cannot verify a single certificate on the internet. It presents as Plex
+/// failing to download with a message about a *certificate*, which sends the reader
+/// somewhere the fault is not. The image knows when it was built; that is the floor.
+fn clock_step() -> BootStep {
+    BootStep::RaiseClock {
+        os_release: under_sysroot("/usr/lib/os-release"),
     }
 }
 
@@ -281,6 +310,8 @@ pub fn boot_plan(args: &BootArgs, state: StateAction) -> Vec<BootStep> {
         fstype: "erofs",
         options: "ro,nodev,nosuid",
     });
+
+    steps.push(clock_step());
 
     // The compatibility links, created on the tmpfs root now that /usr is under it.
     // Relative targets, so they resolve correctly both here under /sysroot and after
@@ -492,6 +523,44 @@ mod tests {
         let var_prefix = under_sysroot("/var/");
         assert!(upper.starts_with(&var_prefix), "upper: {upper}");
         assert!(work.starts_with(&var_prefix), "work: {work}");
+    }
+
+    #[test]
+    fn the_clock_is_raised_after_usr_is_mounted_and_before_the_switch() {
+        // Both halves matter and both are ordering, which is the kind of mistake that
+        // compiles. Earlier than the mount and the build stamp is not readable, so the
+        // step silently does nothing on every boot. Later than switch_root and there is
+        // no step at all -- and the window it is protecting is the whole of userspace,
+        // because the first thing that speaks TLS has already failed by then.
+        let steps = plan_for(Slot::A);
+        let usr = position(
+            &steps,
+            |s| matches!(s, BootStep::Mount { target, .. } if target.ends_with("/usr")),
+        );
+        let clock = position(&steps, |s| matches!(s, BootStep::RaiseClock { .. }));
+        let switch = position(&steps, |s| matches!(s, BootStep::SwitchRoot { .. }));
+
+        assert!(
+            usr < clock,
+            "the build stamp is inside /usr and it is not mounted yet"
+        );
+        assert!(clock < switch, "the clock step never runs");
+    }
+
+    #[test]
+    fn the_clock_step_reads_the_image_under_the_sysroot() {
+        // The path is resolved before switch_root, so a bare /usr/lib/os-release would
+        // read the *initrd's* copy -- which on this image does not exist, so the step
+        // would report an unreadable file forever and nobody would look again.
+        let steps = plan_for(Slot::A);
+        let BootStep::RaiseClock { os_release } = steps
+            .iter()
+            .find(|s| matches!(s, BootStep::RaiseClock { .. }))
+            .expect("the plan raises the clock")
+        else {
+            unreachable!()
+        };
+        assert_eq!(os_release, &under_sysroot("/usr/lib/os-release"));
     }
 
     #[test]

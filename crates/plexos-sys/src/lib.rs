@@ -44,6 +44,7 @@
 //! it hits exactly the same absence of `udev` for exactly the same reason. Two copies
 //! of that logic would be two things to get wrong.
 
+pub mod clock;
 pub mod device;
 pub mod dm;
 pub mod hostname;

@@ -197,6 +197,55 @@ pub fn bootstrap_proc() -> io::Result<()> {
     mount::mount("proc", "/proc", "proc", "nosuid,nodev,noexec")
 }
 
+/// Raises the system clock to the image's build time, if it reads earlier.
+///
+/// Reports what it did in every case. "The clock was already sane" is worth a line: the
+/// alternative is that a machine with a dead battery and a machine with a good one look
+/// identical from the console, and telling them apart afterwards means reading a
+/// certificate error and inferring backwards.
+fn raise_clock(os_release: &str, log: &mut dyn Log) {
+    let Ok(contents) = fs::read_to_string(os_release) else {
+        log.line(&format!(
+            "clock: {os_release} is unreadable, so the image's build time is unknown and \
+             the clock is left as it is. Remedy: if TLS then fails with 'certificate is \
+             not yet valid', set it by hand with `date -s` and `hwclock -w -u`"
+        ));
+        return;
+    };
+
+    let Some(floor) =
+        crate::clock::os_release_value(&contents, "VERSION_ID").and_then(crate::clock::build_time)
+    else {
+        log.line(
+            "clock: this image carries no build stamp in VERSION_ID, so there is no \
+             floor to apply. Remedy: build with PLEXOS_VERSION=0.1.0.$(date -u \
+             +%Y%m%d%H%M)",
+        );
+        return;
+    };
+
+    let now = plexos_sys::clock::realtime_now();
+    let Some(corrected) = crate::clock::correction(now, floor) else {
+        log.line(&format!(
+            "clock: reads {now}, at or after this image's {floor}; left alone"
+        ));
+        return;
+    };
+
+    match plexos_sys::clock::set_realtime(corrected) {
+        Ok(()) => log.line(&format!(
+            "clock: read {now}, which is before this image was built; raised to {corrected}. \
+             The hardware clock is wrong -- most likely a dead CMOS battery. It is not the \
+             real time, only a plausible one, which is what TLS needs"
+        )),
+        Err(error) => log.line(&format!(
+            "clock: could not raise {now} to {corrected}: {error}. Outbound TLS will fail \
+             with 'certificate is not yet valid'. Remedy: `date -s` then `hwclock -w -u` \
+             from the console shell"
+        )),
+    }
+}
+
 /// Performs one step.
 fn perform(step: &BootStep, booted: Option<&str>, log: &mut dyn Log) -> io::Result<()> {
     match step {
@@ -217,6 +266,15 @@ fn perform(step: &BootStep, booted: Option<&str>, log: &mut dyn Log) -> io::Resu
         }
 
         BootStep::CreateDir { path } => fs::create_dir_all(path),
+
+        // Never fatal. A machine with a wrong clock boots, serves its console and can be
+        // repaired; a machine that refuses to boot over one cannot. Every outcome is
+        // logged, including the uninteresting ones, because the failure this prevents is
+        // invisible from outside and its absence has to be visible from the console.
+        BootStep::RaiseClock { os_release } => {
+            raise_clock(os_release, log);
+            Ok(())
+        }
 
         BootStep::Symlink { target, link } => {
             // Idempotent: a retried boot, or a link the image already carries,

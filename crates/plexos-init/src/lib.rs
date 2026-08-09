@@ -37,6 +37,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod clock;
 pub mod cmdline;
 pub mod execute;
 pub mod plan;
