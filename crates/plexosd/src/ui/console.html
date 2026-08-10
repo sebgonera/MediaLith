@@ -547,6 +547,10 @@
 // The page is served from the appliance itself, so the API is always same-origin.
 const ENDPOINT = "/api/status";
 const PLEX_ENDPOINT = "/api/provision";
+// The offline half of ADR-0010. A separate route rather than a flag on the one above,
+// because this is the only request on this console that carries something large, and the
+// server has to know that before it reads a byte.
+const PLEX_UPLOAD_ENDPOINT = "/api/provision/upload";
 const REFRESH_MS = 10000;
 
 // While an installation runs the page has something to say every second. The rest of the
@@ -1672,9 +1676,66 @@ function renderPlexInto(report) {
     <div class="row">
       <button id="plex-install" ${busy ? "disabled" : ""}>${phase === "failed" ? "Try again" : "Install Plex"}</button>
     </div>
+    <p class="hint">No connection to the internet? A media server in a cupboard may have
+       none at setup time, and ADR-0010 says that must not be a dead end. Download
+       <span class="mono">plexmediaserver_*_amd64.deb</span> from Plex on another machine
+       and send it here — the signature is checked exactly as it is for a download, so an
+       offline install is not the weaker one.</p>
+    <div class="row">
+      <input type="file" id="plex-package" accept=".deb" ${busy ? "disabled" : ""}>
+      <button id="plex-upload" ${busy ? "disabled" : ""}>Install from this file</button>
+    </div>
     ${progress}`;
 
   document.getElementById("plex-install").addEventListener("click", startPlexInstall);
+  document.getElementById("plex-upload").addEventListener("click", startPlexUpload);
+}
+
+/** Sends a package the user already has, for a machine with no way to fetch one.
+ *
+ * The file goes as the raw request body rather than as multipart form data, and that is
+ * the whole reason this is possible: the appliance's HTTP server is hand-written, and a
+ * multipart parser it would have to grow is a parser standing between the network and a
+ * signature check. As a raw body it is bytes to a file, and every check downstream is the
+ * one the downloaded package gets.
+ *
+ * No progress events: XMLHttpRequest has upload progress and fetch does not, but the
+ * appliance is on a LAN and reports its own phases at /api/provision a moment later. A
+ * second progress bar for the eight seconds this takes is not worth an older API.
+ */
+async function startPlexUpload() {
+  const value = token();
+  if (!value) {
+    sectionError("plex", "Enter the device token above first. It was printed on the screen attached to this machine when it started.");
+    return;
+  }
+  const picker = document.getElementById("plex-package");
+  const file = picker && picker.files && picker.files[0];
+  if (!file) {
+    sectionError("plex", "Choose the .deb file first. It is the package Plex publishes for Debian, named plexmediaserver_<version>_amd64.deb.");
+    return;
+  }
+
+  document.getElementById("plex-upload").disabled = true;
+  document.getElementById("plex-install").disabled = true;
+
+  try {
+    const response = await fetch(PLEX_UPLOAD_ENDPOINT, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Authorization": "Bearer " + value, "Content-Type": "application/octet-stream" },
+      body: file,
+    });
+    if (!response.ok) {
+      // The server's own text carries the remedy; showing our own would lose it.
+      plexError(await response.text());
+      return;
+    }
+  } catch (error) {
+    plexError(error.message || String(error));
+    return;
+  }
+  plexTick();
 }
 
 /** Asks the appliance to install Plex.
