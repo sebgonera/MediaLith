@@ -161,10 +161,10 @@ list that goes stale in one of them.
    free-space check anywhere on a `/var` whose largest writer is never pruned, and no
    ceiling on connections.
 
-3. **Run the hardware that has never been run.** `xe` now has its firmware in the initrd
-   and no Arc card has ever been plugged in, so that claim is shipped-and-unverified rather
-   than false. The Wi-Fi firmware list still describes two chips, both of them this
-   laptop's — third appearance of the one-machine-list trap.
+3. **Run the hardware that has never been run.** `xe` has its firmware in the initrd, the
+   `xe` debugfs layout is now read the way `xe` actually creates it, and no Arc card has
+   ever been plugged in — so the claim is shipped-and-unverified rather than false, and the
+   only thing that can close it is a card.
 
 ## Done, and proven on the machine (ADR-0016)
 
@@ -500,6 +500,18 @@ and its certificate — sign with the second one.
   before `device_initcall` probes drivers, so that is the earliest place a file can be
   and still be found. `CONFIG_EXTRA_FIRMWARE` also works but needs an absolute path
   into the Buildroot target directory, which cannot live in a checked-in fragment.
+- **`xe` says the same things as `i915` in different words, and in a different place.**
+  Two halves, both silent. The path: `xe_gt_debugfs_register()` creates `gt<N>/` under the
+  *tile*, and `dri/<N>/gt<N>` exists only as a symlink whose comment in the kernel reads
+  "Backwards compatibility only … for the legacy clients". Reading through it works today
+  and rests on a shim already labelled legacy. The vocabulary: a HuC that failed to come
+  up is `LOAD FAIL` from `xe_uc_fw_status_repr()`, never the `authenticated: no` that
+  `i915` prints, and a part with no HuC at all is `N/A`, not `not supported`. A reader
+  written for one driver's words returns `Unknown` for the other's — and `Unknown` is
+  deliberately excluded from `has_confirmed_problem()`, so the failure this crate exists
+  to catch would have been reported as "cannot tell, debugfs is probably not mounted"
+  about a file it had just read. Both halves came out of the kernel source rather than a
+  capture, because there is no `xe` hardware here to capture from.
 - **The verity root hash cannot tell two images apart when only the UKI changed.** A
   kernel parameter or console setting leaves `/usr` byte-identical, so a reflashed
   machine and an untouched one report the same hash. `/api/status` reports the whole

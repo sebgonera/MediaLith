@@ -52,11 +52,18 @@ checked against the tree on the day of the merge rather than recalled.
   enforcement on, and with only `db` enrolled the platform stays in Setup Mode while
   reporting otherwise.
 
+- **§2.4, the Wi-Fi half** — the list is no longer the two parts in this laptop. Four
+  `iwlwifi` families are carried, chosen by reading `linux-firmware.mk` rather than by
+  their numbers, and the Realtek side gained the PCIe symbol after the RTX desktop's
+  onboard NIC asked for `rtl_nic/rtl8168h-2.fw` and did not get it — a link that still came
+  up at 1Gbps, without the vendor's errata fixes, silently. `wireless-regdb` is there too.
+  What stays true is the shape of the trap rather than this instance of it: the list is
+  still assembled from machines that have been in the room.
+
 **Re-verified as still open on 2026-08-10:** all of §1.1, §1.3 and §1.4; the name in §1.5;
 `kernel_says` in §2.1; the host-dependent terminal test in §2.2 — it passes on the build
 host and in CI and still opens the real `SHELL` and asserts a duration, so the finding is
-about what it measures, not about where it is red; the Wi-Fi firmware list in §2.4; and
-every part of §3.1 through §3.5.
+about what it measures, not about where it is red; and every part of §3.1 through §3.5.
 
 One number in §6 is stale in the direction that matters least: 331 passing tests have
 become 835.

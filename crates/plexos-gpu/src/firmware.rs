@@ -67,13 +67,26 @@ impl FirmwareStatus {
 /// The `gt0/` and `gt/` forms came with multi-tile support; the flat `i915_*_load_status`
 /// files are the older layout. All are tried because PlexOS cannot assume a kernel
 /// version when diagnosing a machine it did not build.
+///
+/// `tile0/gt0/` is first because under `xe` it is the only one of these that is a real
+/// directory. `xe_gt_debugfs_register()` creates the `gt<N>` directory under the *tile*,
+/// and then adds `dri/<N>/gt<N>` as a symlink whose own comment in the kernel reads
+/// "Backwards compatibility only: create a link for the legacy clients who may expect
+/// gt/ directory at the root level, not the tile level". Reading only through that link
+/// makes this module's answer depend on a compatibility shim the kernel has already
+/// labelled as one — and the failure would be perfectly silent, because a path that is
+/// not there yields [`LoadState::Unknown`], which [`FirmwareStatus::has_confirmed_problem`]
+/// deliberately does not count. `i915` has no tile level, so it simply never matches the
+/// first entry.
 const GUC_PATHS: &[&str] = &[
+    "/sys/kernel/debug/dri/0/tile0/gt0/uc/guc_info",
     "/sys/kernel/debug/dri/0/gt0/uc/guc_info",
     "/sys/kernel/debug/dri/0/gt/uc/guc_info",
     "/sys/kernel/debug/dri/0/i915_guc_load_status",
 ];
 
 const HUC_PATHS: &[&str] = &[
+    "/sys/kernel/debug/dri/0/tile0/gt0/uc/huc_info",
     "/sys/kernel/debug/dri/0/gt0/uc/huc_info",
     "/sys/kernel/debug/dri/0/gt/uc/huc_info",
     "/sys/kernel/debug/dri/0/i915_huc_load_status",
@@ -91,11 +104,29 @@ fn interpret(contents: &str) -> LoadState {
     if text.contains("not supported") || text.contains("not present") {
         return LoadState::NotApplicable;
     }
+    // `xe` spells the same thing "N/A". `xe_uc_fw_status_repr()` renders
+    // XE_UC_FIRMWARE_NOT_SUPPORTED that way, and `xe_huc_init()` sets exactly that status
+    // on a platform whose HuC it does not drive -- so without this line a part that
+    // legitimately has no HuC reads as Unknown, which the report then explains as debugfs
+    // probably not being mounted. Qualified with "status:" because two letters are too
+    // little to match on their own.
+    if text.contains("status: n/a") {
+        return LoadState::NotApplicable;
+    }
     // The file says which blob it wanted and that it did not get it. This used to fall
     // through to Unknown, and Unknown was then reported as "debugfs is probably not
     // mounted" -- a guess, about a file that had just been read successfully, which hid
     // a real fault for as long as nobody moved the image to different hardware.
     if text.contains("status: missing") || text.contains("status: error") {
+        return LoadState::NotRunning;
+    }
+    // The two ways `xe` reports a firmware it had and could not bring up: XE_UC_FIRMWARE_
+    // LOAD_FAIL and _INIT_FAIL, printed as "LOAD FAIL" and "INIT FAIL". `xe_huc_auth()`
+    // sets LOAD_FAIL when authentication does not complete, which is precisely the HuC
+    // failure this module exists to catch, and it used to land in Unknown -- a state
+    // has_confirmed_problem() deliberately ignores. So on an Arc part the one fault
+    // plexos-gpu was written for would have been reported as "cannot tell".
+    if text.contains("load fail") || text.contains("init fail") {
         return LoadState::NotRunning;
     }
     // Checked before the positive signals: "authenticated: no" contains "authenticated".
@@ -197,6 +228,73 @@ mod tests {
         let status = status(&fixture, &only_gpu(&fixture));
         assert_eq!(status.huc, LoadState::NotRunning);
         assert!(status.has_confirmed_problem());
+    }
+
+    /// An Arc part, driven by `xe` rather than `i915`.
+    ///
+    /// Battlemage B580, `8086:e20b`. The wording in these fixtures is not invented: it is
+    /// what `xe_uc_fw_print()` emits, with the status words from
+    /// `xe_uc_fw_status_repr()` — a tab before `status:`, and the value in capitals.
+    fn arc(fixture: Fixture) -> Fixture {
+        fixture.render_node("renderD128", "xe", 0x8086, 0xe20b)
+    }
+
+    #[test]
+    fn reads_the_tile_level_layout_that_xe_actually_creates() {
+        // `xe_gt_debugfs_register()` builds gt0/ under the tile, and adds dri/0/gt0 as a
+        // symlink its own comment calls backwards compatibility for legacy clients. This
+        // fixture offers only the real directory, which is what remains if that link is
+        // ever dropped.
+        let fixture = arc(Fixture::new())
+            .file(
+                "/sys/kernel/debug/dri/0/tile0/gt0/uc/guc_info",
+                "GuC firmware: xe/bmg_guc_70.bin\n\tstatus: RUNNING\n\tfound compatibility version 1.23.0\n",
+            )
+            .file(
+                "/sys/kernel/debug/dri/0/tile0/gt0/uc/huc_info",
+                "HuC firmware: xe/bmg_huc.bin\n\tstatus: RUNNING\n\nHuC status: 0x00006000\n",
+            );
+
+        let status = status(&fixture, &only_gpu(&fixture));
+        assert_eq!(status.guc, LoadState::Running);
+        assert_eq!(status.huc, LoadState::Running);
+        assert!(!status.has_confirmed_problem());
+    }
+
+    #[test]
+    fn an_xe_huc_that_did_not_come_up_is_a_confirmed_problem() {
+        // `xe_huc_auth()` sets XE_UC_FIRMWARE_LOAD_FAIL when authentication does not
+        // complete. That is the same fault as "authenticated: no" on i915 — the one that
+        // leaves transcoding working and worse — and it says so in different words, so a
+        // reader written for i915's vocabulary called it Unknown and reported no problem.
+        let fixture = arc(Fixture::new()).file(
+            "/sys/kernel/debug/dri/0/tile0/gt0/uc/huc_info",
+            "HuC firmware: xe/bmg_huc.bin\n\tstatus: LOAD FAIL\n",
+        );
+
+        let status = status(&fixture, &only_gpu(&fixture));
+        assert_eq!(
+            status.huc,
+            LoadState::NotRunning,
+            "the code is what changes if this fails: xe reports this failure as \
+             LOAD FAIL, not as anything containing \"authenticated\""
+        );
+        assert!(status.has_confirmed_problem());
+    }
+
+    #[test]
+    fn a_part_whose_huc_xe_does_not_drive_is_not_applicable_rather_than_unknown() {
+        // XE_UC_FIRMWARE_NOT_SUPPORTED prints as "N/A". Unknown would be wrong twice: the
+        // file was read successfully, and the report explains Unknown as debugfs probably
+        // not being mounted — a guess about a machine that is behaving correctly.
+        let fixture = arc(Fixture::new()).file(
+            "/sys/kernel/debug/dri/0/tile0/gt0/uc/huc_info",
+            "HuC firmware: \n\tstatus: N/A\n",
+        );
+
+        let status = status(&fixture, &only_gpu(&fixture));
+        assert_eq!(status.huc, LoadState::NotApplicable);
+        assert!(!status.has_confirmed_problem());
     }
 
     #[test]

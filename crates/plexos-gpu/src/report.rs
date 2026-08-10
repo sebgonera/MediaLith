@@ -238,10 +238,11 @@ fn nothing_to_render_with(present: &[crate::gpu::DisplayDevice]) -> Finding {
              integrated GPU, or a card the kernel can drive, is the supported path today."
         }
         crate::gpu::Vendor::Amd => {
-            "This image has no AMD driver. Its kernel builds `i915` for Intel graphics \
-             and nothing else, so nothing binds to this card. `amdgpu` and its firmware \
-             would have to be added to the kernel and the initramfs before this card \
-             could be used; until then, transcoding runs on the CPU."
+            "This image has no AMD driver. Its kernel builds `i915` and `xe` for Intel \
+             graphics, and NVIDIA's open modules, so nothing binds to this card. \
+             `amdgpu` and its firmware would have to be added to the kernel and the \
+             initramfs before this card could be used; until then, transcoding runs on \
+             the CPU."
         }
         crate::gpu::Vendor::Intel => {
             "An Intel device the kernel did not bind to, which is unexpected: this image \
