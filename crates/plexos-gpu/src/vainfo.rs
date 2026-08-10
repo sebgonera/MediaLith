@@ -243,7 +243,7 @@ pub fn parse(output: &str) -> Result<Capabilities, ProbeError> {
 pub fn probe(env: &impl Environment, gpu: &Gpu) -> Result<Capabilities, ProbeError> {
     if gpu.preferred_driver() == VaapiDriver::None {
         return Err(ProbeError::DriverFailed(
-            "device has no VA-API driver; NVENC is not supported in this release".to_owned(),
+            "device has no VA-API driver. NVIDIA cards have none and are reported through plexos_gpu::nvidia instead, so reaching here with one means the report took the wrong branch".to_owned(),
         ));
     }
     let display = gpu.render_node.to_string_lossy().into_owned();
@@ -344,14 +344,24 @@ mod tests {
     }
 
     #[test]
-    fn probing_nvidia_explains_itself_rather_than_running_vainfo() {
+    fn probing_nvidia_here_means_the_report_took_the_wrong_branch() {
+        // This used to answer "NVENC is not supported in this release", which was true of
+        // the report and read as a claim about the card. It is now a claim about the code:
+        // an NVIDIA device reaching vainfo is a routing bug, and the message says so
+        // rather than blaming hardware that works.
         let fixture = Fixture::new()
             .render_node("renderD128", "nvidia", 0x10de, 0x1e84)
             .command("vainfo", WORKING);
         let gpu = discover(&fixture).into_iter().next().unwrap();
 
         match probe(&fixture, &gpu) {
-            Err(ProbeError::DriverFailed(detail)) => assert!(detail.contains("NVENC")),
+            Err(ProbeError::DriverFailed(detail)) => {
+                assert!(detail.contains("wrong branch"), "got {detail}");
+                assert!(
+                    !detail.contains("not supported"),
+                    "the card is supported; only this path cannot see it: {detail}"
+                );
+            }
             other => panic!("expected an explanatory failure, got {other:?}"),
         }
     }

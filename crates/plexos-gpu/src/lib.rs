@@ -40,6 +40,7 @@
 pub mod env;
 pub mod firmware;
 pub mod gpu;
+pub mod nvidia;
 pub mod report;
 pub mod vainfo;
 

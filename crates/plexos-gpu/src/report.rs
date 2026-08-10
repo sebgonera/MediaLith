@@ -62,7 +62,11 @@ pub struct Finding {
 }
 
 impl Finding {
-    fn new(severity: Severity, summary: impl Into<String>, remedy: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        severity: Severity,
+        summary: impl Into<String>,
+        remedy: impl Into<String>,
+    ) -> Self {
         Self {
             severity,
             summary: summary.into(),
@@ -93,6 +97,29 @@ impl Report {
     pub fn generate(env: &impl Environment) -> Self {
         let gpus = gpu::discover(env);
         let mut findings = Vec::new();
+
+        // NVIDIA before the VA-API path, because it will never take it: decode goes
+        // through NVDEC and encode through NVENC, neither of which has a render node to
+        // find. Asking vainfo about this card and concluding "unsupported" is how the
+        // report told a machine that was transcoding on its GPU that it could not.
+        if let Some(card) = crate::nvidia::card(&gpus) {
+            let status = crate::nvidia::status(env);
+            let mut findings = crate::nvidia::findings(&status);
+            let health = if crate::nvidia::usable(&status) {
+                Health::Ready
+            } else {
+                Health::Unavailable
+            };
+            findings.sort_by_key(|f| f.severity);
+            return Self {
+                health,
+                primary: Some(card.clone()),
+                gpus,
+                firmware: None,
+                capabilities: None,
+                findings,
+            };
+        }
 
         let Some(primary) = gpu::select_primary(&gpus).cloned() else {
             findings.push(no_usable_gpu_finding(
@@ -300,8 +327,9 @@ fn no_usable_gpu_finding(gpus: &[Gpu], present: &[crate::gpu::DisplayDevice]) ->
             "Graphics devices found, but none supported for hardware transcoding: {}",
             vendors.join(", ")
         ),
-        "PlexOS v1 supports Intel iGPUs (QuickSync) and AMD via VA-API. NVENC is not \
-         supported in this release.",
+        "PlexOS supports Intel iGPUs and AMD through VA-API, and NVIDIA through NVDEC \
+         and NVENC. A card listed here is one no driver bound to, so there is nothing to \
+         probe: check that the kernel builds a driver for it.",
     )
 }
 
@@ -644,15 +672,64 @@ mod tests {
         assert!(report.findings[0].remedy.contains("iGPU Multi-Monitor"));
     }
 
+    /// An RTX 5060 with the driver loaded, the nodes made, and the card awake.
+    fn working_nvidia() -> Fixture {
+        Fixture::new()
+            .render_node("renderD128", "nvidia", 0x10de, 0x2d04)
+            .file(
+                crate::nvidia::VERSION_FILE,
+                "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  610.57.04\n",
+            )
+            .mode("/dev/nvidiactl", 0o666)
+            .mode("/dev/nvidia0", 0o666)
+            .mode("/dev/nvidia-uvm", 0o666)
+            .command("/usr/bin/nvidia-smi", "NVIDIA GeForce RTX 5060\n")
+    }
+
     #[test]
-    fn nvidia_only_is_reported_as_out_of_scope_not_as_broken_hardware() {
-        let fixture = Fixture::new().render_node("renderD128", "nvidia", 0x10de, 0x1e84);
+    fn a_working_nvidia_card_is_ready_rather_than_critically_unsupported() {
+        // The defect this branch exists for, at the level the operator saw it. The page
+        // read `critical | Graphics devices found, but none supported for hardware
+        // transcoding: Nvidia` on a machine that was, at that moment, transcoding on the
+        // card. Every word of it was produced by asking a VA-API question about a device
+        // that has no VA-API.
+        let report = Report::generate(&working_nvidia());
+
+        assert_eq!(report.health, Health::Ready);
+        assert!(report.health.is_usable());
+        assert!(report.findings.is_empty(), "got {:#?}", report.findings);
+        assert!(
+            report.primary.is_some(),
+            "the card is the transcoder, so it is the primary"
+        );
+    }
+
+    #[test]
+    fn an_nvidia_card_with_no_driver_is_a_load_failure_not_an_unsupported_device() {
+        // Same hardware, nothing loaded. Still unavailable -- but for a reason with a
+        // remedy attached, which "none supported" never had.
+        let fixture = Fixture::new().render_node("renderD128", "nvidia", 0x10de, 0x2d04);
         let report = Report::generate(&fixture);
 
         assert_eq!(report.health, Health::Unavailable);
-        assert!(report.primary.is_none());
         assert_eq!(report.gpus.len(), 1, "the device is still reported");
-        assert!(report.findings[0].remedy.contains("NVENC"));
+        assert!(report.findings[0].summary.contains("driver is not loaded"));
+        assert!(
+            !report.findings[0].summary.contains("none supported"),
+            "the card supports NVDEC and NVENC; the driver is what is missing"
+        );
+    }
+
+    #[test]
+    fn a_node_only_root_can_open_is_caught_before_plex_silently_uses_the_cpu() {
+        // uid 900 cannot open 0600, and nothing in the transcode path says so: Plex falls
+        // back to software and reports success. Every probe above it runs as root.
+        let report = Report::generate(&working_nvidia().mode("/dev/nvidia0", 0o600));
+
+        assert_eq!(report.health, Health::Unavailable);
+        let finding = &report.findings[0];
+        assert!(finding.summary.contains("/dev/nvidia0"));
+        assert!(finding.remedy.contains("900"));
     }
 
     #[test]
