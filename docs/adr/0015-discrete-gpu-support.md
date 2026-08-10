@@ -129,6 +129,49 @@ Linux 4.15 and no maximum — which is a claim about their intent, not a test ag
    plan beside the other things it makes from nothing. Answer this with a throwaway build
    and a shell before packaging anything.
 
+   **Answered, 2026-08-10, against release 610.57.04 — and it needed no hardware.** The
+   question was decidable by reading the driver rather than by booting it, which is worth
+   noting on its own: the throwaway build this step asks for was not required to get the
+   answer, only to confirm it later.
+
+   **`devtmpfs` will not create the nodes.** `kernel-open/nvidia/nv.c` registers with
+   `register_chrdev_region` and calls `class_create` and `device_create` exactly zero
+   times. The only device-model registrations anywhere in the tree are `nv-caps-imex` and
+   `nvswitch`, neither of which is a graphics card. So the suspicion above is confirmed:
+   something in PlexOS creates these nodes or nothing does.
+
+   **The good news is that no setuid helper is needed.** The numbers are compile-time
+   constants in `kernel-open/common/inc/nv-chardev-numbers.h`:
+
+   | Node | Device | Source |
+   | --- | --- | --- |
+   | `/dev/nvidia0` | `c 195 0` | `NV_MAJOR_DEVICE_NUMBER`, minor per card from 0 |
+   | `/dev/nvidiactl` | `c 195 255` | `NV_MINOR_DEVICE_NUMBER_CONTROL_DEVICE` |
+   | `/dev/nvidia-modeset` | `c 195 254` | `NV_MINOR_DEVICE_NUMBER_MODESET_DEVICE` |
+
+   `NV_MINOR_DEVICE_NUMBER_REGULAR_MAX` is 247, so a machine may have up to 248 cards
+   before the regular minors collide with the special ones. Nothing here will.
+
+   **`nvidia-uvm` is the exception, and it is the one that cannot be hard-coded.**
+   `kernel-open/nvidia-uvm/uvm.c` uses `alloc_chrdev_region`, so the kernel assigns its
+   major *at module load*. It has to be read back from `/proc/devices` after loading and
+   before the node is made. That is the whole of the difficulty this step was expecting to
+   find, and it is perhaps fifteen lines rather than a setuid binary this image would have
+   refused to carry.
+
+   **Permissions matter more than they look**, and the trap list already has this in
+   another form: with no `udev`, a node created here is `0600 root:root`, and Plex does not
+   run as root. `/dev/dri/renderD*` had to be relaxed to `0666` for exactly this reason,
+   and the failure was invisible — every probe above it ran as root and reported success
+   while Plex used the CPU. These nodes need the same treatment and the same test:
+   `su -s /bin/sh -c … plex`, not a check that runs as root.
+
+   **The kernel-version risk is softened but not closed.** The README claims 4.15 or newer
+   with no upper bound, and there is no `LINUX_VERSION_CODE` guard in the sources that
+   refuses a newer kernel outright — portability is handled by `conftest.sh`, which probes
+   the API by trial compilation. So 6.19 is not rejected in advance. It is still a claim
+   rather than a test, and step 3 is where it becomes one.
+
 3. **A Buildroot package: `plexos-nvidia`.** Prefixed, because a package directory name
    becomes its kconfig symbol and colliding with upstream's `nvidia-driver` would have
    kconfig merge the two definitions silently — a trap already recorded here. It builds
