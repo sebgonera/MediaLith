@@ -140,9 +140,11 @@ pub struct Progress {
     /// it; what a person otherwise sees is an appliance that quietly went backwards a
     /// version. This is read off `/var`, which rollback leaves alone (ADR-0005).
     ///
-    /// History rather than status: it is not cleared, and it carries the version it is
-    /// about so a reader can tell "you were rolled back off this" from "an older boot of
-    /// what you are running now failed once".
+    /// Present only while it still describes this machine. The file behind it is never
+    /// cleared — it is history, and worth keeping — but serving it unconditionally is how
+    /// a nine-day-old rollback stayed on the page, in the future tense, on an appliance
+    /// that had been healthy and permanent for a week. `rollback::last_for` makes the
+    /// comparison; `rollback::last` is still there for anything that wants the history.
     pub rollback: Option<crate::rollback::Record>,
     /// Everything logged so far.
     pub log: Vec<String>,
@@ -160,7 +162,7 @@ impl Default for Progress {
             error: None,
             signature: None,
             gate: crate::gate::last_verdict(),
-            rollback: crate::rollback::last(),
+            rollback: crate::rollback::last_for(&running_version()),
             log: Vec::new(),
         }
     }
@@ -246,7 +248,9 @@ impl Job {
         state.running = running_version();
         state.slot = running_slot().to_string();
         state.gate = crate::gate::last_verdict();
-        state.rollback = crate::rollback::last();
+        // Against the version just read, not a captured one: the whole point of the
+        // comparison is that it is about the system answering this request.
+        state.rollback = crate::rollback::last_for(&state.running);
         state.clone()
     }
 

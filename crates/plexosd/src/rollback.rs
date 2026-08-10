@@ -25,10 +25,19 @@
 //! phrased and served as *the last rollback*, carrying the version it was about, and a
 //! reader compares that against what is running now.
 //!
+//! **That last sentence was a promise nobody kept.** Every reader served the record raw,
+//! so a rollback from 1 August was still being announced on 10 August, in the future
+//! tense, by a machine several releases past it and healthy on a permanent slot. The
+//! comparison now lives in [`last_for`] rather than in each caller's good intentions —
+//! which is the only version of "a reader compares" that survives having more than one
+//! reader. The file is still never cleared, and that part was right.
+//!
 //! # What has run
 //!
-//! **Nothing.** No rollback has ever happened on the reference laptop, so this file has
-//! never been written by the path that writes it. The shape is exercised by tests only.
+//! **A rollback has happened on the reference laptop**, and this file is how anyone knows:
+//! `0.1.0.202608010950` failed its health gate on slot b on 1 August, spent its last try,
+//! and the machine came back on the release below it. The record it left is the one that
+//! then over-stayed by nine days.
 
 use std::path::Path;
 
@@ -82,9 +91,62 @@ pub fn write(record: &Record, path: &Path) -> std::io::Result<()> {
 }
 
 /// Reads the last rollback, if there has ever been one.
+///
+/// History, unfiltered. Almost every caller wants [`last_for`] instead: this one keeps
+/// answering with a rollback from a fortnight ago, which is exactly how a status page ends
+/// up announcing an emergency that is over.
 #[must_use]
 pub fn last() -> Option<Record> {
     from_json(&std::fs::read_to_string(paths::ROLLBACK_RECORD_FILE).ok()?)
+}
+
+/// The last rollback, but only while it still describes the machine that is running.
+///
+/// The comparison this module's header says a reader has to make, made in one place
+/// instead of left to each of them. It was left to each of them, and none of them made it:
+/// the console served the record raw, so an appliance that was rolled back on 1 August
+/// still told anyone who looked, nine days and several releases later, that
+/// "the slot will roll back" — in the future tense, on a healthy machine whose slot the
+/// gate had long since called permanent.
+///
+/// That is worse than untidy. This is the one line that would say a rollback is happening
+/// *now*, and a line that is always on is a line nobody reads — the argument `setup`
+/// already makes about banners, arriving here in a worse place.
+#[must_use]
+pub fn last_for(running: &str) -> Option<Record> {
+    let record = last()?;
+    record.still_current(running).then_some(record)
+}
+
+impl Record {
+    /// Whether this rollback still describes the running system.
+    ///
+    /// A rollback leaves the machine on something *older* than the version that failed, so
+    /// while the record is current the running stamp is below the recorded one. Installing
+    /// anything from that version onwards is the operator moving past it, and from then on
+    /// this is history.
+    ///
+    /// Undecidable means current. If either version carries no build stamp there is no
+    /// ordering to reason about, and the two mistakes are not equal: showing a rollback
+    /// that is over costs a stale line, hiding one that is not costs the only warning the
+    /// machine gives.
+    #[must_use]
+    pub fn still_current(&self, running: &str) -> bool {
+        // The same parser the anti-rollback floor uses, deliberately. Its own
+        // documentation makes the argument: two readers of this field are two chances to
+        // disagree about which release a machine is running.
+        let Some(failed) = self
+            .version
+            .as_deref()
+            .and_then(plexos_update::clock::build_stamp)
+        else {
+            return true;
+        };
+        let Some(running) = plexos_update::clock::build_stamp(running) else {
+            return true;
+        };
+        running < failed
+    }
 }
 
 #[cfg(test)]
@@ -133,6 +195,65 @@ mod tests {
             crate::update::running_version_from(os_release),
             a_record().version.unwrap()
         );
+    }
+
+    /// A record of the rollback that actually happened, on 2026-08-01.
+    fn the_real_one() -> Record {
+        Record {
+            version: Some("0.1.0.202608010950".to_owned()),
+            slot: Some("b".to_owned()),
+            tries_left: 0,
+            failures: vec![
+                "plex-http: installed but not answering on loopback; the slot will roll back"
+                    .to_owned(),
+            ],
+            verdict: "NOT healthy, and this entry's last try was spent booting it".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_rollback_is_current_while_the_machine_sits_on_the_release_below_it() {
+        // Immediately after the event, which is the whole reason the file exists: the
+        // running system is the older one, and nothing else can explain why.
+        assert!(the_real_one().still_current("0.1.0.202608010920"));
+    }
+
+    #[test]
+    fn a_rollback_is_history_once_something_newer_is_running() {
+        // The defect, with the numbers it had on the machine. The appliance was rolled
+        // back on 1 August, ran 0.1.0.202608102030 nine days later, and was still being
+        // told "the slot will roll back" -- in the future tense, on a slot the gate had
+        // called permanent. The operator moving past the version that failed is what ends
+        // this, and nothing else can.
+        assert!(!the_real_one().still_current("0.1.0.202608102030"));
+    }
+
+    #[test]
+    fn the_version_that_failed_running_again_is_history_too() {
+        // It was reinstalled and it works. Equal, not merely greater, because a record
+        // describing the release currently serving the page has been overtaken by events
+        // in the plainest possible way.
+        assert!(!the_real_one().still_current("0.1.0.202608010950"));
+    }
+
+    #[test]
+    fn a_version_with_no_build_stamp_leaves_the_record_standing() {
+        // Undecidable resolves towards showing it. The two mistakes are not equal: a
+        // stale line costs a reader ten seconds, a suppressed one costs them the only
+        // warning this machine gives that it is failing boots.
+        assert!(the_real_one().still_current("0.1.0"));
+
+        let unstamped = Record {
+            version: Some("0.1.0".to_owned()),
+            ..the_real_one()
+        };
+        assert!(unstamped.still_current("0.1.0.202608102030"));
+
+        let none = Record {
+            version: None,
+            ..the_real_one()
+        };
+        assert!(none.still_current("0.1.0.202608102030"));
     }
 
     #[test]
