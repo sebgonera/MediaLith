@@ -106,6 +106,14 @@ BR2_PACKAGE_LINUX_FIRMWARE=y
 # GuC/HuC. HuC is what gives QuickSync its quality at low bitrates, and its absence is
 # silent — which is the whole reason plexos-gpu::firmware exists.
 BR2_PACKAGE_LINUX_FIRMWARE_I915=y
+# The same, for the *other* Intel driver. The kernel fragment sets CONFIG_DRM_XE=y, so
+# `xe` binds to Lunar Lake, Battlemage and Panther Lake — and the image carried firmware
+# for i915 alone, which made "current Arc works here" a claim about a card that binds and
+# then finds no blob. Eight files, 4 MiB, so unlike the wireless families there is nothing
+# to choose between. `xe` asks for them as `xe/<plat>_guc_<major>.bin`, with the directory
+# part of the request, which is why post-image.sh copies the subdirectory rather than the
+# files. Unverifiable here: none of the hardware this runs on is driven by `xe`.
+BR2_PACKAGE_LINUX_FIRMWARE_XE=y
 # Intel wireless. These blobs must reach the *initramfs*, not just /usr -- CONFIG_IWLWIFI=y,
 # so the driver probes before /usr is mounted, and with no firmware it registers no netdev
 # at all. post-image.sh stage 3 copies them.

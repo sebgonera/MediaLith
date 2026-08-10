@@ -430,7 +430,53 @@ install_gpu_firmware() {
 
     msg "  GuC/HuC firmware in initrd: ${count} blobs, $(( total / 1024 )) KiB"
 
+    install_xe_firmware
     install_wifi_firmware
+}
+
+# The other Intel driver, which this image builds and has never fed.
+#
+# CONFIG_DRM_XE=y, so `xe` binds to the parts it claims — Lunar Lake, Battlemage, Panther
+# Lake — and until now the image carried firmware for `i915` and nothing else. The claim
+# that current Arc hardware works here was therefore softer than it read: the card binds,
+# and then asks for a file that is not in the initramfs.
+#
+# `xe` asks by directory. `xe_uc_fw.c` builds the name as `xe/<plat>_guc_<major>.bin` and
+# `xe/<plat>_huc.bin`, so the subdirectory is part of the request and a flat copy is a copy
+# the driver never finds. Same shape as the i915 blobs above, which is why those are placed
+# under `i915/` rather than beside them.
+#
+# Everything in the directory, not a glob of guc and huc. It holds eight files and four
+# mebibytes, so there is nothing to gain by choosing among them — and two of them are
+# neither GuC nor HuC: `lnl_gsc_1.bin`, which is the security controller HuC
+# authentication goes through on these parts, and a fan-control blob. A pattern written
+# for the two familiar names would drop both, which is precisely the mistake the
+# generation-by-generation firmware list already made once.
+#
+# Not fatal when the directory is absent, unlike i915. A build without
+# BR2_PACKAGE_LINUX_FIRMWARE_XE is a legitimate build for a machine with no such GPU, and
+# every machine this has ever run on is in that category. post-image-test.sh asserts the
+# blobs are present instead, so the option silently disappearing from the defconfig — the
+# way four options once did — is a failed test rather than an appliance that transcodes
+# badly and says so only in debugfs.
+install_xe_firmware() {
+    local from="${TARGET_DIR}/usr/lib/firmware/xe"
+    local total=0
+    local count=0
+    local blob
+
+    for blob in "${from}"/*; do
+        [ -f "${blob}" ] || continue
+        install -D -m 0444 "${blob}" "${WORK}/initrd/lib/firmware/xe/$(basename "${blob}")"
+        total=$(( total + $(stat -Lc %s "${blob}") ))
+        count=$(( count + 1 ))
+    done
+
+    if [ "${count}" -gt 0 ]; then
+        msg "  xe firmware in initrd: ${count} blobs, $(( total / 1024 )) KiB"
+    else
+        msg "  no xe firmware found -- Arc and Xe2 parts will bind and run without it"
+    fi
 }
 
 # iwlwifi, for exactly the same reason and with exactly the same failure.
