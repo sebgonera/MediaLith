@@ -17,9 +17,9 @@
 #   610.57.04 against 6.19.14, EXIT=0, five modules, vermagic
 #   "6.19.14 SMP preempt mod_unload" -- the kernel this image actually boots.
 #
-# Buildroot has since driven it too: four modules installed and signed, checked by the
-# hooks below. What has NOT happened is any of it running on NVIDIA hardware -- the
-# RTX 5060 does not have PlexOS on it -- and that notice stays until it does.
+# Buildroot drives it, the hooks check it, and it has run: an RTX 5060 running PlexOS
+# loads these four modules at boot, initialises through the GSP firmware below, and Plex
+# decodes and encodes on the card -- `final decoder: nvdec, final encoder: nvenc`.
 #
 # ---------------------------------------------------------------------------
 # Signing is not optional here

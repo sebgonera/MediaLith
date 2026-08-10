@@ -35,9 +35,14 @@
 //!
 //! # What has run
 //!
-//! **This module has not run on a machine.** Every step it performs has been done by hand
-//! on the RTX 5060 -- the modules load, the kernel accepts their signature, `/proc/devices`
-//! reports the majors -- but this code has not done it.
+//! **All of it, on an RTX 5060, at every boot.** The modules load, the kernel accepts
+//! their signature, the majors are read back from `/proc/devices` -- `nvidia-uvm` came up
+//! 241 while `nvidia` was 195, which is the reason they are read rather than assumed --
+//! the nodes are created with mode 0666, and the capability nodes are made from the
+//! minors the driver publishes, four digits and all.
+//!
+//! Downstream of it, Plex decodes and encodes on the card: `final decoder: nvdec, final
+//! encoder: nvenc`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

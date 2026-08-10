@@ -27,6 +27,18 @@
 //! Getting there cost two corrections to the grant list, both of the same shape and both
 //! recorded as traps: a deny-by-default policy has to be *executed* before it can be
 //! believed, because the paths a process needs are mostly ones nobody thinks to list.
+//!
+//! It cost three more for NVIDIA, and the last one was not a path at all. The device
+//! nodes had to be named, the capability directory had to exist before the rule could be
+//! added, and then `/proc` needed `TRUNCATE` — a right of its own since Landlock ABI 3,
+//! which read and write together do not imply. Nothing in the failure named `/proc`,
+//! Landlock, or truncation: `cuInit` returned `CUDA_ERROR_OPERATING_SYSTEM`, ffmpeg said
+//! "Generic error in an external library", and Plex said there was no hardware decoder.
+//!
+//! `plexos-sys/examples/cuda-under-landlock` exists because of that. It reproduces this
+//! policy on a machine with a card and calls `cuInit` inside it, so the next such
+//! question is answered by halving a bitmask in seconds rather than by rebuilding an
+//! image and rebooting a machine.
 
 use std::path::{Path, PathBuf};
 

@@ -21,10 +21,10 @@
 //!
 //! # What has run
 //!
-//! **Nothing here has run on a machine.** The modules it exists to load have been loaded
-//! by hand with busybox `insmod` on an RTX 5060 and the kernel accepted their signature,
-//! so the syscall below is doing what a working path already did — but it has not done
-//! it itself.
+//! **Both, on an RTX 5060, at every boot.** `finit_module` loads four signed modules the
+//! kernel accepts, and `make_char_node` creates the device nodes `devtmpfs` will not —
+//! including the mode, which `mknod` alone gets wrong, because the umask applies to it
+//! and 0666 arrives as 0644.
 
 use std::ffi::CString;
 use std::io;
