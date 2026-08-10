@@ -248,6 +248,34 @@ pub fn bring_up(env: &impl plexos_gpu::env::Environment, log: &mut dyn FnMut(&st
             )),
         }
     }
+
+    wake(log);
+}
+
+/// Opens the control device once, to make the driver initialise the GPU now.
+///
+/// This is not decoration. `/dev/nvidia-caps` is created when the GPU is first
+/// initialised, not when the module loads, and Landlock cannot add a rule for a path that
+/// does not exist — so without this Plex starts with that directory outside its policy,
+/// libcuda is denied a path it needs, and the symptom is "opening hw device failed" with
+/// nothing in `dmesg` and every device node present and correct.
+///
+/// It cost a boot to find, and the shape is one this project keeps meeting: the state at
+/// the moment a decision is made is not the state the decision has to survive.
+///
+/// Failure is logged and nothing more. A GPU that will not initialise is worth saying so
+/// about; it is not worth refusing to boot over.
+fn wake(log: &mut dyn FnMut(&str)) {
+    match std::fs::File::open("/dev/nvidiactl") {
+        Ok(_) => log(
+            "nvidia: opened /dev/nvidiactl; the GPU is initialised and its capability nodes exist",
+        ),
+        Err(error) => log(&format!(
+            "nvidia: could not open /dev/nvidiactl: {error}. The GPU stays uninitialised, \
+             so /dev/nvidia-caps will not exist when Plex is confined and hardware \
+             transcoding will fail with a message about the device rather than about this."
+        )),
+    }
 }
 
 /// `EKEYREJECTED`, spelled out because this crate does not link libc — that boundary is
