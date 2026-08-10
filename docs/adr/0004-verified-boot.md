@@ -65,6 +65,9 @@ protection of the UKI itself.
   resulting root hash into the UKI, then signing. The build has a strict ordering
   dependency that image tooling must enforce.
 - No initramfs: the kernel needs storage, erofs, and dm-verity built in.
+- Secure Boot key handling is decided by [ADR-0017](0017-secure-boot-keys.md): PlexOS signs
+  with its own `db` key and enrolment is a physical act at the machine. The paragraph
+  below is what that ADR was written to answer, kept because it states the choice.
 - Secure Boot key handling is **not decided by this ADR**. Shipping a distribution
   under Secure Boot means either asking users to enrol a PlexOS key in firmware or
   going through Microsoft's shim signing process. This must be resolved before the

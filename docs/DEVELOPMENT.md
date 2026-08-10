@@ -306,3 +306,74 @@ cargo run -p plexos-update --bin plexos-sign -- revoke \
 Served beside the manifest, it is picked up on the next check and stored. The counter must
 increase with every list published: an appliance keeps the highest it has seen, so an older
 list — genuinely root-signed, from before the revocation — un-revokes nothing.
+
+## Secure Boot
+
+Two separate signatures live in this project and it is worth keeping them apart. **Update
+signing** (ADR-0006) is what makes an appliance accept a new `/usr`; it is done and every
+bundle needs it. **Secure Boot** (ADR-0004, ADR-0017) is what makes *firmware* accept the
+bootloader, and it is the subject of this section. Neither implies the other, and until a
+key is enrolled Secure Boot must be off in firmware whatever the update signing says.
+
+### Making the keys, once
+
+```
+tools/make-secureboot-keys.sh
+```
+
+Writes `PK`, `KEK` and `db` to `~/.plexos-keys/secureboot`, outside the repository. It
+refuses to overwrite an existing set, because a machine that has enrolled one cannot boot
+anything signed by a replacement until its firmware is cleared.
+
+### Building a signed image
+
+```
+export PLEXOS_SB_KEY=~/.plexos-keys/secureboot/db.key
+export PLEXOS_SB_CERT=~/.plexos-keys/secureboot/db.crt
+make -C ../buildroot-upstream O=$(pwd)/output
+```
+
+`post-image.sh` signs the bootloader and both UKIs, and verifies each signature with
+`sbverify` as it goes. Without those two variables it builds an unsigned image and says so
+on every line it does not sign. `sbsigntool` is required on the build host.
+
+To check afterwards, ask the ESP rather than the build log:
+
+```
+mcopy -i output/images/esp.img ::/EFI/BOOT/BOOTX64.EFI /tmp/boot.efi
+sbverify --cert ~/.plexos-keys/secureboot/db.crt /tmp/boot.efi
+```
+
+### Enrolling the key in a machine, once
+
+Nothing in PlexOS does this. It is a person, in the firmware's own setup screens, and that
+is deliberate — see ADR-0017.
+
+1. Copy `db.cer` somewhere the firmware can read: a FAT32 USB stick is the safe choice,
+   and the appliance's own ESP works on firmware that will browse it.
+2. Enter firmware setup. Find Secure Boot, and put it in **Custom** or **Setup Mode** —
+   the wording varies; what you are looking for is the mode in which the key databases can
+   be edited at all.
+3. Enrol `db.cer` into **db**. Some firmware calls this "Enroll key from file", some
+   "Append", some hides it behind "Key Management".
+4. Turn Secure Boot back **on**, save, and boot.
+
+The reference laptop's firmware is a Huawei one; the option is under **Security → Secure
+Boot → Key Management**.
+
+### When it does not boot
+
+A signed image on a machine that has not enrolled the key fails at the first step, and
+**the firmware's message will not mention PlexOS** — expect "Security Violation", "Invalid
+signature detected" or a screen naming only the file. That is the expected symptom of a
+correct image and an unenrolled machine, not of a bad build.
+
+Tell the two apart without guessing: turn Secure Boot off and boot the same image. If it
+boots, the image is fine and the key is not enrolled. If it does not, the fault is
+somewhere this section is not about.
+
+`PK` is the key that owns the machine's hierarchy. Enrolling it puts firmware into User
+Mode and is what stops anybody else adding a `db` entry afterwards; leaving it out keeps
+the machine in Setup Mode, where the databases can be edited by anyone who reaches the
+screen. Enrol it last, once `db` is known to work — an enrolled PK is the hardest of the
+three to undo, and "clear all Secure Boot keys" is the only way back on most firmware.

@@ -30,6 +30,7 @@ kind of decision that is embarrassing to get wrong quietly.
 | [0014](0014-console-terminal.md) | A terminal in the console, on a trusted network | Accepted |
 | [0015](0015-discrete-gpu-support.md) | Discrete GPUs, and what NVIDIA would cost | Accepted |
 | [0016](0016-installer.md) | The installer, and the first boot after it | Accepted |
+| [0017](0017-secure-boot-keys.md) | Secure Boot key custody, and who enrols them | Accepted |
 
 ## Template
 
