@@ -618,6 +618,46 @@ build_initrd() {
 }
 
 # --------------------------------------------------------------------------
+# Secure Boot signing, for everything the firmware will launch
+# --------------------------------------------------------------------------
+# ADR-0004's chain begins "firmware verifies the bootloader", and until this existed only
+# the UKI was ever signed. That is the half that cannot work on its own: with Secure Boot
+# on, firmware refuses BOOTX64.EFI before any UKI is reached, so a machine given a signed
+# image and an enrolled key would have failed at the first step with a message about the
+# bootloader and nothing to suggest the UKIs were fine.
+#
+# Both are signed with db, and by one function, so the next thing added to the ESP is
+# signed by writing one line rather than by remembering that it must be.
+sign_efi() {
+    local target="$1" what="$2"
+
+    if [ -z "${PLEXOS_SB_KEY}" ] || [ -z "${PLEXOS_SB_CERT}" ]; then
+        msg "  ${what}: UNSIGNED (set PLEXOS_SB_KEY and PLEXOS_SB_CERT to sign)"
+        return 0
+    fi
+
+    command -v sbsign >/dev/null 2>&1 || die \
+        "PLEXOS_SB_KEY is set but sbsign is not installed" \
+        "apt install sbsigntool, or unset PLEXOS_SB_KEY to build an unsigned image"
+
+    msg "  signing ${what}"
+    sbsign --key "${PLEXOS_SB_KEY}" --cert "${PLEXOS_SB_CERT}" \
+           --output "${target}.signed" "${target}"
+    mv "${target}.signed" "${target}"
+
+    # sbsign exits 0 having written a file whose signature is not one the firmware will
+    # accept -- a mismatched key and certificate is the usual way. sbverify against the
+    # same certificate is the only check available here that asks the question the
+    # firmware will ask, and it costs milliseconds against a boot that fails in a setup
+    # screen with no log.
+    if command -v sbverify >/dev/null 2>&1; then
+        sbverify --cert "${PLEXOS_SB_CERT}" "${target}" >/dev/null 2>&1 || die \
+            "${what} was signed and the signature does not verify against ${PLEXOS_SB_CERT}" \
+            "the key and the certificate are probably not a pair; regenerate with tools/make-secureboot-keys.sh"
+    fi
+}
+
+# --------------------------------------------------------------------------
 # 4. The Unified Kernel Image
 # --------------------------------------------------------------------------
 # A UKI is the EFI stub with .osrel, .cmdline, .linux and .initrd appended as PE
@@ -752,18 +792,7 @@ build_uki() {
             "the stub may lack reserved section headers; check -Defi-stub-extra-sections in package/plexos-systemd-boot"
     done
 
-    if [ -n "${PLEXOS_SB_KEY}" ] && [ -n "${PLEXOS_SB_CERT}" ]; then
-        command -v sbsign >/dev/null 2>&1 || die \
-            "PLEXOS_SB_KEY is set but sbsign is not installed" \
-            "apt install sbsigntool, or unset PLEXOS_SB_KEY to build an unsigned image"
-        msg "  signing UKI"
-        sbsign --key "${PLEXOS_SB_KEY}" --cert "${PLEXOS_SB_CERT}" \
-               --output "${out}.signed" "${out}"
-        mv "${out}.signed" "${out}"
-    else
-        msg "  UNSIGNED (set PLEXOS_SB_KEY and PLEXOS_SB_CERT to sign)"
-        msg "  Secure Boot must be turned off in firmware to boot this image"
-    fi
+    sign_efi "${out}" "UKI for slot ${slot}"
 
     msg "  UKI for slot ${slot} is $(( $(stat -c %s "${out}") / 1024 / 1024 )) MiB"
 }
@@ -788,8 +817,15 @@ build_esp() {
     # The removable-media fallback path. Firmware boots it without an NVRAM entry,
     # which is what makes the same image work from a USB stick and from an installed
     # disk without the installer having to touch EFI variables.
-    "${mcopy}" -i "${esp}" "${BINARIES_DIR}/systemd-bootx64.efi" ::/EFI/BOOT/BOOTX64.EFI
-    "${mcopy}" -i "${esp}" "${BINARIES_DIR}/systemd-bootx64.efi" ::/EFI/systemd/systemd-bootx64.efi
+    # Signed into a copy, never in place: BINARIES_DIR is Buildroot's output and signing
+    # what is there would make a rebuild sign an already-signed binary, which sbsign
+    # refuses on the second pass and would turn a repeat build into a failure.
+    local -r boot="${WORK}/systemd-bootx64.efi"
+    cp "${BINARIES_DIR}/systemd-bootx64.efi" "${boot}"
+    sign_efi "${boot}" "bootloader"
+
+    "${mcopy}" -i "${esp}" "${boot}" ::/EFI/BOOT/BOOTX64.EFI
+    "${mcopy}" -i "${esp}" "${boot}" ::/EFI/systemd/systemd-bootx64.efi
 
     # The try counter lives in the filename (ADR-0005): "+3" means three attempts
     # remain and none has been used. systemd-boot decrements it by renaming before

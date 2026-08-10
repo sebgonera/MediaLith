@@ -483,6 +483,29 @@ else
     assert "the UKI carries a boot try counter (ADR-0005)" \
            "printf '%s' \"${entries}\" | grep -q '+3'" \
            "systemd-boot decrements the counter by renaming; without it there is no rollback"
+
+    # ADR-0004's first link. The bootloader is what firmware launches, so an image whose
+    # UKIs are signed and whose BOOTX64.EFI is not cannot boot with Secure Boot on -- and
+    # that was the state of this script until the signing was made one function used by
+    # both. Asserted in whichever direction the build was asked for, because "unsigned"
+    # is a legitimate build and silently signing nothing is the failure being prevented.
+    if [ -n "${PLEXOS_SB_KEY:-}" ] && [ -n "${PLEXOS_SB_CERT:-}" ]; then
+        if command -v sbverify >/dev/null 2>&1; then
+            "$(dirname "${MCOPY}")/mcopy" -i "${WORK}/esp.img" \
+                ::/EFI/BOOT/BOOTX64.EFI "${WORK}/bootx64.check" 2>/dev/null
+            assert "the bootloader is signed, not just the UKIs" \
+                   "sbverify --cert '${PLEXOS_SB_CERT}' '${WORK}/bootx64.check' >/dev/null 2>&1" \
+                   "firmware refuses BOOTX64.EFI before any UKI is reached"
+            assert "the UKI is signed too" \
+                   "sbverify --cert '${PLEXOS_SB_CERT}' '${WORK}/plexos.efi' >/dev/null 2>&1" \
+                   "systemd-boot loads it through the firmware, which checks it"
+        else
+            skipped "signatures on the ESP" "needs sbverify (apt install sbsigntool)"
+        fi
+    else
+        skipped "signatures on the ESP" \
+                "PLEXOS_SB_KEY is unset, so this build is deliberately unsigned"
+    fi
 fi
 
 # --------------------------------------------------------------------------
