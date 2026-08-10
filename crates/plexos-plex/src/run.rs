@@ -104,6 +104,29 @@ pub fn spec(mount: &Path, os_name: &str, os_version: &str, machine: &str) -> Spe
     }
 }
 
+/// The device paths libcuda names, read out of the library rather than listed from
+/// memory: `strings libcuda.so | grep '^/dev/'`.
+///
+/// `/dev/nvidia-caps` is a directory and is here because of what leaving it out cost.
+/// Every other path libcuda opens was granted -- the confinement log confirmed all four
+/// rules applied -- and Plex still could not create a CUDA context: "opening hw device
+/// failed ... Generic error in an external library", nothing in dmesg, while the same
+/// transcoder run as the same user *outside* Landlock initialised the device fine. That
+/// difference is the diagnosis. This was the one path libcuda names that the policy
+/// covered only by the broad `/dev` rule, which carries no `IOCTL_DEV`.
+///
+/// `/dev/char/<major>:<minor>` is named by `libcuda` too and is deliberately absent: a
+/// `udev` artefact,
+/// missing on this system, and missing in the unconfined run that worked -- so it is
+/// not what was being denied.
+pub const NVIDIA_NODES: [&str; 5] = [
+    "/dev/nvidiactl",
+    "/dev/nvidia0",
+    "/dev/nvidia-uvm",
+    "/dev/nvidia-uvm-tools",
+    "/dev/nvidia-caps",
+];
+
 /// A path Plex may reach, and what it may do there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grant {
@@ -260,15 +283,14 @@ pub fn grants(mount: &Path, media: &[PathBuf]) -> Vec<Grant> {
         // is worth saying plainly that the list is the thing that goes stale.
     ];
 
-    for node in [
-        "/dev/nvidiactl",
-        "/dev/nvidia0",
-        "/dev/nvidia-uvm",
-        "/dev/nvidia-uvm-tools",
-    ] {
+    for node in NVIDIA_NODES {
         grants.push(Grant {
+            // READ_DIR because one of these is a directory -- /dev/nvidia-caps holds
+            // nvidia-cap1 and nvidia-cap2, made by the driver itself because nv-caps is
+            // the one part of it that does register through the device model. A rule
+            // without READ_DIR would grant the directory and deny reading its contents.
             path: PathBuf::from(node),
-            access: access::READ_FILE | access::WRITE_FILE | access::IOCTL_DEV,
+            access: access::READ_FILE | access::WRITE_FILE | access::READ_DIR | access::IOCTL_DEV,
             required: false,
         });
     }
@@ -598,12 +620,7 @@ mod tests {
         // /run and the audio encoder's execute bit. The list is the thing that goes
         // stale, so this asserts every node rather than a representative one.
         let grants = grants(&mount(), &[]);
-        for node in [
-            "/dev/nvidiactl",
-            "/dev/nvidia0",
-            "/dev/nvidia-uvm",
-            "/dev/nvidia-uvm-tools",
-        ] {
+        for node in NVIDIA_NODES {
             let grant = grants
                 .iter()
                 .find(|g| g.path == Path::new(node))
