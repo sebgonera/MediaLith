@@ -243,7 +243,35 @@ pub fn grants(mount: &Path, media: &[PathBuf]) -> Vec<Grant> {
             access: access::READ_FILE | access::WRITE_FILE | access::READ_DIR | access::IOCTL_DEV,
             required: false,
         },
+        // The other GPU, and it is a different set of paths entirely. NVIDIA does not
+        // use `/dev/dri` for decode and encode -- it has its own nodes, made by
+        // plexos-init because devtmpfs will not, and reached by ioctl exactly as the
+        // render node is.
+        //
+        // These are named one by one rather than granting `/dev`, which would hand Plex
+        // every device on the machine to save four lines.
+        //
+        // `required: false` because most machines have no NVIDIA card and a missing path
+        // must not stop Plex starting. That is the same reasoning as `/dev/dri` and it
+        // has the same cost: if these are absent on a machine that does have a card,
+        // Plex starts and transcodes on the CPU, and the only place that says so is the
+        // GPU report. Fourth time this deny-by-default policy has been missing something
+        // nobody listed -- after /usr, /run, and the audio encoder's execute bit -- so it
+        // is worth saying plainly that the list is the thing that goes stale.
     ];
+
+    for node in [
+        "/dev/nvidiactl",
+        "/dev/nvidia0",
+        "/dev/nvidia-uvm",
+        "/dev/nvidia-uvm-tools",
+    ] {
+        grants.push(Grant {
+            path: PathBuf::from(node),
+            access: access::READ_FILE | access::WRITE_FILE | access::IOCTL_DEV,
+            required: false,
+        });
+    }
 
     // Media, read-only. Not required: a server with no libraries configured yet is a
     // normal first-boot state, not a broken one.
@@ -556,6 +584,39 @@ mod tests {
             "the exception must still be in the grant list, or this test is exempting \
              something that is not there and checking nothing"
         );
+    }
+
+    #[test]
+    fn the_nvidia_nodes_are_granted_ioctl_too() {
+        // /dev is already granted read and write, which is why this is easy to think is
+        // already handled -- and it is not, because the bit that matters is IOCTL_DEV.
+        // NVDEC and NVENC are driven by ioctl on /dev/nvidiactl and /dev/nvidia0 exactly
+        // as VA-API drives the render node, and without it Plex opens the device, gets
+        // EACCES on the first ioctl, and falls back to the CPU.
+        //
+        // Fourth time this policy has been missing something nobody listed, after /usr,
+        // /run and the audio encoder's execute bit. The list is the thing that goes
+        // stale, so this asserts every node rather than a representative one.
+        let grants = grants(&mount(), &[]);
+        for node in [
+            "/dev/nvidiactl",
+            "/dev/nvidia0",
+            "/dev/nvidia-uvm",
+            "/dev/nvidia-uvm-tools",
+        ] {
+            let grant = grants
+                .iter()
+                .find(|g| g.path == Path::new(node))
+                .unwrap_or_else(|| panic!("{node} is not in the policy at all"));
+            assert!(
+                grant.access & access::IOCTL_DEV != 0,
+                "{node} is granted without IOCTL_DEV, so Plex will transcode on the CPU"
+            );
+            assert!(
+                !grant.required,
+                "{node} must not be required: most machines have no NVIDIA card"
+            );
+        }
     }
 
     #[test]

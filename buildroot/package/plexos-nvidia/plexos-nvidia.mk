@@ -146,6 +146,52 @@ PLEXOS_NVIDIA_EXTRA_DOWNLOADS = \
 PLEXOS_NVIDIA_FWDIR = /usr/lib/firmware/nvidia/$(PLEXOS_NVIDIA_VERSION)
 PLEXOS_NVIDIA_FIRMWARE = gsp_ga10x.bin gsp_tu10x.bin ucodes_ga10x.bin ucodes_tu10x.bin
 
+# ---------------------------------------------------------------------------
+# The userspace Plex reaches NVDEC and NVENC through (ADR-0015 step 5)
+# ---------------------------------------------------------------------------
+#
+# The whole installer carries 776 MB of libraries -- OpenGL, Vulkan, X11, EGL, the
+# CUDA compiler. A headless transcoding appliance uses almost none of it, and shipping
+# it all would be the firmware mistake in a larger size. What is here is the path Plex
+# actually walks, established by reading each library's NEEDED entries rather than by
+# taking a list from somewhere:
+#
+#   libcuda                 108 MB  the driver API; everything else sits on it
+#   libnvcuvid               27 MB  NVDEC
+#   libnvidia-encode        284 KB  NVENC, and it NEEDs libnvcuvid
+#   libnvidia-ml            2.6 MB  NVML, which is what nvidia-smi asks
+#   libnvidia-ptxjitcompiler 36 MB  dlopened by libcuda
+#
+# libnvidia-nvvm is deliberately absent, and it is the one judgement call here. libcuda
+# names it alongside ptxjitcompiler, but it is the NVRTC runtime compiler -- for
+# programs that compile CUDA source at run time, which decoding and encoding a video
+# stream does not do. It is 75 MB. If a future Plex does something that needs it, the
+# symptom will be a dlopen failure naming the file, which is at least a message that
+# points here.
+#
+# nvidia-smi comes too, at 1.3 MB. It is the only way to ask this hardware anything from
+# a shell, and this project's whole argument is that a diagnostic which cannot be run is
+# a diagnostic nobody has.
+#
+# Licensing is the same clause as the firmware: 1.1(d) covers "the SOFTWARE", so the
+# libraries travel under the same two conditions, unmodified and with the agreement
+# beside them. Both are already enforced.
+PLEXOS_NVIDIA_LIBS = \
+	libcuda.so \
+	libnvcuvid.so \
+	libnvidia-encode.so \
+	libnvidia-ml.so \
+	libnvidia-ptxjitcompiler.so
+
+# The SONAME each library is opened by. A file on disk that nothing can find by the name
+# in its consumer's NEEDED entry is a file that is not there, and the failure reads as a
+# missing driver.
+PLEXOS_NVIDIA_SONAME_libcuda = libcuda.so.1
+PLEXOS_NVIDIA_SONAME_libnvcuvid = libnvcuvid.so.1
+PLEXOS_NVIDIA_SONAME_libnvidia-encode = libnvidia-encode.so.1
+PLEXOS_NVIDIA_SONAME_libnvidia-ml = libnvidia-ml.so.1
+PLEXOS_NVIDIA_SONAME_libnvidia-ptxjitcompiler = libnvidia-ptxjitcompiler.so.1
+
 # The .run is a makeself archive: --extract-only is plain shell, tar and xz, so it does
 # not execute any of the payload and does not care what architecture the build host is.
 define PLEXOS_NVIDIA_EXTRACT_RUN
@@ -206,6 +252,19 @@ define PLEXOS_NVIDIA_INSTALL_FIRMWARE
 	done
 	$(INSTALL) -m 0644 -D $(@D)/.run-extracted/LICENSE \
 		$(TARGET_DIR)/usr/share/licenses/nvidia/LICENSE
+	$(INSTALL) -d -m 0755 $(TARGET_DIR)/usr/lib
+	for lib in $(PLEXOS_NVIDIA_LIBS); do \
+		src=$(@D)/.run-extracted/$$lib.$(PLEXOS_NVIDIA_VERSION); \
+		test -s $$src || { echo "plexos-nvidia: $$src is not in the installer"; exit 1; }; \
+		$(INSTALL) -m 0644 -D $$src \
+			$(TARGET_DIR)/usr/lib/$$lib.$(PLEXOS_NVIDIA_VERSION) || exit 1; \
+		soname=$$(cd $(@D)/.run-extracted && objdump -p $$lib.$(PLEXOS_NVIDIA_VERSION) 2>/dev/null \
+			| sed -n 's/^ *SONAME *//p' | head -1); \
+		test -n "$$soname" || soname=$$lib.1; \
+		ln -sf $$lib.$(PLEXOS_NVIDIA_VERSION) $(TARGET_DIR)/usr/lib/$$soname; \
+		ln -sf $$soname $(TARGET_DIR)/usr/lib/$$lib; \
+	done
+	$(INSTALL) -m 0755 -D $(@D)/.run-extracted/nvidia-smi $(TARGET_DIR)/usr/bin/nvidia-smi
 endef
 
 PLEXOS_NVIDIA_POST_INSTALL_TARGET_HOOKS += PLEXOS_NVIDIA_INSTALL_FIRMWARE
@@ -229,7 +288,16 @@ define PLEXOS_NVIDIA_CHECK_FIRMWARE
 		echo "  agreement is provided to each recipient. Shipping the blobs without"; \
 		echo "  it is not a packaging slip, it is the condition being unmet."; \
 		exit 1; }
-	@echo "plexos-nvidia: firmware and licence installed"
+	@for lib in $(PLEXOS_NVIDIA_LIBS); do \
+		test -s $(TARGET_DIR)/usr/lib/$$lib.$(PLEXOS_NVIDIA_VERSION) || { \
+			echo "plexos-nvidia: $$lib did not reach /usr/lib"; exit 1; }; \
+		test -L $(TARGET_DIR)/usr/lib/$$lib || { \
+			echo "plexos-nvidia: $$lib has no development symlink"; exit 1; }; \
+	done; \
+	test -x $(TARGET_DIR)/usr/bin/nvidia-smi || { \
+		echo "plexos-nvidia: nvidia-smi did not reach the image, so there is no way to"; \
+		echo "  ask this hardware anything from a shell."; exit 1; }
+	@echo "plexos-nvidia: firmware, licence and userspace installed"
 endef
 
 PLEXOS_NVIDIA_POST_INSTALL_TARGET_HOOKS += PLEXOS_NVIDIA_CHECK_FIRMWARE
