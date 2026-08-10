@@ -174,10 +174,31 @@ pub fn grants(mount: &Path, media: &[PathBuf]) -> Vec<Grant> {
             access: access::READ_ONLY,
             required: true,
         },
-        // Plex reads /proc/self, /proc/cpuinfo and /proc/meminfo to size its own work.
+        // Plex reads /proc/self, /proc/cpuinfo and /proc/meminfo to size its own work --
+        // and libcuda *writes* a file under its own /proc/<pid>, with O_TRUNC.
+        //
+        // TRUNCATE is a separate Landlock right since ABI 3, so read and write together
+        // are not enough: without it cuInit fails with CUDA_ERROR_OPERATING_SYSTEM (304),
+        // which ffmpeg reports as "Generic error in an external library" and Plex reports
+        // as no hardware decoder. Nothing names /proc anywhere in that chain.
+        //
+        // Found by bisection rather than by reading, because nothing to read said so:
+        // examples/cuda-under-landlock reproduces this policy on a machine with a card
+        // and calls cuInit inside it, so the mask could be halved in seconds instead of
+        // guessed at two hours a time. The minimum is READ_FILE | READ_DIR | WRITE_FILE |
+        // TRUNCATE, and /proc/self alone is enough *for the process that grants it*.
+        //
+        // It is granted on /proc rather than /proc/self because a Landlock rule binds to
+        // the inode it was added for. /proc/self resolves to /proc/<pid> of whoever adds
+        // the rule -- here the process that becomes Plex -- and Plex's transcoder is a
+        // different pid with a different directory, which that rule would not cover.
+        //
+        // The widening is smaller than it looks: Landlock only ever narrows what ordinary
+        // permissions already allow, so this lets uid 900 write the /proc files it owns
+        // and nothing else. It cannot write /proc/sys, /proc/driver, or another account's.
         Grant {
             path: PathBuf::from("/proc"),
-            access: access::READ_ONLY,
+            access: access::READ_ONLY | access::WRITE_FILE | access::TRUNCATE,
             required: true,
         },
         // /dev/null and /dev/urandom, which any non-trivial process opens. Write is
@@ -541,9 +562,9 @@ mod tests {
 
     #[test]
     fn the_base_system_is_readable_and_never_writable() {
-        // What granting /usr, /etc, /proc and /sys must not cost: Plex may read the
-        // system it runs on and may not change any of it.
-        for path in [paths::USR, "/etc", "/proc", "/sys", "/run"] {
+        // What granting the base system must not cost: Plex may read the machine it runs
+        // on and may not change it.
+        for path in [paths::USR, "/etc", "/sys", "/run"] {
             let grant = grants(&mount(), &[])
                 .into_iter()
                 .find(|g| g.path == Path::new(path))
@@ -554,6 +575,44 @@ mod tests {
                 "{path} must not be writable by Plex"
             );
         }
+    }
+
+    #[test]
+    fn proc_is_the_one_exception_and_only_as_far_as_cuda_needs() {
+        // /proc was in the list above until libcuda turned out to write a file under its
+        // own /proc/<pid> with O_TRUNC. Without WRITE_FILE and TRUNCATE, cuInit fails
+        // with CUDA_ERROR_OPERATING_SYSTEM and Plex reports no hardware decoder, naming
+        // neither /proc nor Landlock anywhere in the chain.
+        //
+        // Weakening that invariant deserves a test of its own rather than a quietly
+        // shortened list. What is given is the minimum the bisection found; what is
+        // withheld is everything that would let Plex add to /proc or take things out of
+        // it. And Landlock only narrows what ordinary permissions already allow, so uid
+        // 900 can write the /proc files it owns and no others.
+        let grant = grants(&mount(), &[])
+            .into_iter()
+            .find(|g| g.path == Path::new("/proc"))
+            .expect("granted");
+
+        assert!(
+            grant.access & access::WRITE_FILE != 0,
+            "cuInit needs to write"
+        );
+        assert!(
+            grant.access & access::TRUNCATE != 0,
+            "TRUNCATE is a separate right since ABI 3, and O_TRUNC needs it"
+        );
+        assert_eq!(
+            grant.access & (access::MAKE_REG | access::REMOVE_FILE | access::MAKE_DIR),
+            0,
+            "/proc is writable only in the sense cuInit needs; Plex may not create or \
+             remove anything there"
+        );
+        assert_eq!(
+            grant.access & access::EXECUTE,
+            0,
+            "nothing in /proc is executed"
+        );
     }
 
     #[test]
