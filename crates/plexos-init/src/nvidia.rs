@@ -167,6 +167,71 @@ pub fn nodes(majors: &BTreeMap<String, u32>) -> Vec<Node> {
     nodes
 }
 
+/// Where the kernel publishes the capability device numbers.
+///
+/// One file per capability, each holding `DeviceFileMinor:` and the number the node must
+/// have. This is `nvidia-modprobe`'s protocol: the driver announces what it wants and
+/// userspace makes it, which on an ordinary distribution is that setuid helper and here
+/// is us — the same arrangement as `/dev/nvidia*`, one directory further along.
+pub const CAPABILITIES: &str = "/proc/driver/nvidia/capabilities";
+
+/// Where the capability nodes go.
+pub const CAPS_DIR: &str = "/dev/nvidia-caps";
+
+/// The minor from one capability file.
+///
+/// The file also carries `DeviceFileMode: 256` — 0400, root-only — which is deliberately
+/// not used. Plex runs as uid 900 and a node it cannot open is a node that is not there,
+/// which is the render-node defect for the third time in this module.
+#[must_use]
+pub fn capability_minor(contents: &str) -> Option<u32> {
+    contents.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("DeviceFileMinor:")
+            .and_then(|rest| rest.trim().parse::<u32>().ok())
+    })
+}
+
+/// Every capability node this driver is asking for.
+///
+/// Walks the directory rather than naming the capabilities, because the set differs by
+/// driver version and by card: this machine publishes six, of which MIG's two are the
+/// ones a consumer GPU actually uses. Naming them would be a list that goes stale, and
+/// there is already one of those in this file.
+#[must_use]
+pub fn capability_nodes(env: &impl plexos_gpu::env::Environment, major: u32) -> Vec<Node> {
+    let mut found = Vec::new();
+    collect_capabilities(env, Path::new(CAPABILITIES), major, &mut found);
+    found.sort_by_key(|node| node.minor);
+    found.dedup_by_key(|node| node.minor);
+    found
+}
+
+fn collect_capabilities(
+    env: &impl plexos_gpu::env::Environment,
+    dir: &Path,
+    major: u32,
+    into: &mut Vec<Node>,
+) {
+    let Ok(entries) = env.list_dir(dir) else {
+        return;
+    };
+    for entry in entries {
+        if let Ok(contents) = env.read(&entry)
+            && let Some(minor) = capability_minor(&contents)
+        {
+            into.push(Node {
+                path: Path::new(CAPS_DIR).join(format!("nvidia-cap{minor}")),
+                major,
+                minor,
+                mode: 0o666,
+            });
+            continue;
+        }
+        collect_capabilities(env, &entry, major, into);
+    }
+}
+
 /// Where a module lives in the running system.
 #[must_use]
 pub fn module_path(release: &str, name: &str) -> PathBuf {
@@ -247,6 +312,43 @@ pub fn bring_up(env: &impl plexos_gpu::env::Environment, log: &mut dyn FnMut(&st
                 node.path.display()
             )),
         }
+    }
+
+    // The capability nodes, which nothing else will make either. They come after the
+    // others because their numbers live in /proc, which only exists once the module is
+    // loaded -- and they come before anything is confined, because Landlock cannot grant
+    // a path that is not there yet. That ordering is the whole defect this fixes: the
+    // directory was missing when Plex started, so libcuda was denied a path it needs and
+    // the symptom was "opening hw device failed" with every other node present and
+    // correct.
+    if let Some(&caps_major) = found.get("nvidia-caps") {
+        let caps = capability_nodes(env, caps_major);
+        if caps.is_empty() {
+            log(&format!(
+                "nvidia: {CAPABILITIES} lists no capabilities, so {CAPS_DIR} was not made. \
+                 libcuda opens nodes there and will be refused if it is confined without \
+                 them."
+            ));
+        }
+        for node in caps {
+            match plexos_sys::module::make_char_node(&node.path, node.major, node.minor, node.mode)
+            {
+                Ok(()) => log(&format!(
+                    "nvidia: {} is {}:{} mode {:o}",
+                    node.path.display(),
+                    node.major,
+                    node.minor,
+                    node.mode
+                )),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => log(&format!(
+                    "nvidia: could not create {}: {error}",
+                    node.path.display()
+                )),
+            }
+        }
+    } else {
+        log("nvidia: /proc/devices lists no nvidia-caps major, so no capability nodes were made");
     }
 
     wake(log);
@@ -432,6 +534,62 @@ Block devices:
             .file("/sys/bus/pci/devices/0000:00:02.0/vendor", "0x8086\n")
             .file("/sys/bus/pci/devices/0000:01:00.0/vendor", "0x10de\n");
         assert!(present(&env));
+    }
+
+    #[test]
+    fn the_capability_minor_comes_out_of_what_the_driver_published() {
+        // Captured from /proc/driver/nvidia/capabilities on the RTX 5060 rather than
+        // written from memory. DeviceFileMode is 256 -- 0400 -- and is deliberately
+        // ignored: a node uid 900 cannot open is a node that is not there.
+        let real = "DeviceFileMinor: 1\nDeviceFileMode: 256\nDeviceFileModify: 1\n";
+        assert_eq!(capability_minor(real), Some(1));
+        assert_eq!(
+            capability_minor("DeviceFileMinor: 4324\nDeviceFileMode: 256\n"),
+            Some(4324),
+            "profiler-device publishes a four-digit minor; a parser that assumed small \
+             numbers would make the wrong node"
+        );
+        assert_eq!(capability_minor("DeviceFileMode: 256\n"), None);
+        assert_eq!(capability_minor(""), None);
+    }
+
+    #[test]
+    fn capability_nodes_are_named_for_their_minor_and_reachable_by_plex() {
+        let env = Fixture::new()
+            .file(
+                "/proc/driver/nvidia/capabilities/mig/config",
+                "DeviceFileMinor: 1\n",
+            )
+            .file(
+                "/proc/driver/nvidia/capabilities/mig/monitor",
+                "DeviceFileMinor: 2\n",
+            )
+            .file(
+                "/proc/driver/nvidia/capabilities/profiler-device",
+                "DeviceFileMinor: 4324\n",
+            );
+        let made = capability_nodes(&env, 244);
+
+        let names: Vec<String> = made
+            .iter()
+            .map(|n| n.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"nvidia-cap1".to_owned()), "got {names:?}");
+        assert!(
+            names.contains(&"nvidia-cap4324".to_owned()),
+            "got {names:?}"
+        );
+
+        for node in &made {
+            assert_eq!(node.major, 244);
+            assert_eq!(
+                node.mode,
+                0o666,
+                "{} is not reachable by the account Plex runs as",
+                node.path.display()
+            );
+            assert!(node.path.starts_with(CAPS_DIR));
+        }
     }
 
     #[test]
