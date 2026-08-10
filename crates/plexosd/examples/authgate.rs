@@ -29,9 +29,6 @@ fn main() -> std::io::Result<()> {
             "/api/provision" => Response::text(200, "would provision\n"),
             other => Response::text(404, format!("no such route: {other}\n")),
         },
-        // No streaming route here. This demo exists to exercise the token gate, and
-        // declining every request is what leaves the ordinary path in charge.
-        |_request: &Request, _reader: &mut dyn std::io::BufRead| None,
         &mut |line| eprintln!("{line}"),
     )
 }

@@ -219,30 +219,6 @@ pub fn is_trusted(url: &str) -> bool {
         .any(|allowed| host == *allowed || host.ends_with(&format!(".{allowed}")))
 }
 
-/// Where the package the pipeline verifies came from.
-///
-/// The distinction ends at the first check. ADR-0010 says an offline install is "verified
-/// the same way", and the way to keep that true is for both routes to reach the same code
-/// with a file on disk — rather than for one of them to have its own, shorter path through
-/// the signature checks, which is how offline installs become the flavour with the hole in
-/// it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Source {
-    /// Fetched from Plex's own endpoints over HTTPS.
-    Download,
-    /// Already on disk: uploaded from a browser, or copied from removable media.
-    Supplied,
-}
-
-/// The package the pipeline reads, wherever it came from.
-///
-/// One name for both routes, so nothing has to agree about it twice. Dotted, because
-/// `apps` is listed by the store and this is not a version.
-pub const PACKAGE_FILE: &str = ".package.deb";
-
-/// Where a browser sends a package it has been given.
-pub const UPLOAD_PATH: &str = "/api/provision/upload";
-
 /// Where a provisioning run has got to.
 ///
 /// Ordered as the work happens, so the page can render a sequence rather than a label.
@@ -448,13 +424,7 @@ fn push_line(log: &mut Vec<String>, line: String) {
 ///
 /// Returns immediately. The caller has already claimed the job with [`Job::begin`];
 /// doing it here would leave a window in which a second request saw an idle job.
-pub fn spawn(
-    job: &Arc<Job>,
-    plex: &Arc<crate::plex::Handle>,
-    apps: PathBuf,
-    keyring: PathBuf,
-    source: Source,
-) {
+pub fn spawn(job: &Arc<Job>, plex: &Arc<crate::plex::Handle>, apps: PathBuf, keyring: PathBuf) {
     let job = Arc::clone(job);
     let plex = Arc::clone(plex);
     std::thread::spawn(move || {
@@ -464,7 +434,7 @@ pub fn spawn(
         // refuse to start another. A stuck appliance is a worse outcome than a failure
         // with an ugly message.
         let mut guard = Unfinished::arm(&job);
-        let outcome = run(&job, &apps, &keyring, source);
+        let outcome = run(&job, &apps, &keyring);
 
         // Only after a successful build. Mounting and starting from an image that was
         // never published would run whatever the previous attempt left behind.
@@ -519,15 +489,17 @@ const UNEXPECTED_END: &str = "the installation stopped unexpectedly, without say
 /// # Errors
 /// Any step. Every message names what to do about it, because this is the one operation
 /// an ordinary user performs and the only place they will read an error from.
-pub fn run(
-    job: &Job,
-    apps: &Path,
-    keyring: &Path,
-    source: Source,
-) -> Result<String, Box<dyn std::error::Error>> {
+pub fn run(job: &Job, apps: &Path, keyring: &Path) -> Result<String, Box<dyn std::error::Error>> {
     // Resolved before anything is fetched. Reporting a missing mkfs.erofs after an 83 MB
     // download is a poor way to discover the image is incomplete.
     let tools = tools::Tools::on_this_system()?;
+    let curl = tools::resolve("curl", &|p: &Path| p.exists()).ok_or_else(|| {
+        format!(
+            "curl is in none of {}, so nothing can be downloaded. This is an image \
+             fault: BR2_PACKAGE_LIBCURL_CURL and a CA store are supposed to provide it.",
+            tools::PROGRAM_DIRS.join(", ")
+        )
+    })?;
 
     // Before the download, not after it. Resolving the programs proves they exist;
     // this asks whether the one with a build-time option can do the job. Twice now a
@@ -536,53 +508,16 @@ pub fn run(
     execute::check_compressor(&tools)?;
 
     std::fs::create_dir_all(apps)?;
-    let package = apps.join(PACKAGE_FILE);
 
-    match source {
-        Source::Download => {
-            // Only this path needs curl, and only this path should fail for the want of
-            // it. An appliance with no outbound network is exactly the machine ADR-0010's
-            // offline route exists for, and refusing its supplied package because nothing
-            // could have been downloaded would be a fault reported about the wrong thing.
-            let curl = tools::resolve("curl", &|p: &Path| p.exists()).ok_or_else(|| {
-                format!(
-                    "curl is in none of {}, so nothing can be downloaded. This is an \
-                     image fault: BR2_PACKAGE_LIBCURL_CURL and a CA store are supposed \
-                     to provide it. A package supplied from a browser or from removable \
-                     media does not need it.",
-                    tools::PROGRAM_DIRS.join(", ")
-                )
-            })?;
+    let catalogue = fetch_text(&curl, CATALOGUE_URL, CATALOGUE_TIMEOUT_SECS)?;
+    let release = pick(&catalogue)?;
+    job.step(
+        Phase::Downloading,
+        &format!("Plex {} — downloading", release.version),
+    );
 
-            let catalogue = fetch_text(&curl, CATALOGUE_URL, CATALOGUE_TIMEOUT_SECS)?;
-            let release = pick(&catalogue)?;
-            job.step(
-                Phase::Downloading,
-                &format!("Plex {} — downloading", release.version),
-            );
-            download(job, &curl, &tools, &release, &package)?;
-        }
-        // Already on disk, put there by whoever supplied it. Nothing about the checks
-        // below changes, and that is ADR-0010's requirement rather than a convenience:
-        // an offline install is verified the same way or it is a hole in the trust chain
-        // that only offline users fall through.
-        Source::Supplied => {
-            let size = std::fs::metadata(&package).map(|m| m.len()).unwrap_or(0);
-            if size == 0 {
-                return Err(format!(
-                    "no package was supplied, or it was empty. Send one to \
-                     {UPLOAD_PATH}, or put a .deb on removable media and choose it on \
-                     the console page."
-                )
-                .into());
-            }
-            job.note(&format!(
-                "using the package supplied to this machine, {} MiB — nothing was \
-                 downloaded",
-                size / (1024 * 1024)
-            ));
-        }
-    }
+    let package = apps.join(".package.deb");
+    download(job, &curl, &tools, &release, &package)?;
 
     job.step(Phase::Verifying, "checking Plex's signature");
     let mut file = std::fs::File::open(&package)?;

@@ -77,7 +77,25 @@ pub fn respond(
         // Starting an installation. Returns as soon as the work is handed to a thread:
         // the download alone is minutes, and a request held open for it would time out
         // in the browser with the install still running and no way to say so.
-        ("POST", "/api/provision") => start_download(job, plex),
+        ("POST", "/api/provision") => {
+            if !job.begin() {
+                return Response::text(
+                    409,
+                    "An installation is already running on this machine. Watch it at \
+                     GET /api/provision; starting a second would unpack into the same \
+                     directory as the first.\n",
+                );
+            }
+            // The job that was just claimed, not a fresh one: the whole point of
+            // begin() is that the thread reports into the state the page is polling.
+            crate::provision::spawn(
+                job,
+                plex,
+                std::path::PathBuf::from(plexos_types::paths::PLEX_APPS),
+                std::path::PathBuf::from(plexos_plex::verify::PLEX_KEYRING),
+            );
+            Response::json("{\"started\":true}")
+        }
 
         // Checking for, and installing, a new /usr. Same shape as provisioning and for
         // the same reason: the work is minutes and a request cannot be held open for it.
@@ -745,8 +763,6 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     });
 
     let served_job = std::sync::Arc::clone(&job);
-    let uploading_job = std::sync::Arc::clone(&job);
-    let uploading_plex = std::sync::Arc::clone(&plex);
     let installer = std::sync::Arc::new(crate::install::Job::new());
     http::serve_tls(
         &listener,
@@ -763,126 +779,8 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
                 &served_wifi,
             )
         },
-        move |request, reader| upload_route(request, reader, &uploading_job, &uploading_plex),
         log,
     )
-}
-
-/// Starts an installation that fetches the package from Plex.
-///
-/// The other half of ADR-0010 is [`upload_route`], which takes a package the machine was
-/// given. Both end in the same pipeline with a file on disk; only how it got there
-/// differs.
-fn start_download(
-    job: &std::sync::Arc<crate::provision::Job>,
-    plex: &std::sync::Arc<crate::plex::Handle>,
-) -> Response {
-    if !job.begin() {
-        return Response::text(
-            409,
-            "An installation is already running on this machine. Watch it at \
-             GET /api/provision; starting a second would unpack into the same \
-             directory as the first.\n",
-        );
-    }
-    // The job that was just claimed, not a fresh one: the whole point of begin() is that
-    // the thread reports into the state the page is polling.
-    crate::provision::spawn(
-        job,
-        plex,
-        std::path::PathBuf::from(plexos_types::paths::PLEX_APPS),
-        std::path::PathBuf::from(plexos_plex::verify::PLEX_KEYRING),
-        crate::provision::Source::Download,
-    );
-    Response::json("{\"started\":true}")
-}
-
-/// The one route that reads the socket itself, for the one thing too big to hold.
-///
-/// Everything else this console accepts is a few hundred bytes of JSON, which is why
-/// `http::MAX_BODY` is 64 KiB and why that number must not move: a hostile
-/// `Content-Length` must never be able to name an allocation. Plex's package is 83 MB, so
-/// it goes to disk in chunks as it arrives and is never a buffer at all.
-///
-/// Returns `None` for every request that is not this one, which is what leaves the
-/// ordinary path untouched.
-///
-/// The caller has already applied the token policy — `http::refusal` runs before this, so
-/// an unauthenticated client cannot make the appliance receive eighty megabytes and then
-/// be told 401.
-fn upload_route(
-    request: &Request,
-    reader: &mut dyn std::io::BufRead,
-    job: &std::sync::Arc<crate::provision::Job>,
-    plex: &std::sync::Arc<crate::plex::Handle>,
-) -> Option<Response> {
-    if request.method != "POST" || request.path != crate::provision::UPLOAD_PATH {
-        return None;
-    }
-
-    // Claimed before a byte is read. Two uploads into one directory would interleave
-    // into a file that is neither package, and the second would be verified as though
-    // it were whole.
-    if !job.begin() {
-        return Some(Response::text(
-            409,
-            "An installation is already running. Watch it at GET /api/provision; \
-             starting a second would unpack into the same directory as the first.\n",
-        ));
-    }
-
-    let apps = std::path::Path::new(plexos_types::paths::PLEX_APPS);
-    let package = apps.join(crate::provision::PACKAGE_FILE);
-
-    let outcome = std::fs::create_dir_all(apps)
-        .and_then(|()| std::fs::File::create(&package))
-        .and_then(|mut file| crate::http::stream_body(reader, request, &mut file));
-
-    match outcome {
-        Err(error) => {
-            // The partial file is removed rather than left: a truncated .deb that
-            // survives is one the next run would verify and report as a bad signature,
-            // blaming Plex for a transfer this machine dropped.
-            let _ = std::fs::remove_file(&package);
-            job.finish(Err(format!(
-                "the upload could not be written to {}: {error}. Nothing was installed.",
-                package.display()
-            )));
-            Some(Response::text(
-                500,
-                "The package could not be written to disk. /var may be full or \
-                 read-only; GET /api/status reports whether it is writable.\n",
-            ))
-        }
-        Ok(Err(_)) => {
-            let _ = std::fs::remove_file(&package);
-            job.finish(Err(
-                "the upload declared no length, or one beyond what this console \
-                 accepts. Nothing was installed."
-                    .to_owned(),
-            ));
-            Some(Response::text(
-                413,
-                "That upload declares no Content-Length, or more than this console \
-                 accepts. Send the .deb as the raw request body — not a form — and \
-                 check it is the package rather than an archive containing it.\n",
-            ))
-        }
-        Ok(Ok(bytes)) => {
-            job.note(&format!(
-                "received {} MiB from a browser; nothing was downloaded",
-                bytes / (1024 * 1024)
-            ));
-            crate::provision::spawn(
-                job,
-                plex,
-                apps.to_path_buf(),
-                std::path::PathBuf::from(plexos_plex::verify::PLEX_KEYRING),
-                crate::provision::Source::Supplied,
-            );
-            Some(Response::json("{\"started\":true}"))
-        }
-    }
 }
 
 /// Binds a listener, with a remedy that matches the reason it failed.
@@ -1307,49 +1205,6 @@ mod tests {
         assert!(
             PAGE.contains("has to be restarted before it can see it"),
             "and must say why adding a share is not enough on its own"
-        );
-    }
-
-    #[test]
-    fn the_page_offers_the_offline_install_and_aims_it_at_the_streaming_route() {
-        // ADR-0010 requires an offline path -- "a media server in a cupboard may well
-        // have no outbound internet at setup time, and this must not be a dead end" --
-        // and until now the page offered only the download. A route with no control is a
-        // route nobody uses, which is the same shape as the auth gate that nothing ever
-        // called.
-        assert!(
-            PAGE.contains(&format!("\"{}\"", crate::provision::UPLOAD_PATH)),
-            "the page must post to the streaming route, spelled the same way"
-        );
-        assert!(
-            PAGE.contains("id=\"plex-package\""),
-            "and offer a file picker to choose the package with"
-        );
-        assert!(
-            PAGE.contains("accept=\".deb\""),
-            "restricted to the package Plex publishes, so the wrong file is harder to send"
-        );
-        assert!(
-            PAGE.contains("the signature is checked exactly as it is for a download"),
-            "and must say that an offline install is not the weaker one, because there is \
-             no other reason for somebody to believe it"
-        );
-    }
-
-    #[test]
-    fn the_upload_is_sent_as_a_raw_body_rather_than_a_form() {
-        // The server has no multipart parser and must never grow one: it would stand
-        // between the network and a signature check, in a hand-written HTTP server. A
-        // page that sent FormData would be read as raw bytes anyway, so the package
-        // would arrive wrapped in boundaries and fail its signature -- an error blaming
-        // Plex for what the page did.
-        assert!(
-            !PAGE.contains("FormData"),
-            "a multipart body would need a parser this server does not have"
-        );
-        assert!(
-            PAGE.contains("application/octet-stream"),
-            "the file goes as the request body itself"
         );
     }
 

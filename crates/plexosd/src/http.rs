@@ -316,59 +316,6 @@ fn read_body(
     Ok(Ok(body))
 }
 
-/// The largest upload this console will accept, for the one route that streams.
-///
-/// Plex's package is about 83 MB and grows; a quarter of a gibibyte leaves room for that
-/// without the number being an invitation. It is not [`MAX_BODY`] and must never become
-/// it: everything else here is a few hundred bytes of JSON, and the reason that limit is
-/// 64 KiB is that a hostile `Content-Length` must not be able to name an allocation.
-///
-/// This one never allocates what it is told. The bytes go to a file in fixed-size chunks
-/// as they arrive, so the declared length bounds *the transfer*, not memory.
-pub const MAX_UPLOAD: u64 = 256 * 1024 * 1024;
-
-/// How much is moved from socket to disk at a time.
-const UPLOAD_CHUNK: usize = 64 * 1024;
-
-/// Streams a declared body to `sink`, without ever holding it in memory.
-///
-/// Returns how many bytes were written. The declared `Content-Length` is checked against
-/// [`MAX_UPLOAD`] before a byte is read, and the transfer is cut off at the declared
-/// length even if the client keeps sending — a client that promises 80 MB and sends 400
-/// must not be able to write 400 MB into `/var`.
-///
-/// # Errors
-/// Fails on I/O in either direction. A short body — the client promising more than it
-/// sends — is an error rather than a truncated file that looks like a corrupt package,
-/// because the two would be indistinguishable afterwards and only one of them is Plex's
-/// fault.
-pub fn stream_body(
-    stream: &mut (impl BufRead + ?Sized),
-    request: &Request,
-    sink: &mut impl Write,
-) -> io::Result<Result<u64, ParseError>> {
-    let Some(declared) = request.header("Content-Length") else {
-        return Ok(Err(ParseError::Malformed));
-    };
-    let Ok(length) = declared.trim().parse::<u64>() else {
-        return Ok(Err(ParseError::Malformed));
-    };
-    if length == 0 || length > MAX_UPLOAD {
-        return Ok(Err(ParseError::TooLarge));
-    }
-
-    let mut left = length;
-    let mut buffer = vec![0_u8; UPLOAD_CHUNK];
-    while left > 0 {
-        let want = usize::try_from(left.min(UPLOAD_CHUNK as u64)).unwrap_or(UPLOAD_CHUNK);
-        stream.read_exact(&mut buffer[..want])?;
-        sink.write_all(&buffer[..want])?;
-        left -= want as u64;
-    }
-    sink.flush()?;
-    Ok(Ok(length))
-}
-
 /// Reads the request head from a stream, stopping at the blank line.
 ///
 /// # Errors
@@ -405,7 +352,6 @@ fn handle<S: Read + Write>(
     stream: &mut S,
     credential: &crate::auth::Credential,
     handler: &(impl Fn(&Request) -> Response + ?Sized),
-    upload: &(impl Fn(&Request, &mut dyn BufRead) -> Option<Response> + ?Sized),
 ) -> io::Result<()> {
     // Scoped, so the borrow ends before the response is written. Anything the reader
     // buffered past the body is discarded with it, which is already this server's
@@ -417,22 +363,11 @@ fn handle<S: Read + Write>(
             Err(error) => (error.response(), true),
             Ok(mut request) => {
                 let with_body = request.wants_body();
-                // Authorisation first, and for the streaming route that ordering is the
-                // whole point: refusing after the body has been read would mean an
-                // unauthenticated client could still make the appliance receive eighty
-                // megabytes. `refusal` is the same policy `route` applies, called once.
-                if let Some(refused) = refusal(&request, credential) {
-                    (refused, with_body)
-                } else if let Some(response) = upload(&request, &mut reader) {
-                    // The route took the socket and read the body itself.
-                    (response, with_body)
-                } else {
-                    match read_body(&mut reader, &request)? {
-                        Err(error) => (error.response(), with_body),
-                        Ok(body) => {
-                            request.body = body;
-                            (handler(&request), with_body)
-                        }
+                match read_body(&mut reader, &request)? {
+                    Err(error) => (error.response(), with_body),
+                    Ok(body) => {
+                        request.body = body;
+                        (route(&request, credential, handler), with_body)
                     }
                 }
             }
@@ -454,29 +389,12 @@ pub fn route(
     credential: &crate::auth::Credential,
     handler: &(impl Fn(&Request) -> Response + ?Sized),
 ) -> Response {
-    match refusal(request, credential) {
-        Some(refused) => refused,
-        None => handler(request),
-    }
-}
-
-/// Why this request may not proceed, or `None` if it may.
-///
-/// Split out of [`route`] for the upload path, which has to decide this **before** it
-/// reads a body rather than after. Reading eighty megabytes off the socket and then
-/// answering 401 would make an unauthenticated client's upload cost the appliance the
-/// whole transfer, which is a denial of service with a polite error at the end of it.
-///
-/// One function so there is one policy. Two copies of an authorisation rule is how a
-/// route ends up quietly exempt.
-#[must_use]
-pub fn refusal(request: &Request, credential: &crate::auth::Credential) -> Option<Response> {
     if !request.is_mutating() {
-        return None;
+        return handler(request);
     }
 
     // Everything past here changes the machine, and ADR-0013 says a token comes first.
-    Some(match credential {
+    match credential {
         // An unclaimed device. Refusing rather than allowing is the only safe reading:
         // "no credential is set" must never mean "no credential is needed", which is
         // how appliances ship with an open management interface.
@@ -491,7 +409,7 @@ pub fn refusal(request: &Request, credential: &crate::auth::Credential) -> Optio
                 .header("Authorization")
                 .and_then(crate::auth::bearer);
             match presented {
-                Some(token) if crate::auth::matches(token, fingerprint) => return None,
+                Some(token) if crate::auth::matches(token, fingerprint) => handler(request),
                 Some(_) => Response::text(
                     403,
                     "That token is not this device's. The one printed on its console at \
@@ -506,7 +424,7 @@ pub fn refusal(request: &Request, credential: &crate::auth::Credential) -> Optio
                 ),
             }
         }
-    })
+    }
 }
 
 /// Serves connections until the listener fails, one thread per connection.
@@ -520,19 +438,16 @@ pub fn refusal(request: &Request, credential: &crate::auth::Credential) -> Optio
 /// Fails only if accepting stops working. A failure on an individual connection is
 /// logged and the loop continues, because one broken client must not take the console
 /// down.
-pub fn serve<F, U>(
+pub fn serve<F>(
     listener: &TcpListener,
     credential: crate::auth::Credential,
     handler: F,
-    upload: U,
     log: &mut dyn FnMut(&str),
 ) -> io::Result<()>
 where
     F: Fn(&Request) -> Response + Send + Sync + 'static,
-    U: Fn(&Request, &mut dyn BufRead) -> Option<Response> + Send + Sync + 'static,
 {
     let handler = std::sync::Arc::new(handler);
-    let upload = std::sync::Arc::new(upload);
 
     // Installed once, at startup, and read from `auth` per connection rather than
     // captured here. The original reasoning against re-reading held that a credential
@@ -546,11 +461,10 @@ where
         match incoming {
             Ok(mut stream) => {
                 let handler = std::sync::Arc::clone(&handler);
-                let upload = std::sync::Arc::clone(&upload);
                 std::thread::spawn(move || {
                     let credential = crate::auth::current();
                     if set_timeouts(&stream).is_ok() {
-                        let _ = handle(&mut stream, &credential, handler.as_ref(), upload.as_ref());
+                        let _ = handle(&mut stream, &credential, handler.as_ref());
                     }
                 });
             }
@@ -569,27 +483,23 @@ where
 ///
 /// # Errors
 /// If accepting fails in a way that ends the loop.
-pub fn serve_tls<F, U>(
+pub fn serve_tls<F>(
     listener: &TcpListener,
     config: &std::sync::Arc<rustls::ServerConfig>,
     credential: crate::auth::Credential,
     handler: F,
-    upload: U,
     log: &mut dyn FnMut(&str),
 ) -> io::Result<()>
 where
     F: Fn(&Request) -> Response + Send + Sync + 'static,
-    U: Fn(&Request, &mut dyn BufRead) -> Option<Response> + Send + Sync + 'static,
 {
     let handler = std::sync::Arc::new(handler);
-    let upload = std::sync::Arc::new(upload);
     crate::auth::install(credential);
 
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
                 let handler = std::sync::Arc::clone(&handler);
-                let upload = std::sync::Arc::clone(&upload);
                 let config = std::sync::Arc::clone(config);
                 std::thread::spawn(move || {
                     let credential = crate::auth::current();
@@ -600,7 +510,7 @@ where
                     // accepted when the console started, or the console never started.
                     if let Ok(connection) = rustls::ServerConnection::new(config) {
                         let mut tls = rustls::StreamOwned::new(connection, stream);
-                        let _ = handle(&mut tls, &credential, handler.as_ref(), upload.as_ref());
+                        let _ = handle(&mut tls, &credential, handler.as_ref());
                     }
                 });
             }
@@ -804,113 +714,6 @@ mod tests {
             body: Vec::new(),
         };
         assert_eq!(route(&request, &claimed, &handler).status, 200);
-    }
-
-    #[test]
-    fn a_streamed_body_reaches_the_sink_whole_and_is_never_a_buffer() {
-        // The reason MAX_BODY exists is that a declared length must not be an
-        // allocation. This route accepts a length two thousand times larger, so it has
-        // to hold that property a different way: bytes move socket to sink in fixed
-        // chunks. The size here spans several chunks, since a body that fits in one
-        // would exercise none of the loop.
-        let payload: Vec<u8> = (0..200_000_u32).map(|n| (n % 251) as u8).collect();
-        let head = format!("Content-Length: {}", payload.len());
-        let request = Request {
-            method: "POST".to_owned(),
-            path: UPLOAD_PATH_FOR_TEST.to_owned(),
-            headers: vec![(
-                "Content-Length".to_owned(),
-                head["Content-Length: ".len()..].to_owned(),
-            )],
-            body: Vec::new(),
-        };
-
-        let mut stream = std::io::BufReader::new(payload.as_slice());
-        let mut sink: Vec<u8> = Vec::new();
-        let written = stream_body(&mut stream, &request, &mut sink)
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(written, payload.len() as u64);
-        assert_eq!(sink, payload, "the sink must hold exactly what was sent");
-    }
-
-    #[test]
-    fn a_client_that_keeps_sending_is_cut_off_at_what_it_declared() {
-        // Otherwise a client could declare eighty megabytes and write until /var is
-        // full, and the declared length would bound nothing at all.
-        let request = Request {
-            method: "POST".to_owned(),
-            path: UPLOAD_PATH_FOR_TEST.to_owned(),
-            headers: vec![("Content-Length".to_owned(), "10".to_owned())],
-            body: Vec::new(),
-        };
-        let sent = b"0123456789and a great deal more than was promised";
-        let mut stream = std::io::BufReader::new(&sent[..]);
-        let mut sink: Vec<u8> = Vec::new();
-
-        assert_eq!(
-            stream_body(&mut stream, &request, &mut sink).unwrap(),
-            Ok(10)
-        );
-        assert_eq!(sink, b"0123456789", "only the declared bytes are written");
-    }
-
-    #[test]
-    fn a_short_body_is_an_error_rather_than_a_truncated_package() {
-        // A client that promises more than it sends. Left as a short file it would be
-        // verified later and reported as a bad signature, which blames Plex for a
-        // transfer this machine dropped.
-        let request = Request {
-            method: "POST".to_owned(),
-            path: UPLOAD_PATH_FOR_TEST.to_owned(),
-            headers: vec![("Content-Length".to_owned(), "5000".to_owned())],
-            body: Vec::new(),
-        };
-        let mut stream = std::io::BufReader::new(&b"far too little"[..]);
-        let mut sink: Vec<u8> = Vec::new();
-        assert!(stream_body(&mut stream, &request, &mut sink).is_err());
-    }
-
-    #[test]
-    fn an_upload_beyond_the_limit_is_refused_before_a_byte_is_read() {
-        let request = Request {
-            method: "POST".to_owned(),
-            path: UPLOAD_PATH_FOR_TEST.to_owned(),
-            headers: vec![("Content-Length".to_owned(), (MAX_UPLOAD + 1).to_string())],
-            body: Vec::new(),
-        };
-        let mut stream = std::io::BufReader::new(&b""[..]);
-        let mut sink: Vec<u8> = Vec::new();
-        assert_eq!(
-            stream_body(&mut stream, &request, &mut sink).unwrap(),
-            Err(ParseError::TooLarge)
-        );
-        assert!(
-            sink.is_empty(),
-            "nothing may be read before the length is judged"
-        );
-    }
-
-    #[test]
-    fn the_bounded_limit_stays_where_it_is() {
-        // MAX_UPLOAD exists so that MAX_BODY does not have to move. If somebody ever
-        // raises the bounded one to make an upload fit, every other route on this
-        // console gains the ability to name a 256 MiB allocation from a header.
-        assert_eq!(MAX_BODY, 64 * 1024);
-        assert!(
-            MAX_UPLOAD > MAX_BODY as u64,
-            "the streaming route is the one that takes something large"
-        );
-    }
-
-    /// The upload path, spelled here rather than imported, so that the two files have to
-    /// agree explicitly. `console` owns the route; this owns the transport.
-    const UPLOAD_PATH_FOR_TEST: &str = "/api/provision/upload";
-
-    #[test]
-    fn the_transport_and_the_route_agree_about_the_path() {
-        assert_eq!(UPLOAD_PATH_FOR_TEST, crate::provision::UPLOAD_PATH);
     }
 
     #[test]
@@ -1186,7 +989,6 @@ mod tests {
                 &config,
                 crate::auth::Credential::Unset,
                 |request| Response::text(200, format!("served {}", request.path)),
-                |_: &Request, _: &mut dyn BufRead| None,
                 &mut log,
             );
         });
