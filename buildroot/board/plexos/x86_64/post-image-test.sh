@@ -272,6 +272,46 @@ else
 fi
 
 # --------------------------------------------------------------------------
+stage "stage 3 — GPU firmware in the initrd"
+# i915 is asserted by post-image.sh itself, which dies without it. `xe` is not, because a
+# build for a machine with no such GPU is legitimate — so the enforcement is here, and it
+# exists because four options once vanished from a defconfig without kconfig saying a word.
+XE_SRC="${OUTPUT}/target/usr/lib/firmware/xe"
+if [ ! -d "${XE_SRC}" ]; then
+    skipped "the whole stage" \
+            "no ${XE_SRC}; set BR2_PACKAGE_LINUX_FIRMWARE_XE and rebuild linux-firmware"
+else
+    saved_work="${WORK}"; saved_target="${TARGET_DIR:-}"
+    WORK="${TMP}/xe"; TARGET_DIR="${OUTPUT}/target"
+    mkdir -p "${WORK}"
+    install_xe_firmware >/dev/null
+    WORK="${saved_work}"; TARGET_DIR="${saved_target}"
+    XE_GOT="${TMP}/xe/initrd/lib/firmware/xe"
+
+    # The subdirectory is the point. xe_uc_fw.c builds the request as
+    # `xe/<plat>_guc_<major>.bin`, so a blob copied flat into lib/firmware is a blob the
+    # driver asks for by a different name and never finds -- and it carries on without it,
+    # which is the silent half of the failure.
+    assert "the blobs keep their xe/ subdirectory" "[ -d '${XE_GOT}' ]" \
+           "xe asks for xe/<plat>_guc_<major>.bin; a flat copy is never found"
+
+    for want in guc huc; do
+        assert "some ${want} firmware is carried" \
+               "ls '${XE_GOT}'/*_${want}*.bin >/dev/null 2>&1" \
+               "without it an Arc or Xe2 part binds and runs at reduced quality"
+    done
+
+    # Neither GuC nor HuC, and both would be dropped by a pattern written for those two.
+    # The GSC is what HuC authentication goes through on these parts.
+    assert "the GSC blob is carried too" "ls '${XE_GOT}'/*gsc*.bin >/dev/null 2>&1" \
+           "a glob for guc and huc alone drops it, which is the firmware-list mistake again"
+
+    src=$(find "${XE_SRC}" -maxdepth 1 -type f | wc -l)
+    got=$(find "${XE_GOT}" -maxdepth 1 -type f 2>/dev/null | wc -l)
+    check "every blob linux-firmware provided reaches the initrd" "${got}" "${src}"
+fi
+
+# --------------------------------------------------------------------------
 stage "stage 3 — wireless firmware in the initrd"
 # This stage had no test at all, which is how a firmware list naming the wrong family
 # survived a build, a boot and a clean run of this file. Every failure it can produce wears
