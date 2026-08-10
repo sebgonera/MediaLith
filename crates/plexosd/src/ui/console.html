@@ -907,11 +907,18 @@ function settingsCard() {
       </div>
       <div class="field">
         <label for="set-timezone">Timezone</label>
-        <input type="text" id="set-timezone" list="tz-list" autocomplete="off"
-               spellcheck="false" value="${esc(sys.timezone || "")}">
-        <datalist id="tz-list">${zones.map(z => `<option value="${esc(z)}">`).join("")}</datalist>
+        <select id="set-timezone">${
+          (zones.includes(sys.timezone || "") || !sys.timezone
+            ? zones
+            : [sys.timezone].concat(zones))
+          .map(z => `<option value="${esc(z)}"${z === sys.timezone ? " selected" : ""}>${esc(z)}</option>`)
+          .join("")
+        }</select>
         ${zones.length
-           ? `<p class="hint">${zones.length} zones on this image.</p>`
+           ? `<p class="hint">${zones.length} zones on this image. A list rather than a
+                typed field with suggestions: the browser filters those by whatever is
+                already in the box, so a field holding UTC offered two entries and looked
+                like a database with two zones in it.</p>`
            : `<p class="hint">This image carries no timezone database, so any zone but UTC
                 will be refused. It needs a build with BR2_TARGET_TZ_INFO.</p>`}
       </div>
@@ -1030,6 +1037,9 @@ async function loadSettings() {
   } catch (e) {
     settingsView = { config: {}, timezones: [], error: String(e) };
   }
+  // Replaced in place, and only from here -- this is the one path that redraws the
+  // form, so it is the one place a half-typed value can be lost, and it happens because
+  // somebody pressed Save or switched addressing mode rather than because a timer fired.
   const host = document.getElementById("settings");
   if (host) host.outerHTML = hostedSettingsCard();
   renderTrial();
@@ -1648,8 +1658,20 @@ function render(status) {
        ${devicesCard(status.gpu || {})}
        ${networkCard(status.network || {})}
        ${systemCard(status)}
-       ${hostedSettingsCard()}
      </div>`;
+
+  // Settings deliberately not in there. #main is replaced wholesale every few seconds,
+  // and a form inside it loses focus mid-word, closes its own datalist, and discards
+  // anything typed but not yet saved -- reported as "the cursor escapes the field and
+  // the timezone list has two strange entries in it", which are one defect wearing two
+  // faces. The terminal was moved out of #main for this exact reason and the reasoning
+  // was written down at the time; it applies to every control somebody types into.
+  if (!document.getElementById("settings")) {
+    const host = document.createElement("div");
+    host.className = "wide";
+    host.innerHTML = hostedSettingsCard();
+    document.getElementById("net-trial").before(host);
+  }
 
   document.getElementById("uptime").textContent = humanUptime(status.uptime_seconds);
   document.getElementById("refreshed").textContent =

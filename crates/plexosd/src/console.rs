@@ -1578,6 +1578,38 @@ mod tests {
     }
 
     #[test]
+    fn nothing_somebody_types_into_lives_inside_the_polled_element() {
+        // #main is replaced wholesale every few seconds. A control inside it that holds
+        // typed text loses focus mid-word, closes its own datalist, and discards anything
+        // not yet saved -- which is how the settings form behaved, reported as "the
+        // cursor escapes the field" and "the timezone list has two strange entries",
+        // two faces of one defect.
+        //
+        // The terminal was moved out of #main for this reason and the reasoning was
+        // written down at the time. It was not applied to the form, so this asserts the
+        // rule rather than the instance: the settings card is built outside the poll.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+
+        let start = script
+            .find("document.getElementById(\"main\").innerHTML =")
+            .expect("the poll replaces #main");
+        let end = script[start..]
+            .find("`;")
+            .map(|at| start + at)
+            .expect("and the template it assigns ends");
+
+        assert!(
+            !script[start..end].contains("hostedSettingsCard"),
+            "the settings form is rendered inside the element the poll replaces, so it \
+             will lose focus and typed text on a timer"
+        );
+    }
+
+    #[test]
     fn the_pages_script_parses() {
         // The console is one inline script, so **a syntax error anywhere in it stops the
         // whole page**: every section stays on "Loading..." and the machine looks dead
