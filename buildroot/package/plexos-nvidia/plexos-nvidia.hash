@@ -1,0 +1,4 @@
+# Both computed from what was actually downloaded and compiled against this image's
+# kernel, before this package existed -- not copied from anywhere.
+sha256  619d7b5ce1f79c3211afdbf87d02b2174d268b10d005c5b8f994be22299be681  plexos-nvidia-610.57.04.tar.gz
+sha256  d8e96d29bc323000e7ba56102d77c88226a7a3d0d94e2081cb4b071ae9de4a06  COPYING

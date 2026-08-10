@@ -98,6 +98,13 @@ BR2_PACKAGE_LIBVA_UTILS=y
 # from the first images that booted, which made the one question the appliance is
 # supposed to answer the one thing it could not.
 BR2_PACKAGE_PLEXOS_GPU=y
+# NVIDIA's open kernel modules (ADR-0015 step 3). Turing and later; Blackwell requires
+# the open variant rather than the proprietary one, which is why this is the version
+# worth carrying rather than a compromise. Needs CONFIG_MODULES=y, reversed in the
+# fragment for exactly this. Builds the kernel side only -- GSP firmware and the
+# proprietary userspace are steps 4 and 5, and neither is here yet, so this alone does
+# not transcode.
+BR2_PACKAGE_PLEXOS_NVIDIA=y
 
 # ---------------------------------------------------------------------------
 # Firmware

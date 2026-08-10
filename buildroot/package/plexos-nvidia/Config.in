@@ -1,0 +1,37 @@
+config BR2_PACKAGE_PLEXOS_NVIDIA
+	bool "plexos-nvidia (open kernel modules)"
+	depends on BR2_x86_64
+	depends on BR2_LINUX_KERNEL
+	help
+	  NVIDIA's open GPU kernel modules, built from source against the
+	  kernel this image ships (ADR-0015 step 3).
+
+	  Turing and later only. Blackwell -- an RTX 5060 among them --
+	  requires the open modules rather than the proprietary ones, which
+	  is the reason this is the variant worth carrying rather than a
+	  compromise.
+
+	  This builds the kernel side alone: nvidia, nvidia-modeset,
+	  nvidia-uvm, nvidia-drm and nvidia-peermem. It is not enough on its
+	  own to transcode. Two things are still missing and each is its own
+	  step:
+
+	    - GSP firmware, which the driver requests at runtime as
+	      nvidia/<version>/gsp_ga10x.bin and is not in this source
+	      tarball (ADR-0015 step 4).
+	    - The proprietary userspace, which is what Plex reaches NVDEC
+	      and NVENC through (ADR-0015 step 5 onwards, and the step that
+	      meets the project's unchosen licence).
+
+	  Prefixed `plexos-` deliberately: a package directory name becomes
+	  its kconfig symbol, and Buildroot already has an `nvidia-driver`
+	  package pinned at 390.151. Colliding with it would have kconfig
+	  merge the two definitions silently, which is a trap this project
+	  has already recorded once.
+
+	  Requires CONFIG_MODULES=y, which was set to `n` for the whole life
+	  of this project until ADR-0015 reversed it.
+
+comment "plexos-nvidia needs a kernel with loadable module support"
+	depends on BR2_x86_64
+	depends on !BR2_LINUX_KERNEL
