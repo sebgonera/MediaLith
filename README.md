@@ -174,8 +174,10 @@ state it was written in can be wrong in the state its own success produces.*
 - **The root signing key is a development key.** Its private half sits on a build host,
   and every place that reports a signature says so.
 - **Arc and AMD are unverified.** One has no hardware here; the other is not built.
-- **No CI.** The suite runs on a build host, and images are tested by being put on
-  machines.
+- **CI exists and has never run.** `.github/workflows/ci.yml` checks formatting, clippy,
+  the test suite and the docs — on pushes to `main` and on pull requests. It was written
+  before either existed, so it has never fired once. It covers the Rust workspace only;
+  image builds need a Buildroot host and are still tested by being put on machines.
 
 ## Licensing
 
