@@ -5,6 +5,7 @@ description = "The audited unsafe surface: device-mapper ioctls and mount syscal
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

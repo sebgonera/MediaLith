@@ -5,6 +5,7 @@ description = "On-disk and on-wire format definitions shared by every PlexOS com
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

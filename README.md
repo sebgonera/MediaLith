@@ -169,7 +169,6 @@ state it was written in can be wrong in the state its own success produces.*
 
 ## What is not done
 
-- **No licence has been chosen** — see below.
 - **The name** uses a third-party trademark and will probably have to change.
 - **Secure Boot keys** are not enrolled, so images are self-signed.
 - **The root signing key is a development key.** Its private half sits on a build host,
@@ -180,9 +179,11 @@ state it was written in can be wrong in the state its own success produces.*
 
 ## Licensing
 
-Three separate things, none of them settled:
-
-- **PlexOS's own code has no licence yet.** Until one is chosen, default copyright applies.
+- **PlexOS's own code is [Apache-2.0](LICENSE)** — everything in `crates/`, `buildroot/`
+  and `tools/`.
+- **The kernel is GPL-2.0**, unmodified mainline built by Buildroot, and the rest of the
+  base userland carries its own upstream licences. An image is an aggregate of separately
+  licensed works, not a derivative of this repository.
 - **Plex Media Server is proprietary** and is not redistributed inside PlexOS images. It is
   fetched from Plex's own servers at provisioning time
   ([ADR-0010](docs/adr/0010-plex-provisioning.md)).
