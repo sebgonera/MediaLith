@@ -32,6 +32,22 @@
     --accent: #2f5fd0;
     --screen: #101319;
     --screen-ink: #d7dde6;
+
+    /* Added by the style refresh. Every one is a tint or a depth: the palette above keeps
+       its meanings and nothing below reassigns them. The status colours are the one thing
+       on this page that must never drift, because a person reads the colour before they
+       read the word next to it. */
+    --accent-ink: #ffffff;
+    --accent-soft: #e8eefc;
+    --ready-soft: #e3f4ea;
+    --degraded-soft: #fbf0da;
+    --unavailable-soft: #fbe7e6;
+    --raised: #f7f9fc;
+    --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 10px 26px -14px rgba(16, 24, 40, .22);
+    --shadow-sm: 0 1px 2px rgba(16, 24, 40, .07);
+    --radius: 12px;
+    --radius-sm: 9px;
+    --focus: 0 0 0 3px rgba(47, 95, 208, .32);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -46,6 +62,16 @@
       --accent: #7fa5f5;
       --screen: #0d1014;
       --screen-ink: #dde3ec;
+
+      --accent-ink: #0f1216;
+      --accent-soft: #1d2942;
+      --ready-soft: #142c22;
+      --degraded-soft: #2e2413;
+      --unavailable-soft: #2f1a19;
+      --raised: #1f242b;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 12px 30px -16px rgba(0, 0, 0, .75);
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, .35);
+      --focus: 0 0 0 3px rgba(127, 165, 245, .34);
     }
   }
 
@@ -471,6 +497,120 @@
   }
   .power button:hover { border-color: var(--unavailable); color: var(--unavailable); }
   .power button[disabled] { opacity: .55; cursor: default; }
+
+  /* --------------------------------------------------------------------------------
+     Style refresh.
+     Appended rather than woven in, deliberately: everything above states what this page
+     *is*, and every class, id and element it names is load-bearing -- three tests assert
+     that the script and the markup agree, and this page has twice reached a machine
+     broken. So this changes only how things look. It adds no element, renames nothing,
+     and sits at the end where the cascade lets it win without any selector being made
+     more specific to force it.
+     -------------------------------------------------------------------------------- */
+
+  body {
+    /* More air, and a background a white card can sit on top of rather than beside. */
+    padding: 0 1.25rem 4rem;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1 { font-size: 1.6rem; letter-spacing: -.02em; margin: 1.75rem 0 .25rem; }
+
+  /* Depth instead of outline. The border stays, for the dark theme and for anywhere a
+     shadow renders as nothing at all. */
+  .card, .hero, .error, .plex, .setup {
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .card { padding: 1.15rem 1.25rem; }
+  .card h3 { font-size: .72rem; letter-spacing: .1em; margin-bottom: .85rem; }
+
+  /* The hero carries the verdict, so it is tinted by its own state rather than being a
+     white box with a coloured stripe down one edge. */
+  .hero { padding: 1.4rem 1.5rem; border-left-width: 5px; }
+  .hero.ready       { background: linear-gradient(var(--ready-soft), var(--card) 60%); }
+  .hero.degraded    { background: linear-gradient(var(--degraded-soft), var(--card) 60%); }
+  .hero.unavailable { background: linear-gradient(var(--unavailable-soft), var(--card) 60%); }
+  .hero h2 { font-size: 1.65rem; letter-spacing: -.02em; }
+
+  /* One button treatment for the page. It was written three times -- in .plex, in .form
+     and in .power -- which is why the same control looked slightly different depending on
+     the card it was in. Those rules still apply; this restates what they had in common.
+     .power keeps its own hover, because stopping the machine should not look like every
+     other button on the page. */
+  .plex button, .form button, .power button {
+    border-radius: var(--radius-sm);
+    padding: .58rem .95rem;
+    font-weight: 600;
+    box-shadow: var(--shadow-sm);
+    transition: background-color .12s ease, border-color .12s ease,
+                box-shadow .12s ease, transform .06s ease;
+  }
+  .plex button:not(.ghost), .form button:not(.ghost) {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+  }
+  .plex button:not(.ghost):hover, .form button:not(.ghost):hover { filter: brightness(1.07); }
+  .plex button.ghost, .form button.ghost, .power button {
+    background: var(--card);
+    color: var(--ink);
+    border: 1px solid var(--line);
+  }
+  .plex button.ghost:hover, .form button.ghost:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .plex button:active, .form button:active, .power button:active { transform: translateY(1px); }
+  .plex button[disabled], .form button[disabled], .power button[disabled] {
+    box-shadow: none;
+    transform: none;
+    filter: none;
+  }
+
+  /* Focus that is visible on both themes, on every control the keyboard can reach. */
+  :is(button, input, select, a):focus-visible {
+    outline: none;
+    box-shadow: var(--focus);
+    border-radius: var(--radius-sm);
+  }
+
+  input[type="text"], input[type="password"], input[type="number"], select {
+    border-radius: var(--radius-sm);
+    background: var(--card);
+    color: var(--ink);
+  }
+
+  /* Tinted pills. A grey outline made every state look like the same state, and the
+     colour is what a person reads before the word beside it. */
+  .badge { border: 0; background: var(--raised); color: var(--muted); font-weight: 600; }
+  .badge.ready       { background: var(--ready-soft); color: var(--ready); }
+  .badge.degraded    { background: var(--degraded-soft); color: var(--degraded); }
+  .badge.unavailable { background: var(--unavailable-soft); color: var(--unavailable); }
+
+  .findings li { background: var(--raised); border-radius: var(--radius-sm); }
+  .disks li { background: var(--raised); border-radius: var(--radius-sm); }
+  .disks li.usable { box-shadow: inset 0 0 0 1px var(--accent); }
+
+  /* New markup in an old section: it has to read as part of the Plex card rather than as
+     a second card inside it. */
+  .versions {
+    margin-top: 1rem;
+    padding-top: .9rem;
+    border-top: 1px solid var(--line);
+  }
+  .versions p { margin: .6rem 0 0; }
+
+  .progress { border-radius: var(--radius-sm); background: var(--raised); }
+  .progress.failed { background: var(--unavailable-soft); }
+  .progress .log { border-radius: var(--radius-sm); }
+
+  footer { border-top: 1px solid var(--line); padding-top: 1rem; }
+
+  /* Nothing animates for somebody who has asked that it not. */
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
 </style>
 </head>
 <body>
@@ -1732,37 +1872,157 @@ function renderPlex(report) {
   }
 }
 
+/** The progress block for an installation, whatever started it.
+ *
+ * Extracted because it is now shown in three states rather than one: while installing on
+ * a fresh machine, while replacing a running Plex, and after either has failed. A running
+ * Plex used to hide it, which meant an upgrade that failed reported nothing at all.
+ */
+function progressMarkup(report, phase, busy) {
+  if (!busy && phase !== "failed") return "";
+  return `
+    <div class="progress ${phase === "failed" ? "failed" : ""}">
+      <span class="now">${esc(PHASES[phase] || phase)}${busy ? "…" : ""}</span>
+      <div>${esc(report.detail || "")}</div>
+      ${report.error ? `<div class="log">${esc(report.error)}</div>` : ""}
+      ${(report.log || []).length ? `<div class="log">${esc((report.log || []).slice(-12).join("\n"))}</div>` : ""}
+    </div>`;
+}
+
+/** Versions: what is installed, what Plex offers, and what is kept for going back.
+ *
+ * `latest_version` is absent until somebody asks, because answering it costs a fetch of
+ * Plex's catalogue and this report is polled every second. So the button says "Check for
+ * a new version" first, and only becomes an offer once there is something to offer.
+ *
+ * The comparison is deliberately string equality rather than a version ordering: the
+ * appliance already has one implementation of "which Plex is newer" in
+ * `plexos_plex::store`, and a second one written in JavaScript would be the place the two
+ * disagree. Equal means up to date; different means something is available, and the
+ * install path itself refuses to go backwards.
+ */
+function plexVersionsMarkup(report, busy) {
+  const installed = report.installed_version;
+  const latest = report.latest_version;
+  const newer = latest && installed && latest !== installed;
+
+  const offer = newer
+    ? `<p>Plex offers <span class="mono">${esc(latest)}</span>.</p>
+       <div class="row">
+         <button id="plex-update" ${busy ? "disabled" : ""}>Update to ${esc(latest)}</button>
+       </div>`
+    : latest
+      ? `<p class="hint">Plex offers <span class="mono">${esc(latest)}</span> — this
+           machine is up to date.</p>`
+      : "";
+
+  const kept = (report.kept_versions || []).length
+    ? `<p class="hint">Also kept, so a version can be gone back to:
+         <span class="mono">${esc((report.kept_versions || []).join(", "))}</span>.
+         ADR-0007 keeps the current image and one previous; older ones are removed after a
+         successful install.</p>`
+    : "";
+
+  return `
+    <div class="versions">
+      <div class="row">
+        <button id="plex-check" class="ghost" ${busy ? "disabled" : ""}>Check for a new version</button>
+        <button id="plex-reinstall" class="ghost" ${busy ? "disabled" : ""}>Reinstall the latest</button>
+      </div>
+      ${offer}
+      ${kept}
+    </div>`;
+}
+
+/** Wires the version controls, when they are on the page.
+ *
+ * Every listener is attached behind a presence check rather than assumed: this markup is
+ * rendered by two branches and the update button exists in neither until a check has
+ * found something. A page that reached for a missing element would throw inside the poll,
+ * which swallows it, and the section would simply stop updating -- the exact failure the
+ * repository already recorded once.
+ */
+function wirePlexVersionControls(report) {
+  const check = document.getElementById("plex-check");
+  if (check) check.addEventListener("click", checkPlexVersion);
+  const update = document.getElementById("plex-update");
+  if (update) update.addEventListener("click", startPlexInstall);
+  const reinstall = document.getElementById("plex-reinstall");
+  if (reinstall) reinstall.addEventListener("click", startPlexInstall);
+}
+
+/** Asks the appliance what Plex publishes. Installs nothing.
+ *
+ * The answer does not come back from this request: it lands on the next poll of
+ * /api/provision, the same way an installation's progress does. So there is nothing to
+ * read here beyond whether the appliance accepted the job.
+ */
+async function checkPlexVersion() {
+  const value = token();
+  if (!value) {
+    sectionError("plex", "Enter the device token above first. It was printed on the screen attached to this machine when it started.");
+    return;
+  }
+  const button = document.getElementById("plex-check");
+  if (button) button.disabled = true;
+
+  try {
+    const response = await fetch("/api/provision/check", {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Authorization": "Bearer " + value },
+    });
+    if (!response.ok) {
+      sectionError("plex", await response.text());
+      return;
+    }
+  } catch (error) {
+    sectionError("plex", error.message || String(error));
+    return;
+  }
+  plexTick();
+}
+
 function renderPlexInto(report) {
   const phase = report.phase || "idle";
   const busy = ["catalogue", "downloading", "verifying", "building", "starting"].includes(phase);
   const section = document.getElementById("plex");
 
   // Running Plex is the payoff, so it comes first and everything else is secondary.
+  //
+  // It used to be *all* there was: this branch rendered a heading, a sentence and a link,
+  // and returned. Every way of installing a version disappeared the moment one was
+  // installed, so there was no way to move to a newer Plex from the console at all -- the
+  // fourth time in this repository that a control was correct in the state it was written
+  // in and wrong in the state its own success produces.
   if (report.running) {
     section.innerHTML = `
       <h3>Plex Media Server</h3>
-      <p><strong>Running.</strong> Sign in and add your libraries from Plex itself.</p>
+      <p><strong>Running.</strong>${report.installed_version
+        ? ` Version <span class="mono">${esc(report.installed_version)}</span>.`
+        : ""} Sign in and add your libraries from Plex itself.</p>
       <a class="visit" target="_blank" rel="noopener noreferrer"
-         href="https://${esc(location.hostname)}${esc(report.web)}">Open Plex</a>`;
+         href="https://${esc(location.hostname)}${esc(report.web)}">Open Plex</a>
+      ${plexVersionsMarkup(report, busy)}
+      ${progressMarkup(report, phase, busy)}`;
+    wirePlexVersionControls(report);
     return;
   }
 
   if (report.installed) {
     section.innerHTML = `
       <h3>Plex Media Server</h3>
-      <p><strong>Installed, but not running.</strong> Nothing restarts it yet, so a
-         reboot of the appliance is the way to bring it back.</p>`;
+      <p><strong>Installed, but not running.</strong>${report.installed_version
+        ? ` Version <span class="mono">${esc(report.installed_version)}</span>.`
+        : ""} The supervisor restarts it, so this is either a start still in progress or a
+         Plex that will not start — the log below says which.</p>
+      ${plexVersionsMarkup(report, busy)}
+      ${progressMarkup(report, phase, busy)}`;
+    wirePlexVersionControls(report);
     return;
   }
 
-  const progress = busy || phase === "failed"
-    ? `<div class="progress ${phase === "failed" ? "failed" : ""}">
-         <span class="now">${esc(PHASES[phase] || phase)}${busy ? "…" : ""}</span>
-         <div>${esc(report.detail || "")}</div>
-         ${report.error ? `<div class="log">${esc(report.error)}</div>` : ""}
-         ${(report.log || []).length ? `<div class="log">${esc((report.log || []).slice(-12).join("\n"))}</div>` : ""}
-       </div>`
-    : "";
+  const progress = progressMarkup(report, phase, busy);
 
   section.innerHTML = `
     <h3>Plex Media Server</h3>
@@ -1915,7 +2175,13 @@ async function startPlexInstall() {
     sectionError("plex", "Enter the device token above first. It was printed on the screen attached to this machine when it started.");
     return;
   }
-  document.getElementById("plex-install").disabled = true;
+  // Whichever button was pressed, if it is on the page at all. Three now start this same
+  // install -- Install, Update and Reinstall -- and they never appear together, so naming
+  // one of them here would throw on the two states that do not have it.
+  for (const id of ["plex-install", "plex-update", "plex-reinstall"]) {
+    const button = document.getElementById(id);
+    if (button) button.disabled = true;
+  }
 
   try {
     const response = await fetch(PLEX_ENDPOINT, {

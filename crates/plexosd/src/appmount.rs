@@ -261,6 +261,75 @@ fn sha256(tools: &tools::MountTools, path: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Reads the app image store off the disk.
+///
+/// [`plexos_plex::store`] decides what the store *means* -- which version is current,
+/// which are superseded -- and deliberately opens no files, so that every retention rule
+/// is testable without one. This is the other half: the listing and the symlink target it
+/// needs. Keeping the split means a wrong answer here is a wrong reading of a directory,
+/// never a wrong policy.
+///
+/// A directory that is not there yet is an empty store rather than an error: that is every
+/// appliance until Plex is installed, and the console asks this on every poll.
+#[must_use]
+pub fn read_store(apps: &Path) -> plexos_plex::store::Store {
+    let entries: Vec<String> = std::fs::read_dir(apps)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+
+    // read_link rather than canonicalize: the link is relative and its target may have been
+    // removed by hand, and a store that describes a dangling `current` is more useful than
+    // one that refuses to describe anything.
+    let target = std::fs::read_link(apps.join(plexos_plex::store::CURRENT_LINK))
+        .ok()
+        .map(|path| {
+            path.file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
+        });
+
+    plexos_plex::store::Store::from_listing(&entries, target.as_deref())
+}
+
+/// Deletes the images ADR-0007's retention policy no longer keeps, and their records.
+///
+/// Called after a successful install, which is the only moment the answer changes. Returns
+/// what it removed, for the log.
+///
+/// Failures are collected rather than propagated: a full `/var` or a file held open must
+/// not turn a successful Plex install into a failed one. The cost of leaving an old image
+/// behind is disk space; the cost of failing here would be a machine that has the new Plex
+/// running and reports that installing it did not work.
+pub fn prune_superseded(apps: &Path, log: &mut dyn FnMut(&str)) -> Vec<String> {
+    let store = read_store(apps);
+    let Some(current) = store.current.clone() else {
+        // Nothing to be superseded *by*. Removing images while `current` names none would
+        // be deleting on the strength of a reading that already failed.
+        return Vec::new();
+    };
+
+    let mut removed = Vec::new();
+    for version in store.superseded(&current) {
+        let image = apps.join(version.image_name());
+        let record = apps.join(version.record_name());
+        match std::fs::remove_file(&image) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&record);
+                log(&format!("removed superseded Plex {}", version.raw));
+                removed.push(version.raw.clone());
+            }
+            Err(error) => log(&format!(
+                "could not remove superseded Plex {}: {error}. \
+                 Remedy: it is only disk space, and the next install will try again.",
+                version.raw
+            )),
+        }
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +339,95 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Lays out an apps directory: images, and what `current` points at.
+    fn apps_with(dir: &Path, images: &[&str], current: Option<&str>) {
+        for image in images {
+            std::fs::write(dir.join(image), b"not really an image").unwrap();
+            std::fs::write(dir.join(format!("{image}.sha256")), b"digest  name\n").unwrap();
+        }
+        if let Some(target) = current {
+            std::os::unix::fs::symlink(target, dir.join("current")).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_store_is_read_from_the_directory_and_the_symlink() {
+        let dir = scratch("read-store");
+        apps_with(
+            &dir,
+            &["1.42.2.10156.img", "1.43.3.10828.img"],
+            Some("1.43.3.10828.img"),
+        );
+
+        let store = read_store(&dir);
+        assert_eq!(store.installed.len(), 2);
+        assert_eq!(
+            store.current.map(|v| v.raw),
+            Some("1.43.3.10828".to_owned()),
+            "the current version comes from the link, not from the newest file"
+        );
+    }
+
+    #[test]
+    fn a_directory_that_does_not_exist_is_an_empty_store() {
+        // Every appliance until Plex is installed, and the console asks on every poll.
+        let store = read_store(&scratch("absent").join("never-created"));
+        assert!(store.installed.is_empty());
+        assert!(store.current.is_none());
+    }
+
+    #[test]
+    fn a_dangling_current_still_describes_what_is_on_disk() {
+        // An image removed by hand. Refusing to describe the store because the link is
+        // broken would hide the very images somebody would want to point it back at.
+        // Named for this test, not for what it is about: `scratch("dangling")` was already
+        // taken by a_dangling_current_link_is_distinguished_from_never_having_installed,
+        // and `scratch` deletes the directory before creating it -- so the two raced,
+        // each removing what the other had just written, and failed in whichever order the
+        // scheduler picked. Caught here while hunting a different flake entirely.
+        let dir = scratch("dangling-still-describes-disk");
+        apps_with(&dir, &["1.42.2.10156.img"], Some("1.99.9.9999.img"));
+
+        let store = read_store(&dir);
+        assert_eq!(store.installed.len(), 1, "the real image is still listed");
+    }
+
+    #[test]
+    fn pruning_keeps_the_current_image_and_one_previous() {
+        // ADR-0007's retention, exercised against a disk rather than a list. Three
+        // versions in, one comes out, and it is the oldest of the two that are not current.
+        let dir = scratch("prune-keeps-two");
+        apps_with(
+            &dir,
+            &["1.41.1.1000.img", "1.42.2.10156.img", "1.43.3.10828.img"],
+            Some("1.43.3.10828.img"),
+        );
+
+        let removed = prune_superseded(&dir, &mut |_| {});
+        assert_eq!(removed, vec!["1.41.1.1000".to_owned()]);
+        assert!(
+            dir.join("1.43.3.10828.img").exists(),
+            "the running one stays"
+        );
+        assert!(dir.join("1.42.2.10156.img").exists(), "the way back stays");
+        assert!(!dir.join("1.41.1.1000.img").exists());
+        assert!(
+            !dir.join("1.41.1.1000.img.sha256").exists(),
+            "the integrity record goes with its image, or it describes nothing"
+        );
+    }
+
+    #[test]
+    fn pruning_removes_nothing_when_current_names_nothing() {
+        // Deleting on the strength of a reading that already failed is how a retention
+        // policy takes down the version that works.
+        let dir = scratch("prune-no-current");
+        apps_with(&dir, &["1.41.1.1000.img", "1.42.2.10156.img"], None);
+
+        assert!(prune_superseded(&dir, &mut |_| {}).is_empty());
+        assert!(dir.join("1.41.1.1000.img").exists());
     }
 
     #[test]

@@ -330,6 +330,22 @@ pub struct Report {
     /// A port and a path rather than a whole URL: the page knows the host it was served
     /// from, and this appliance does not reliably know how it was reached.
     pub web: &'static str,
+    /// The version `current` points at: what is mounted, and what runs.
+    ///
+    /// Not the same as `progress.version`, which is the version of the last installation
+    /// *this daemon performed* and is `None` on every machine that has merely rebooted.
+    /// The page needs the version that is there, not the version something once installed.
+    pub installed_version: Option<String>,
+    /// Other versions still on disk, newest first, excluding the current one.
+    ///
+    /// ADR-0007 keeps one previous image, so this is normally empty or a single entry. It
+    /// is here so a person can see that going back is possible without reading `/var`.
+    pub kept_versions: Vec<String>,
+    /// The newest version Plex offers, once somebody has asked.
+    ///
+    /// Absent until a check is run: answering it means fetching Plex's catalogue over the
+    /// network, and this route is polled every second.
+    pub latest_version: Option<String>,
 }
 
 /// Plex's own web interface, relative to the appliance's address.
@@ -343,6 +359,13 @@ pub const PLEX_WEB: &str = ":32400/web";
 #[derive(Debug, Default)]
 pub struct Job {
     state: Mutex<Progress>,
+    /// The newest version Plex's catalogue offered, the last time anybody asked.
+    ///
+    /// Separate from `state` because it is not part of an installation: it survives one,
+    /// outlives one, and exists on a machine where none has ever run. Keeping it in
+    /// `Progress` would mean a completed install either wiped the answer or pretended to
+    /// have produced it.
+    latest: Mutex<Option<String>>,
 }
 
 impl Job {
@@ -350,6 +373,26 @@ impl Job {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The newest version Plex offers, if a check has been run since boot.
+    ///
+    /// # Panics
+    /// If a previous holder of the lock panicked; see [`Self::snapshot`].
+    #[must_use]
+    pub fn latest(&self) -> Option<String> {
+        self.latest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Records what a catalogue check found.
+    pub fn set_latest(&self, version: Option<String>) {
+        *self
+            .latest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = version;
     }
 
     /// The current state.
@@ -469,8 +512,33 @@ pub fn spawn(
         // Only after a successful build. Mounting and starting from an image that was
         // never published would run whatever the previous attempt left behind.
         if outcome.is_ok() {
-            job.step(Phase::Starting, "mounting the app image and starting Plex");
-            crate::plex::mount_and_start(&plex, &mut |line| job.note(line));
+            // Two different jobs wearing one name. With nothing running, the image is
+            // mounted and Plex is started. With a Plex already serving, the old one has to
+            // be stopped and its image unmounted first -- `swap` is exactly that sequence,
+            // and calling `mount_and_start` here instead would mount the new image over the
+            // old one and leave the console naming a version that is not the one running.
+            //
+            // `swap` was written for this, documented for this, and had no caller at all,
+            // which is why installing a newer Plex over a running one was not something the
+            // console offered: the machinery was complete and unreachable.
+            if plex.is_running() {
+                job.step(
+                    Phase::Starting,
+                    "replacing the running Plex with the new version",
+                );
+                crate::plex::swap(&plex, &mut |line| job.note(line));
+            } else {
+                job.step(Phase::Starting, "mounting the app image and starting Plex");
+                crate::plex::mount_and_start(&plex, &mut |line| job.note(line));
+            }
+
+            // After the swap, never before: `superseded` is asked which images the *active*
+            // version makes redundant, and until `current` points at the new one the honest
+            // answer names the version about to start. ADR-0007 keeps two.
+            crate::appmount::prune_superseded(
+                std::path::Path::new(plexos_types::paths::PLEX_APPS),
+                &mut |line| job.note(line),
+            );
         }
 
         guard.disarm();
@@ -513,6 +581,46 @@ impl Drop for Unfinished {
 const UNEXPECTED_END: &str = "the installation stopped unexpectedly, without saying why. Nothing was published, \
      so the machine is as it was before, and starting the installation again is safe. If \
      it happens a second time the fault is in PlexOS rather than in the download.";
+
+/// Asks Plex what the newest version is, and installs nothing.
+///
+/// The catalogue and the choice are the install path's own first two steps, called here
+/// rather than reimplemented: a check that picked a release by different rules could
+/// report an update that the install would then decline to fetch.
+///
+/// # Errors
+/// If curl is absent, the catalogue cannot be fetched, or it names nothing for this
+/// machine. Every one of those is worth showing: "could not check" and "you are up to
+/// date" are different answers and the page must not conflate them.
+pub fn check_latest() -> Result<String, Box<dyn std::error::Error>> {
+    let curl = tools::resolve("curl", &|p: &Path| p.exists()).ok_or_else(|| {
+        format!(
+            "curl is in none of {}, so the catalogue cannot be fetched. An offline \
+             appliance can still install from a file or from a USB stick.",
+            tools::PROGRAM_DIRS.join(", ")
+        )
+    })?;
+    let catalogue = fetch_text(&curl, CATALOGUE_URL, CATALOGUE_TIMEOUT_SECS)?;
+    Ok(pick(&catalogue)?.version)
+}
+
+/// Runs [`check_latest`] on a thread and records the answer on the job.
+///
+/// Spawned rather than awaited because the console polls: a route that blocked for the
+/// length of a network fetch would stall the page that is showing the result.
+pub fn spawn_check(job: &Arc<Job>) {
+    let job = Arc::clone(job);
+    std::thread::spawn(move || match check_latest() {
+        Ok(version) => {
+            job.note(&format!("Plex offers {version}"));
+            job.set_latest(Some(version));
+        }
+        Err(error) => {
+            job.note(&format!("could not check for a newer Plex: {error}"));
+            job.set_latest(None);
+        }
+    });
+}
 
 /// The whole pipeline, start to finish.
 ///

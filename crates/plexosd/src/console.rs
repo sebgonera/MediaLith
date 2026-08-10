@@ -79,6 +79,14 @@ pub fn respond(
         // in the browser with the install still running and no way to say so.
         ("POST", "/api/provision") => start_download(job, plex),
 
+        // Asking Plex what it publishes, and installing nothing. A POST because it reaches
+        // the network on the appliance's behalf, which is a thing a token should gate even
+        // though it changes no state here.
+        ("POST", "/api/provision/check") => {
+            crate::provision::spawn_check(job);
+            Response::json("{\"checking\":true}".to_owned())
+        }
+
         // ADR-0010's removable media, the half a browser cannot do. A scan is a GET
         // because it changes nothing -- it mounts read-only, looks, and unmounts -- and
         // because somebody diagnosing "why does it not see my stick" should not need a
@@ -207,15 +215,7 @@ pub fn respond(
         // Following one. Polled by the page every second or so, so it is deliberately
         // cheap: it reads a struct behind a mutex and serialises it.
         ("GET" | "HEAD", "/api/provision") => {
-            let mount = std::path::Path::new(plexos_types::paths::PLEX_MOUNT);
-            let report = crate::provision::Report {
-                progress: job.snapshot(),
-                installed: crate::plex::is_provisioned(mount),
-                running: plex.is_running(),
-                plex_log: plex.log(),
-                web: crate::provision::PLEX_WEB,
-            };
-            match serde_json::to_string(&report) {
+            match serde_json::to_string(&provision_report(job, plex)) {
                 Ok(json) => Response::json(json),
                 Err(error) => {
                     Response::text(500, format!("could not serialise progress: {error}\n"))
@@ -782,6 +782,42 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
         move |request, reader| upload_route(request, reader, &uploading_job, &uploading_plex),
         log,
     )
+}
+
+/// Everything `GET /api/provision` answers: the job, and the machine around it.
+///
+/// The store is read on every poll rather than cached, which is a directory listing and a
+/// `readlink` per second. That is cheap, and the alternative -- state held in the daemon --
+/// is the thing that goes stale exactly when it matters, because the version on disk
+/// changes underneath it during an install.
+fn provision_report(
+    job: &std::sync::Arc<crate::provision::Job>,
+    plex: &std::sync::Arc<crate::plex::Handle>,
+) -> crate::provision::Report {
+    let store = crate::appmount::read_store(std::path::Path::new(plexos_types::paths::PLEX_APPS));
+    let current = store.current.clone();
+
+    // Newest first, so the version a person would go back to is the one they read first.
+    let mut kept: Vec<String> = store
+        .installed
+        .iter()
+        .filter(|v| Some(*v) != current.as_ref())
+        .map(|v| v.raw.clone())
+        .collect();
+    kept.reverse();
+
+    crate::provision::Report {
+        progress: job.snapshot(),
+        installed: crate::plex::is_provisioned(std::path::Path::new(
+            plexos_types::paths::PLEX_MOUNT,
+        )),
+        running: plex.is_running(),
+        plex_log: plex.log(),
+        web: crate::provision::PLEX_WEB,
+        installed_version: current.as_ref().map(|v| v.raw.clone()),
+        kept_versions: kept,
+        latest_version: job.latest(),
+    }
 }
 
 /// Starts an installation that fetches the package from Plex.
@@ -1722,6 +1758,59 @@ mod tests {
         assert!(
             missing.is_empty(),
             "the script addresses elements that nothing creates: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn a_running_plex_is_still_offered_a_way_to_install_a_newer_one() {
+        // The defect this guards: the `report.running` branch of renderPlexInto rendered a
+        // heading, a sentence and a link, then returned. Every control disappeared the
+        // moment Plex was installed, so the console could install Plex exactly once and
+        // never move it forward again -- while the whole machinery for doing so
+        // (`plexos_plex::store`, `plex::swap`) sat complete, tested and uncalled.
+        //
+        // Asserting on the source is weaker than driving a browser, and it is what catches
+        // a `return` put back above the version controls.
+        let branch = PAGE
+            .split("if (report.running)")
+            .nth(1)
+            .expect("the running branch");
+        let branch = &branch[..branch.find("if (report.installed)").unwrap_or(branch.len())];
+
+        assert!(
+            branch.contains("plexVersionsMarkup"),
+            "a running Plex must still offer the version controls: {branch}"
+        );
+        assert!(
+            branch.contains("progressMarkup"),
+            "an upgrade that fails while Plex runs has to report it somewhere"
+        );
+    }
+
+    #[test]
+    fn the_version_controls_exist_for_every_button_they_wire() {
+        // wirePlexVersionControls checks each element before addEventListener, so a missing
+        // one is silent. That makes the markup the thing worth asserting on.
+        for id in ["plex-check", "plex-reinstall", "plex-update"] {
+            assert!(
+                PAGE.contains(&format!("id=\"{id}\"")),
+                "{id} is wired by the script and created by nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn starting_an_install_disables_whichever_button_started_it() {
+        // Three buttons now start the same install and they never appear together, so
+        // naming one would throw on the two states that do not have it -- inside a poll
+        // that swallows the exception, leaving a section that quietly stops updating.
+        let body = PAGE
+            .split("async function startPlexInstall()")
+            .nth(1)
+            .expect("startPlexInstall");
+        assert!(
+            body.contains("plex-install") && body.contains("plex-update"),
+            "the install must disable every button that can start it"
         );
     }
 
