@@ -16,3 +16,6 @@
 *.pem
 *.key
 secrets/
+
+# Agent working directory, including worktrees of this repository
+/.claude/
