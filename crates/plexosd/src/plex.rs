@@ -107,7 +107,11 @@ pub fn prepare(log: &mut dyn FnMut(&str)) -> io::Result<PathBuf> {
 /// Where Plex keeps the two files that can stop it starting for good.
 const PLEX_STATE: &str = "/var/lib/plex/Plex Media Server";
 
-/// Removes the leavings of an unclean stop, before they stop Plex for good.
+/// Repairs the leavings of an unclean stop, before they stop Plex for good.
+///
+/// Two faults with two remedies, and they are independent: an unusable `Preferences.xml`
+/// is put back from the preserved copy where there is one and taken away where there is
+/// not, and a stale pid file is always removed. Neither outcome excuses the other.
 ///
 /// # Why this is not Plex's problem to solve
 ///
@@ -133,18 +137,33 @@ const PLEX_STATE: &str = "/var/lib/plex/Plex Media Server";
 fn clear_wedged_state(state: &Path, log: &mut dyn FnMut(&str)) {
     let preferences = state.join("Preferences.xml");
     if std::fs::metadata(&preferences).is_ok_and(|meta| meta.len() == 0) {
-        match std::fs::remove_file(&preferences) {
-            Ok(()) => log(
-                "removed an empty Preferences.xml: Plex truncates and rewrites that file, \
-                 so a restart in between empties it, and Plex will not replace an empty \
-                 one with defaults. It writes a fresh one now.",
-            ),
-            Err(error) => log(&format!(
-                "could not remove the empty {}: {error}. Plex will log 'Failed to load \
-                 preferences' and not start. Remedy: delete it by hand.",
-                preferences.display()
-            )),
+        // Restoring is tried first, because deleting is only half a cure. It gets Plex
+        // to start, which is what this function was written for -- and it starts
+        // *unclaimed*, because the account token was in the file that was emptied. The
+        // machine then answers on 32400, passes the health gate, and reports its setup
+        // complete while every request to plex.tv comes back 401.
+        // Not an early return: the pid file below is a separate fault with a separate
+        // cause, and leaving it because the preferences happened to be recoverable would
+        // trade one wedged Plex for another.
+        if !restore_preferences(state, log) {
+            match std::fs::remove_file(&preferences) {
+                Ok(()) => log(
+                    "removed an empty Preferences.xml and had no preserved copy to put \
+                     back: Plex starts now, but signed out of its Plex account. Remedy: \
+                     open Plex and sign in again.",
+                ),
+                Err(error) => log(&format!(
+                    "could not remove the empty {}: {error}. Plex will log 'Failed to load \
+                     preferences' and not start. Remedy: delete it by hand.",
+                    preferences.display()
+                )),
+            }
         }
+    } else if !preferences.exists() {
+        // Absent rather than empty: a first start has none, and so does a machine whose
+        // file was deleted by the branch above on an earlier boot. Restoring is right in
+        // the second case and a no-op in the first, since nothing was ever preserved.
+        restore_preferences(state, log);
     }
 
     let pidfile = state.join("plexmediaserver.pid");
@@ -156,6 +175,106 @@ fn clear_wedged_state(state: &Path, log: &mut dyn FnMut(&str)) {
                  Remedy: delete it by hand.",
                 pidfile.display()
             )),
+        }
+    }
+}
+
+/// The copy of `Preferences.xml` kept against the file being emptied.
+///
+/// Beside the original, so it lives on `/var` and survives an OS update and a rollback,
+/// which is where the account token has to survive to be worth keeping at all.
+const PRESERVED_PREFERENCES: &str = "Preferences.xml.plexos-keep";
+
+/// Whether a preferences file carries a Plex account token.
+///
+/// The attribute has to be *present and non-empty*: Plex writes
+/// `PlexOnlineToken=""` on a server that has been signed out, and a copy of that is worth
+/// nothing — restoring it later would put the machine back exactly where it started while
+/// reporting that something had been recovered.
+fn carries_account_token(contents: &str) -> bool {
+    contents
+        .split("PlexOnlineToken=\"")
+        .nth(1)
+        .is_some_and(|rest| !rest.starts_with('"'))
+}
+
+/// Keeps a copy of `Preferences.xml` while it is known to be whole.
+///
+/// # Why a copy and not a longer grace
+///
+/// A longer grace makes the accident rarer; it cannot make it impossible. Power goes,
+/// kernels panic, and ADR-0005 reboots this machine deliberately. The file is under a
+/// kilobyte and holds the one thing on the appliance that cannot be recomputed from
+/// anything else — the library can be rescanned, the app image rebuilt, the token cannot
+/// be re-derived by any amount of work on this machine.
+///
+/// Only a file that carries a token is kept, and it replaces the previous copy. Keeping a
+/// tokenless one would overwrite a good copy with a useless one at exactly the wrong
+/// moment: the first restart after Plex was signed out.
+fn preserve_preferences(state: &Path, log: &mut dyn FnMut(&str)) {
+    let preferences = state.join("Preferences.xml");
+    let Ok(contents) = std::fs::read_to_string(&preferences) else {
+        return;
+    };
+    if !carries_account_token(&contents) {
+        return;
+    }
+
+    // Through a temporary name: a copy interrupted halfway is the failure being defended
+    // against, and writing straight over the preserved file would reproduce it here.
+    let destination = state.join(PRESERVED_PREFERENCES);
+    let temporary = state.join(format!("{PRESERVED_PREFERENCES}.new"));
+    let written = std::fs::write(&temporary, contents.as_bytes())
+        .and_then(|()| std::fs::rename(&temporary, &destination));
+
+    match written {
+        Ok(()) => log("kept a copy of Preferences.xml, which holds the Plex account token"),
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            log(&format!(
+                "could not keep a copy of Preferences.xml: {error}. If this stop empties \
+                 it, Plex starts signed out and has to be signed in again by hand."
+            ));
+        }
+    }
+}
+
+/// Puts the preserved `Preferences.xml` back, if there is one worth putting back.
+///
+/// Returns whether it did. Refuses a copy with no account token for the same reason
+/// [`preserve_preferences`] refuses to make one: it would announce a recovery that
+/// recovered nothing.
+fn restore_preferences(state: &Path, log: &mut dyn FnMut(&str)) -> bool {
+    let preserved = state.join(PRESERVED_PREFERENCES);
+    let Ok(contents) = std::fs::read_to_string(&preserved) else {
+        return false;
+    };
+    if !carries_account_token(&contents) {
+        return false;
+    }
+
+    let preferences = state.join("Preferences.xml");
+    let temporary = state.join("Preferences.xml.plexos-new");
+    let written = std::fs::write(&temporary, contents.as_bytes())
+        .and_then(|()| std::fs::rename(&temporary, &preferences));
+
+    match written {
+        Ok(()) => {
+            log(
+                "put the preserved Preferences.xml back: the live one was empty or gone, \
+                 which is what an interrupted stop leaves. Plex keeps its account instead \
+                 of starting signed out.",
+            );
+            true
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            log(&format!(
+                "could not restore {}: {error}. Plex starts signed out. Remedy: open Plex \
+                 and sign in again.",
+                preferences.display()
+            ));
+            false
         }
     }
 }
@@ -274,6 +393,53 @@ pub fn is_answering() -> bool {
         return false;
     };
     String::from_utf8_lossy(&head[..read]).contains(" 200 ")
+}
+
+/// Whether Plex is signed in to a Plex account.
+///
+/// Answering and claimed are **not** the same fact, and the console spent its life
+/// treating them as one: the setup step that says "Sign Plex in" was marked done as soon
+/// as Plex responded, so it could never report anything else, and `/api/setup` announced
+/// a machine ready while `servers.plex.tv` refused every request from it with a 401. A
+/// step that cannot fail is not a check.
+///
+/// `/identity` again, and again without a token, because an unclaimed server is exactly
+/// the case that must be readable. Plex renders `claimed="1"` there once an account owns
+/// it.
+///
+/// Deliberately a second connection rather than a wider [`is_answering`]: that probe
+/// feeds the boot health gate, reads 64 bytes on purpose, and is proven on hardware.
+/// Making it read a body to serve a different question is how a working thing acquires
+/// somebody else's failure modes.
+#[must_use]
+pub fn is_claimed() -> bool {
+    use std::io::{Read as _, Write as _};
+
+    let Ok(address) = LOOPBACK_ADDRESS.parse() else {
+        return false;
+    };
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&address, PROBE_TIMEOUT) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
+
+    if stream
+        .write_all(b"GET /identity HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+
+    // Bounded, and by more than the answer needs: /identity is a couple of hundred bytes,
+    // and a server that decides to send megabytes must not be able to make this the thing
+    // that stops the page loading.
+    let mut body = Vec::new();
+    if stream.take(4096).read_to_end(&mut body).is_err() {
+        return false;
+    }
+
+    String::from_utf8_lossy(&body).contains("claimed=\"1\"")
 }
 
 /// Waits for Plex to start answering, up to `timeout`.
@@ -438,6 +604,11 @@ impl Handle {
             return;
         };
 
+        // Before the signal, not after: Plex rewrites Preferences.xml *as part of*
+        // shutting down, so the last moment it is certainly whole is the moment before it
+        // is asked to stop.
+        preserve_preferences(Path::new(PLEX_STATE), log);
+
         match plexos_sys::power::terminate(child.id()) {
             Ok(()) => log(&format!("asked Plex (pid {}) to exit", child.id())),
             Err(error) => {
@@ -466,11 +637,55 @@ impl Handle {
             }
         }
 
+        // The old text here said "going ahead: its data is on a journalling filesystem",
+        // and that reasoning is what cost the machine its Plex account twice. A journal
+        // guarantees the *filesystem* is consistent, not that an application's rewrite of
+        // one file completed. What follows this function is sync, a read-only remount of
+        // /var and reboot(2) -- all of which reach a live Plex anyway. Killing it first is
+        // the only version of that where the moment writing stops is a moment we chose.
         log(&format!(
-            "Plex has not exited after {}s. Going ahead: its data is on a journalling \
-             filesystem and the alternative is refusing to turn the machine off.",
-            grace.as_secs()
+            "Plex has not exited {}s after being asked to. Killing it, because what \
+             follows -- sync, remounting {} read-only, reboot -- interrupts it regardless, \
+             and this way nothing writes after this point.",
+            grace.as_secs(),
+            plexos_types::paths::VAR,
         ));
+
+        match plexos_sys::power::kill(child.id()) {
+            Ok(()) => log(&format!("killed Plex (pid {})", child.id())),
+            Err(error) => {
+                log(&format!(
+                    "could not kill Plex (pid {}): {error}. It has most likely exited \
+                     between the last check and this signal, which is the good case.",
+                    child.id()
+                ));
+                return;
+            }
+        }
+
+        let deadline = std::time::Instant::now() + plexos_sys::power::KILL_GRACE;
+        while std::time::Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    log(&format!("Plex exited with {status}"));
+                    *held = None;
+                    return;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                Err(error) => {
+                    log(&format!(
+                        "could not wait for Plex after killing it: {error}"
+                    ));
+                    return;
+                }
+            }
+        }
+
+        log(
+            "Plex is still present after SIGKILL, which means the kernel is holding it in \
+             an uninterruptible sleep -- almost always I/O that has not come back. Going \
+             ahead; no further second would change that.",
+        );
     }
 
     /// What the confined child has said so far.
@@ -854,6 +1069,157 @@ mod tests {
             "a preferences file with content is not ours to delete"
         );
         assert!(std::fs::metadata(&path).unwrap().len() > 0);
+    }
+
+    /// A preferences file as Plex writes one for a server somebody has signed in.
+    fn signed_in(token: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\"?><Preferences MachineIdentifier=\"m\" \
+             PlexOnlineToken=\"{token}\" FriendlyName=\"PlexOS\"/>"
+        )
+    }
+
+    #[test]
+    fn an_account_token_is_only_recognised_when_it_has_a_value() {
+        // Plex writes the attribute with an empty value on a server that has been signed
+        // out. Treating that as a token would preserve a useless copy over a good one at
+        // the worst possible moment -- the first restart after the account was lost.
+        assert!(carries_account_token(&signed_in("abc123")));
+        assert!(!carries_account_token(
+            "<Preferences PlexOnlineToken=\"\" FriendlyName=\"PlexOS\"/>"
+        ));
+        assert!(!carries_account_token(
+            "<Preferences MachineIdentifier=\"m\"/>"
+        ));
+        assert!(!carries_account_token(""));
+    }
+
+    #[test]
+    fn a_preserved_preferences_file_is_put_back_when_a_stop_empties_the_live_one() {
+        // The whole point, and the failure it comes from: this happened twice on the
+        // reference laptop. Plex was left running when the machine rebooted, its
+        // Preferences.xml was caught between the truncate and the write, and the machine
+        // came back with Plex answering, unclaimed, and 401 from plex.tv for ever.
+        let state = scratch("preserve-and-restore");
+        std::fs::write(
+            state.join("Preferences.xml"),
+            signed_in("secret").as_bytes(),
+        )
+        .unwrap();
+
+        preserve_preferences(&state, &mut |_| {});
+        assert!(
+            state.join(PRESERVED_PREFERENCES).exists(),
+            "a file with a token is worth keeping"
+        );
+
+        // What an interrupted rewrite leaves behind.
+        std::fs::write(state.join("Preferences.xml"), b"").unwrap();
+
+        let mut said = Vec::new();
+        clear_wedged_state(&state, &mut |line| said.push(line.to_owned()));
+
+        let live = std::fs::read_to_string(state.join("Preferences.xml")).expect("restored");
+        assert!(
+            carries_account_token(&live),
+            "Plex must start owning its account again, not merely start"
+        );
+        assert!(said.iter().any(|line| line.contains("put the preserved")));
+    }
+
+    #[test]
+    fn restoring_the_preferences_still_clears_a_stale_pid_file() {
+        // The two faults arrive together, because they have the same cause: a stop that
+        // did not finish. An early return after a successful restore -- which is exactly
+        // what the first version of this did -- trades a Plex that starts signed out for a
+        // Plex that never opens its port, and the second is worse.
+        let state = scratch("restore-and-pid");
+        std::fs::write(
+            state.join(PRESERVED_PREFERENCES),
+            signed_in("secret").as_bytes(),
+        )
+        .unwrap();
+        std::fs::write(state.join("Preferences.xml"), b"").unwrap();
+        std::fs::write(state.join("plexmediaserver.pid"), b"164").unwrap();
+
+        clear_wedged_state(&state, &mut |_| {});
+
+        assert!(carries_account_token(
+            &std::fs::read_to_string(state.join("Preferences.xml")).expect("restored")
+        ));
+        assert!(
+            !state.join("plexmediaserver.pid").exists(),
+            "a recovered preferences file does not make the pid file harmless"
+        );
+    }
+
+    #[test]
+    fn a_missing_preferences_file_is_restored_too() {
+        // The state an earlier boot left when it deleted the empty file and had nothing to
+        // put back. Without this the copy would sit unused beside a Plex that spent every
+        // start signed out.
+        let state = scratch("restore-when-absent");
+        std::fs::write(
+            state.join(PRESERVED_PREFERENCES),
+            signed_in("secret").as_bytes(),
+        )
+        .unwrap();
+
+        clear_wedged_state(&state, &mut |_| {});
+        assert!(carries_account_token(
+            &std::fs::read_to_string(state.join("Preferences.xml")).expect("restored")
+        ));
+    }
+
+    #[test]
+    fn a_signed_out_server_does_not_overwrite_the_copy_that_could_save_it() {
+        // Restarting a machine that is already signed out must not destroy the only thing
+        // that could put it back. This is the ordering that makes the copy worth having at
+        // all, and it is the one a naive "always copy on stop" would get wrong.
+        let state = scratch("no-clobber");
+        std::fs::write(
+            state.join(PRESERVED_PREFERENCES),
+            signed_in("the-good-one").as_bytes(),
+        )
+        .unwrap();
+        std::fs::write(
+            state.join("Preferences.xml"),
+            b"<Preferences PlexOnlineToken=\"\"/>",
+        )
+        .unwrap();
+
+        preserve_preferences(&state, &mut |_| {});
+
+        let kept = std::fs::read_to_string(state.join(PRESERVED_PREFERENCES)).unwrap();
+        assert!(
+            kept.contains("the-good-one"),
+            "a tokenless file must not replace a good copy"
+        );
+    }
+
+    #[test]
+    fn a_live_preferences_file_that_is_whole_is_never_replaced_by_the_copy() {
+        // Restoring over a working file would undo a sign-in the moment the machine was
+        // restarted -- the same damage as the bug, arriving through the fix.
+        let state = scratch("no-restore-over-good");
+        std::fs::write(
+            state.join(PRESERVED_PREFERENCES),
+            signed_in("stale").as_bytes(),
+        )
+        .unwrap();
+        std::fs::write(
+            state.join("Preferences.xml"),
+            signed_in("current").as_bytes(),
+        )
+        .unwrap();
+
+        clear_wedged_state(&state, &mut |_| {});
+
+        let live = std::fs::read_to_string(state.join("Preferences.xml")).unwrap();
+        assert!(
+            live.contains("current"),
+            "the live file wins whenever it is whole"
+        );
     }
 
     #[test]

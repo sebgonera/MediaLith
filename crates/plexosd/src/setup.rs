@@ -21,8 +21,13 @@
 //!
 //! # What has run
 //!
-//! **Nothing on hardware.** The reference laptop is in exactly the state this describes —
-//! freshly installed by ADR-0016's installer, no Plex — which is the state to see it in.
+//! **All of it, on the reference laptop**, which has been through every step and reports
+//! them from `/api/setup`. It also found the limit of "it computes, it does not remember":
+//! computing is only as honest as the fact chosen, and the claim step was computed from
+//! whether Plex answered. That is true of every running Plex, so the step was done the
+//! moment Plex started and the appliance announced a finished setup while sitting signed
+//! out. A derived step cannot drift from the machine; it can still be derived from the
+//! wrong part of it.
 
 use std::path::Path;
 
@@ -75,23 +80,35 @@ pub struct Facts {
     pub plex: Plex,
 }
 
-/// The two things worth knowing about Plex, which are not the same thing.
+/// The three things worth knowing about Plex, and no two of them are the same thing.
 ///
 /// Installed and answering differ in both directions and for twenty seconds at a time:
 /// "install Plex" is the wrong advice for a server that is starting, and "it is starting"
 /// is the wrong advice for one that was never installed.
+///
+/// Answering and claimed differ for as long as nobody signs in — which on this appliance
+/// turned out to be *indefinitely*, because an interrupted stop can empty the file the
+/// account token lives in. This field exists because the step below used `answering` for
+/// the claim and therefore could never be anything but done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plex {
     /// Whether an app image is installed.
     pub installed: bool,
     /// Whether it is answering on loopback.
     pub answering: bool,
+    /// Whether a Plex account owns it.
+    pub claimed: bool,
 }
 
 impl Facts {
     /// Reads them off this machine.
     #[must_use]
     pub fn observe() -> Self {
+        // Asked once and used twice. The claim question is only worth putting to a server
+        // that is answering, and a second connection to a port with nothing behind it
+        // costs the page a timeout for an answer already known.
+        let answering = crate::plex::is_answering();
+
         Self {
             // If this is being asked, something reached the console. Reported anyway,
             // because the answer stops being obvious the moment somebody sets a static
@@ -101,7 +118,8 @@ impl Facts {
             has_shares: !crate::shares::states().is_empty(),
             plex: Plex {
                 installed: crate::plex::is_provisioned(Path::new(paths::PLEX_MOUNT)),
-                answering: crate::plex::is_answering(),
+                answering,
+                claimed: answering && crate::plex::is_claimed(),
             },
         }
     }
@@ -173,8 +191,13 @@ pub fn steps(facts: Facts) -> Vec<Step> {
         Step {
             id: "claim-plex",
             title: "Sign Plex in",
-            detail: if facts.plex.answering {
-                "Plex is answering. Open it and sign in to your Plex account to finish.".to_owned()
+            detail: if facts.plex.claimed {
+                "Signed in. Plex is owned by a Plex account.".to_owned()
+            } else if facts.plex.answering {
+                "Plex is answering but is not signed in to any Plex account, so remote \
+                 access and everything else it asks plex.tv for will fail. Open it and \
+                 sign in to finish."
+                    .to_owned()
             } else if facts.plex.installed {
                 "Plex is installed and not answering yet. It takes a moment on first start."
                     .to_owned()
@@ -201,7 +224,11 @@ fn mark(steps: &mut [Step], facts: Facts) {
         "identity" => facts.configured,
         "shares" => facts.has_shares,
         "plex" => facts.plex.installed,
-        "claim-plex" => facts.plex.answering,
+        // Not `answering`. That made this step complete itself the moment Plex opened its
+        // port, which is a step that cannot fail and therefore checks nothing -- and it
+        // hid a real appliance sitting signed out, reporting its setup complete, with
+        // plex.tv refusing every request it made.
+        "claim-plex" => facts.plex.claimed,
         _ => false,
     };
 
@@ -265,6 +292,7 @@ mod tests {
             plex: Plex {
                 installed: false,
                 answering: false,
+                claimed: false,
             },
         }
     }
@@ -277,6 +305,7 @@ mod tests {
             plex: Plex {
                 installed: true,
                 answering: true,
+                claimed: true,
             },
         }
     }
@@ -307,6 +336,54 @@ mod tests {
         let steps = steps(finished());
         assert!(complete(&steps));
         assert!(steps.iter().all(|s| s.state == State::Done));
+    }
+
+    #[test]
+    fn a_plex_that_answers_but_is_signed_out_leaves_the_setup_unfinished() {
+        // The defect this replaces, found on a real appliance: an interrupted stop emptied
+        // Preferences.xml, Plex started signed out, and the console reported the setup
+        // complete because the step was marked done from `answering`. The machine was
+        // getting 401 from plex.tv every five minutes while the page said it was ready.
+        let mut facts = finished();
+        facts.plex.claimed = false;
+
+        let steps = steps(facts);
+        assert!(
+            !complete(&steps),
+            "a setup whose last required step has not happened is not complete"
+        );
+
+        let claim = state_of(&steps, "claim-plex");
+        assert_eq!(claim.state, State::Next, "and it is the thing to do next");
+        assert!(
+            claim.detail.contains("not signed in"),
+            "the detail must say what is wrong rather than describe the state it is not \
+             in; it read 'Plex is answering' while sitting beside the word done"
+        );
+    }
+
+    #[test]
+    fn answering_is_never_enough_to_finish_the_claim_step() {
+        // Stated separately from the case above because it is the property that broke: the
+        // step used to be computed from a fact that is true of every running Plex, so it
+        // could not report anything but done and checked nothing at all.
+        for installed in [false, true] {
+            let facts = Facts {
+                reachable: true,
+                configured: true,
+                has_shares: true,
+                plex: Plex {
+                    installed,
+                    answering: true,
+                    claimed: false,
+                },
+            };
+            assert_ne!(
+                state_of(&steps(facts), "claim-plex").state,
+                State::Done,
+                "answering says a port is open, not that an account owns the server"
+            );
+        }
     }
 
     #[test]

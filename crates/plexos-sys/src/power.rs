@@ -10,7 +10,12 @@
 //!
 //! 1. **Stop what is writing.** Plex is asked to exit and given time to close its
 //!    database. A database killed with `SIGKILL` mid-write is the specific damage this
-//!    module exists to avoid.
+//!    module exists to avoid — but a process that outlasts the grace has to be killed
+//!    anyway, because the alternative is not "no `SIGKILL`", it is `reboot(2)` arriving
+//!    while it writes. That is the same damage with less control: after a kill nothing
+//!    can write again and step 2 flushes a settled disk, whereas a reboot can land
+//!    between a truncate and the write that follows it. The appliance learned this from
+//!    a `Preferences.xml` emptied twice.
 //! 2. **`sync`.** Everything still in the page cache reaches the disk.
 //! 3. **Remount `/var` read-only.** This is the step that turns "probably fine" into
 //!    "nothing was in flight". It fails harmlessly if something still holds a file open,
@@ -29,11 +34,26 @@
 use std::io;
 use std::path::Path;
 
-/// How long Plex is given to shut down before the machine goes anyway.
+/// How long Plex is given to shut down before it is killed.
 ///
-/// Ten seconds. Plex closes its database in well under that; a hung one must not leave
-/// somebody holding a power button after all, which is the situation being replaced.
-pub const GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+/// **Forty-five seconds, and ten was measured to be too short.** The claim that "Plex
+/// closes its database in well under that" was true of the Plex that had no library; the
+/// appliance's Plex has one, opens twenty database sessions, and twice failed to finish
+/// inside ten seconds — each time leaving a zero-length `Preferences.xml`, which costs the
+/// machine its Plex account.
+///
+/// Bounded at the other end by a person watching a page: a restart that takes minutes is
+/// one somebody interrupts with the power button, which is the situation this whole
+/// module replaces.
+pub const GRACE: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// How long a killed process is given to actually die.
+///
+/// `SIGKILL` is not instantaneous — the kernel still has to tear the process down, and
+/// until it has, its writes may not have settled. This is short because nothing can
+/// prevent it: an uninterruptible sleep that outlasts even this is a kernel problem, not
+/// one more second will fix it.
+pub const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Flushes every filesystem buffer to disk.
 ///
@@ -60,6 +80,31 @@ pub fn terminate(pid: u32) -> io::Result<()> {
     // vanished pid is reported as ESRCH rather than being undefined. Nothing in this
     // process's memory is touched.
     let result = unsafe { libc::kill(pid, libc::SIGTERM) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Ends a process that would not exit on its own.
+///
+/// `SIGKILL`, which cannot be caught or ignored. Reached only after [`GRACE`], and it is
+/// the *lesser* of the two remaining options: the other is `reboot(2)` landing on a
+/// process that is still writing. Killing first at least fixes the moment writing stops,
+/// so the [`sync`] that follows flushes a disk nothing is touching any more.
+///
+/// # Errors
+/// If the signal cannot be sent — in practice that the process exited between the check
+/// and here, which is the good case and is still worth saying rather than hiding.
+pub fn kill(pid: u32) -> io::Result<()> {
+    let pid = i32::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "pid does not fit in a pid_t"))?;
+
+    // SAFETY: identical to terminate() above -- kill() with a valid signal number is safe
+    // for any pid, a vanished one is reported as ESRCH rather than being undefined, and
+    // nothing in this process's memory is touched.
+    let result = unsafe { libc::kill(pid, libc::SIGKILL) };
     if result == 0 {
         Ok(())
     } else {
@@ -198,13 +243,20 @@ mod tests {
     #[test]
     fn the_grace_period_is_long_enough_to_close_a_database_and_short_enough_to_wait_for() {
         assert!(
-            GRACE.as_secs() >= 5,
-            "SQLite needs a moment to close cleanly"
+            GRACE.as_secs() >= 30,
+            "ten seconds was this value once, and the appliance emptied its \
+             Preferences.xml twice inside it -- Plex with a real library needs longer \
+             than Plex with none. The code is what changes if this fails."
         );
         assert!(
-            GRACE.as_secs() <= 30,
+            GRACE.as_secs() <= 90,
             "longer than this and somebody reaches for the power button anyway, which is \
              the situation this replaces"
+        );
+        assert!(
+            KILL_GRACE < GRACE,
+            "the kill is the fallback after the polite request, so it cannot be given \
+             more room than the request itself"
         );
     }
 }
