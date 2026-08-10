@@ -17,8 +17,9 @@
 #   610.57.04 against 6.19.14, EXIT=0, five modules, vermagic
 #   "6.19.14 SMP preempt mod_unload" -- the kernel this image actually boots.
 #
-# What has NOT been done is Buildroot driving that build. This file is the part
-# that is unproven, and the notice stays until a build has run it.
+# Buildroot has since driven it too: four modules installed and signed, checked by the
+# hooks below. What has NOT happened is any of it running on NVIDIA hardware -- the
+# RTX 5060 does not have PlexOS on it -- and that notice stays until it does.
 #
 # ---------------------------------------------------------------------------
 # Signing is not optional here
@@ -41,10 +42,14 @@
 # Not the whole driver
 # ---------------------------------------------------------------------------
 #
-# GSP firmware is requested at runtime from nvidia/$(VERSION)/gsp_ga10x.bin and is
-# NOT in this tarball -- it ships in NVIDIA's .run installer. Only two families are
-# ever asked for, gsp_tu10x for Turing and gsp_ga10x for Ampere and everything after
-# it, Blackwell included. That is ADR-0015 step 4 and deliberately not here.
+# GSP firmware is requested at runtime and is not in the source tarball, so it comes
+# from a second download -- see the section on it below. That is ADR-0015 step 4 and it
+# is now part of this package.
+#
+# What is still missing is the proprietary userspace: libnvcuvid and libnvidia-encode,
+# which are how Plex reaches NVDEC and NVENC. Without them this image can bind the card
+# and not transcode on it. Step 5, and the one that meets the project's unchosen
+# licence rather than NVIDIA's.
 #
 # The device nodes are step 2's finding and belong in plexos-init's plan, not in a
 # package: this driver registers with register_chrdev_region and never calls
@@ -95,6 +100,64 @@ PLEXOS_NVIDIA_LICENSE_FILES = COPYING
 # nobody checked.
 PLEXOS_NVIDIA_DEPENDENCIES = linux
 
+# ---------------------------------------------------------------------------
+# GSP firmware (ADR-0015 step 4), and why it comes from a second download
+# ---------------------------------------------------------------------------
+#
+# The open modules do not run without it. nvidia.ko requests it by name at runtime --
+# the strings are in the built module -- and it is not in the source tarball:
+#
+#     nvidia/610.57.04/gsp_ga10x.bin      81 MB   Ampere onwards, Blackwell included
+#     nvidia/610.57.04/gsp_tu10x.bin      29 MB   Turing
+#     nvidia/610.57.04/ucodes_ga10x.bin   31 KB
+#     nvidia/610.57.04/ucodes_tu10x.bin   12 KB
+#
+# Both families are carried. The alternative is an image that works on the card the
+# developer happened to own, which is the mistake the GuC/HuC firmware list already
+# made once and cost an evening to find. 110 MB is a real price and it is paid in
+# /usr -- a 1 GiB partition using 126 MiB before this -- not in the initramfs. Unlike
+# i915, this driver is a module loaded long after /usr is mounted, so the rule that
+# forces GuC/HuC into the initrd does not apply here.
+#
+# gsp_log_*.bin is also requested and deliberately absent: osinit.c calls its absence
+# non-fatal and it only silences GSP-RM logging.
+#
+# ---------------------------------------------------------------------------
+# The licence permits this, with two conditions, and one of them is code
+# ---------------------------------------------------------------------------
+#
+# NVIDIA Driver License Agreement 1.1(d) permits distributing the SOFTWARE for use
+# with an OS kernel under an OSI-approved licence -- Linux is GPL-2.0, so that holds --
+# "provided that (i) the binary files thereof are not modified in any way (except for
+# uncompressing of compressed files) and (ii) this Agreement is provided to each
+# SOFTWARE recipient."
+#
+# (i) is satisfied by copying the blobs untouched. (ii) is an obligation on the image
+# rather than on this file, so the agreement is installed beside the firmware where a
+# recipient can actually read it. An appliance that ships the firmware and not the
+# licence has not met the condition it is relying on.
+#
+# Note this is separate from the project's own unchosen licence. The clause is about
+# the *kernel's* licence, not the distribution's.
+PLEXOS_NVIDIA_RUN = NVIDIA-Linux-x86_64-$(PLEXOS_NVIDIA_VERSION).run
+PLEXOS_NVIDIA_EXTRA_DOWNLOADS = \
+	https://us.download.nvidia.com/XFree86/Linux-x86_64/$(PLEXOS_NVIDIA_VERSION)/$(PLEXOS_NVIDIA_RUN)
+
+PLEXOS_NVIDIA_FWDIR = /usr/lib/firmware/nvidia/$(PLEXOS_NVIDIA_VERSION)
+PLEXOS_NVIDIA_FIRMWARE = gsp_ga10x.bin gsp_tu10x.bin ucodes_ga10x.bin ucodes_tu10x.bin
+
+# The .run is a makeself archive: --extract-only is plain shell, tar and xz, so it does
+# not execute any of the payload and does not care what architecture the build host is.
+define PLEXOS_NVIDIA_EXTRACT_RUN
+	rm -rf $(@D)/.run-extracted
+	cd $(@D) && cp $(PLEXOS_NVIDIA_DL_DIR)/$(PLEXOS_NVIDIA_RUN) . && \
+		sh ./$(PLEXOS_NVIDIA_RUN) --extract-only --target .run-extracted >/dev/null && \
+		rm -f ./$(PLEXOS_NVIDIA_RUN)
+endef
+
+PLEXOS_NVIDIA_PRE_BUILD_HOOKS += PLEXOS_NVIDIA_EXTRACT_RUN
+
+
 # The module list, written out rather than globbed: a module appearing upstream is then
 # a deliberate decision here rather than something that arrives in an image because a
 # wildcard matched it. nvidia-peermem is left out -- RDMA between a GPU and an
@@ -134,6 +197,42 @@ define PLEXOS_NVIDIA_INSTALL_TARGET_CMDS
 			$(TARGET_DIR)$(PLEXOS_NVIDIA_MODDIR)/$$module.ko || exit 1; \
 	done
 endef
+
+define PLEXOS_NVIDIA_INSTALL_FIRMWARE
+	$(INSTALL) -d -m 0755 $(TARGET_DIR)$(PLEXOS_NVIDIA_FWDIR)
+	for blob in $(PLEXOS_NVIDIA_FIRMWARE); do \
+		$(INSTALL) -m 0644 -D $(@D)/.run-extracted/firmware/$$blob \
+			$(TARGET_DIR)$(PLEXOS_NVIDIA_FWDIR)/$$blob || exit 1; \
+	done
+	$(INSTALL) -m 0644 -D $(@D)/.run-extracted/LICENSE \
+		$(TARGET_DIR)/usr/share/licenses/nvidia/LICENSE
+endef
+
+PLEXOS_NVIDIA_POST_INSTALL_TARGET_HOOKS += PLEXOS_NVIDIA_INSTALL_FIRMWARE
+
+# The firmware is as necessary as the modules and absent for different reasons, so it
+# gets its own check rather than sharing one. A module that loads and then finds no
+# firmware leaves a card that does nothing, which is the same symptom as an unsigned
+# module and a different cause -- worth telling apart before somebody is looking at
+# hardware wondering which it is.
+define PLEXOS_NVIDIA_CHECK_FIRMWARE
+	@for blob in $(PLEXOS_NVIDIA_FIRMWARE); do \
+		test -s $(TARGET_DIR)$(PLEXOS_NVIDIA_FWDIR)/$$blob || { \
+			echo "plexos-nvidia: $$blob did not reach $(PLEXOS_NVIDIA_FWDIR)"; \
+			echo "  nvidia.ko requests it by that exact path at runtime; without it"; \
+			echo "  the module loads and the card does nothing."; \
+			exit 1; }; \
+	done; \
+	test -s $(TARGET_DIR)/usr/share/licenses/nvidia/LICENSE || { \
+		echo "plexos-nvidia: the NVIDIA licence did not reach the image."; \
+		echo "  Clause 1.1(d) permits redistributing this firmware only if the"; \
+		echo "  agreement is provided to each recipient. Shipping the blobs without"; \
+		echo "  it is not a packaging slip, it is the condition being unmet."; \
+		exit 1; }
+	@echo "plexos-nvidia: firmware and licence installed"
+endef
+
+PLEXOS_NVIDIA_POST_INSTALL_TARGET_HOOKS += PLEXOS_NVIDIA_CHECK_FIRMWARE
 
 
 # Checked rather than trusted, because the failure this catches is silent. A module

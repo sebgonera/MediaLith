@@ -2,3 +2,7 @@
 # kernel, before this package existed -- not copied from anywhere.
 sha256  619d7b5ce1f79c3211afdbf87d02b2174d268b10d005c5b8f994be22299be681  plexos-nvidia-610.57.04.tar.gz
 sha256  d8e96d29bc323000e7ba56102d77c88226a7a3d0d94e2081cb4b071ae9de4a06  COPYING
+# The driver installer, downloaded only for the GSP firmware inside it. Redistribution
+# is permitted by clause 1.1(d) provided the binaries are unmodified and the agreement
+# travels with them -- both of which the package enforces.
+sha256  b2e935c66b83bb00c0c857bc8e0ee0fd52de9286b40c9cc1eec29a7ce7eb116d  NVIDIA-Linux-x86_64-610.57.04.run
