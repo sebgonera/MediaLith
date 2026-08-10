@@ -173,7 +173,53 @@ CONFIG_SOUND=n
 CONFIG_DRM_NOUVEAU=n
 CONFIG_DRM_AMDGPU=n
 CONFIG_WIRELESS_WDS=n
-CONFIG_MODULES=n
+
+# --- Loadable modules, and this is a reversal ------------------------------
+# `CONFIG_MODULES=n` sat in the list above for the whole life of this project, with the
+# same reasoning as its neighbours. That reasoning is still true. It is outweighed, and
+# ADR-0015 step 1 is where the trade is written down: NVIDIA's open kernel modules are
+# out-of-tree, an out-of-tree driver cannot be built in, and the RTX machine is the one
+# piece of hardware here that has never been able to transcode.
+#
+# What it costs is a sentence this project has been able to say and now has to qualify.
+# The image was one artefact under one root hash and nothing else could enter the kernel.
+# Modules mean something can — so the two symbols below close it back up as far as it can
+# be closed.
+#
+# MODULE_SIG_FORCE is the one that matters: without it, signing is decoration, because a
+# kernel that merely *checks* a signature and loads the module anyway has checked nothing.
+# With it the kernel loads what was signed and refuses everything else, including anything
+# an attacker who reached /usr could put there -- which dm-verity already prevents, so the
+# honest accounting is that this buys little today and costs nothing, and stops being
+# decoration the moment a module lives anywhere verity does not cover.
+#
+# Built and booted ALONE, changing nothing else. A monolithic kernel that suddenly has a
+# module loader is a change worth isolating from the driver that motivated it: if the next
+# boot fails, this must be the only candidate.
+CONFIG_MODULES=y
+CONFIG_MODULE_UNLOAD=y
+CONFIG_MODULE_SIG=y
+CONFIG_MODULE_SIG_FORCE=y
+CONFIG_MODULE_SIG_ALL=y
+CONFIG_MODULE_SIG_SHA256=y
+
+# And the part that is not obvious, found by building this and looking rather than by
+# booting it: **turning modules on gives kconfig a third answer it did not have before**,
+# and it takes it. Nine things that were built in or absent became `=m` on the first
+# build, and this image has nothing that loads a module -- no modprobe, no kmod, and
+# MODULE_SIG_FORCE on top. A module here is a feature that is silently gone.
+#
+# `efivarfs` is the one that matters. plexos_sys::device mounts it at
+# /run/plexos-efivars to read LoaderDevicePartUUID, which is how PID 1 learns which ESP
+# the firmware actually booted -- the fix for a machine with two PlexOS disks, where
+# resolving by label had been a coin toss. As a module the mount returns ENODEV, the
+# lookup fails, and the boot falls back to exactly the behaviour that fix replaced. It
+# is invisible on a one-disk machine and it is the whole defence on a two-disk one.
+#
+# The rule this leaves behind is worth more than the symbol: after enabling MODULES,
+# check what became `=m` and pin anything the image depends on. `find target -name '*.ko'`
+# answers it in a second, and nothing else will say a word.
+CONFIG_EFIVAR_FS=y
 
 # ---------------------------------------------------------------------------
 # Note: wired Ethernet may arrive over USB
