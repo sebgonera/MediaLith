@@ -15,6 +15,54 @@ and also the kind of work that does not show up by itself.
 
 ---
 
+## Revision — 2026-08-10
+
+The audit was compiled on 2026-08-06 and reached `main` four days later. The body below
+is kept **exactly as written**: a record of what was true on a date is worth more than one
+quietly edited to stay flattering, and the sections that closed are evidence the list gets
+worked rather than admired. What changed in those four days is here instead, each line
+checked against the tree on the day of the merge rather than recalled.
+
+**Closed since:**
+
+- **§1.5, the licence half** — Apache-2.0, in `LICENSE`.
+- **§2.3 CI never runs** — `main` exists and is the default branch, so `ci.yml`'s push
+  trigger fires. The stale branches named there have been deleted; the repository now has
+  one line of history and no orphans. What remains of that section is the last sentence:
+  an image is still built only by hand, on a host that has the Buildroot tree.
+- **§2.4, the `xe` half** — `install_xe_firmware` in `post-image.sh` puts the whole
+  directory into the initrd under `xe/`, which is where the driver asks for it. The claim
+  about Arc has moved from "absent" to "shipped and unverified"; no such card has been
+  tried, and `post-image-test.sh` asserts the blobs rather than the hardware.
+- **§5, the `README.md` half** — rewritten to describe the system that exists.
+- **§2.1, two of three** — `remember_password` and `unmount_one` have callers now
+  (`shares.rs:1063` and `shares.rs:1116`). `kernel_says` still has none.
+- **§3.6, the NVIDIA half** — ADR-0015's spike happened on the RTX 5060 the section named:
+  it decodes with NVDEC and encodes with NVENC, and the GPU report answers the NVIDIA
+  question rather than the VA-API one.
+- **§4, the first bullet** — both halves of ADR-0010's offline path exist. A browser can
+  hand the appliance a package (`/api/provision/upload`, streamed to disk under a
+  `MAX_UPLOAD` of 256 MiB, with a button on the page), and a package can be chosen off
+  removable media (`/api/media`, `/api/provision/media`) — which is the half a browser
+  cannot do. Both end in the same verified pipeline as the download.
+- **§1.2, the decision half** — ADR-0017 chose own keys over shim, and `post-image.sh`
+  signs the bootloader as well as both UKIs. The other half is untouched and is now the
+  single most conspicuous gap in the trust chain: **no firmware has ever enrolled the key**,
+  so no machine has yet booted with Secure Boot enforcing. `PK` is what switches
+  enforcement on, and with only `db` enrolled the platform stays in Setup Mode while
+  reporting otherwise.
+
+**Re-verified as still open on 2026-08-10:** all of §1.1, §1.3 and §1.4; the name in §1.5;
+`kernel_says` in §2.1; the host-dependent terminal test in §2.2 — it passes on the build
+host and in CI and still opens the real `SHELL` and asserts a duration, so the finding is
+about what it measures, not about where it is red; the Wi-Fi firmware list in §2.4; and
+every part of §3.1 through §3.5.
+
+One number in §6 is stale in the direction that matters least: 331 passing tests have
+become 835.
+
+---
+
 ## 1. Release blockers
 
 Things that must be resolved before a unit ships to anybody who is not the author.

@@ -2,7 +2,8 @@
 
 An immutable, atomically-updated Linux appliance distribution built to run Plex Media
 Server well. Read `docs/ARCHITECTURE.md` first, then `docs/adr/` for why anything is
-the way it is.
+the way it is, and `docs/PRODUCTION-READINESS.md` for what still stands between this and
+a unit somebody else could be given.
 
 ## The one rule that shapes everything
 
@@ -136,21 +137,34 @@ be believed.
 written to be able to write, and exactly the capability set `plexos-gpu` predicted from
 the hardware alone months before Plex existed on the machine.
 
-Next, in order:
+Next, in order. The three items that stood here — `xe` firmware, upload from a local disk,
+and the NVIDIA spike — are all done, and all three sat here after they were done, which is
+the drift this file warns about happening to this file. The list now names one thing and
+then points at the document that tracks the rest, because a list kept in two places is a
+list that goes stale in one of them.
 
-1. **`xe` firmware is not in the image at all**, only `i915/`. Found while fixing the
-   GuC/HuC list. `CONFIG_DRM_XE=y`, so Arc parts bind — but a driver without its firmware
-   is the thing that cost an evening, and the claim that current Arc works today is softer
-   than it looked. Cheap, and unverifiable here: there is no Arc hardware.
+1. **Enrol a Secure Boot key in firmware, and boot with it enforcing.** The signing half is
+   proven: ADR-0017 chose own keys, `post-image.sh` signs the bootloader *and* both UKIs,
+   and a signed image booted. No firmware has ever enrolled the key, so nothing has yet
+   booted with Secure Boot on — and until something does, the kernel command line is
+   editable by anyone holding the machine, which quietly weakens every claim in the tree
+   that leans on the command line living inside a signed UKI. `PK` is what switches
+   enforcement on: with only `db` enrolled the platform stays in Setup Mode while the setup
+   screen reports otherwise. Both slots must carry signed UKIs before it is switched on, or
+   ADR-0005's rollback lands on a UKI the firmware refuses.
 
-2. **Upload from a local disk**, and the removable-media path of ADR-0010. Both were
-   asked for and both are deferred: an 83 MB upload has to stream to disk, and
-   `http::MAX_BODY` is deliberately 64 KiB so that route reads the socket itself.
+2. **`docs/PRODUCTION-READINESS.md`** — the distance between this and something that can be
+   handed to a person who did not build it, with a revision note recording what has closed
+   since it was written. Nothing in it is architectural. The items with no owner: a
+   development root key with no ceremony and no way to revoke *itself*, no update channel
+   or discovery, no clock synchronisation of any kind, nothing ever writing `/var/log`, no
+   free-space check anywhere on a `/var` whose largest writer is never pruned, and no
+   ceiling on connections.
 
-3. **NVIDIA (ADR-0015).** Planned in detail, deliberately unscheduled. The blocker is
-   `CONFIG_MODULES=n`, not the driver. Steps 1 and 2 of that ADR are about half a day and
-   answer most of the risk — and there is an RTX 5060 desktop, so it is the one remaining
-   item that could actually be verified on hardware.
+3. **Run the hardware that has never been run.** `xe` now has its firmware in the initrd
+   and no Arc card has ever been plugged in, so that claim is shipped-and-unverified rather
+   than false. The Wi-Fi firmware list still describes two chips, both of them this
+   laptop's — third appearance of the one-machine-list trap.
 
 ## Done, and proven on the machine (ADR-0016)
 
