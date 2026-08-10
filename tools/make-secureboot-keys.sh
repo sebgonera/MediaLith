@@ -81,25 +81,69 @@ for key in PK KEK db; do
   chmod 644 "${key}.crt" "${key}.cer"
 done
 
-# The EFI signature lists, when the tools for them are present. Not fatal if they are
-# not: the .cer files are enough for every firmware that offers "enrol key from file",
-# and efitools is not installed on most build hosts.
-if command -v cert-to-efi-sig-list >/dev/null && command -v sign-efi-sig-list >/dev/null; then
-  for key in PK KEK db; do
-    cert-to-efi-sig-list -g "$GUID" "${key}.crt" "${key}.esl"
-  done
-  # Each list signed by the level above it; PK signs itself, which is what UEFI expects
-  # of the root of its own hierarchy.
-  sign-efi-sig-list -g "$GUID" -k PK.key  -c PK.crt  PK  PK.esl  PK.auth
-  sign-efi-sig-list -g "$GUID" -k PK.key  -c PK.crt  KEK KEK.esl KEK.auth
-  sign-efi-sig-list -g "$GUID" -k KEK.key -c KEK.crt db  db.esl  db.auth
-  chmod 644 ./*.esl ./*.auth
-  echo "wrote .esl and .auth as well (efitools present)"
-else
-  echo "efitools not installed, so no .esl/.auth were written"
-  echo "  This is fine for enrolling by hand from the firmware's own file browser."
-  echo "  Install efitools if you want sbkeysync or KeyTool to do it instead."
+# The EFI signature lists and the authenticated updates.
+#
+# These are not an optional extra, which is what an earlier version of this script assumed.
+# It wrote the .crt and .cer and said, when efitools was absent, that this was "fine for
+# enrolling by hand" -- and it is not. A `.cer` is a bare certificate; what firmware is
+# asked to store in db is an **EFI signature list**, and what a authenticated write takes
+# is a **signed variable update**. Plenty of firmware offers "enrol key from file" and
+# then silently stores nothing when handed a format it does not parse, which is exactly
+# what happened: a key that appeared to be enrolled, a Secure Boot toggle that appeared to
+# be on, and a machine that booted with it off because the platform never left Setup Mode.
+#
+# So the tools are now obtained rather than hoped for, and their absence is fatal.
+ensure_efitools() {
+  command -v cert-to-efi-sig-list >/dev/null && command -v sign-efi-sig-list >/dev/null \
+    && return 0
+
+  # Debian and Ubuntu ship them in `efitools`, and neither downloading nor unpacking a
+  # .deb needs root -- so a build host without the package is not a reason to produce a
+  # partial set of keys.
+  command -v apt-get >/dev/null && command -v dpkg-deb >/dev/null || return 1
+
+  echo "efitools is not installed; fetching it without installing it..." >&2
+  local unpack
+  unpack=$(mktemp -d)
+  (
+    cd "$unpack" || exit 1
+    apt-get download efitools >/dev/null 2>&1 || exit 1
+    dpkg-deb -x ./efitools_*.deb . >/dev/null 2>&1 || exit 1
+  ) || { rm -rf "$unpack"; return 1; }
+
+  PATH="$unpack/usr/bin:$PATH"
+  export PATH
+  # Removed when the script exits, whichever way it exits.
+  trap 'rm -rf "$unpack"' EXIT
+  command -v cert-to-efi-sig-list >/dev/null && command -v sign-efi-sig-list >/dev/null
+}
+
+if ! ensure_efitools; then
+  echo "cannot produce .esl/.auth: cert-to-efi-sig-list and sign-efi-sig-list are missing" >&2
+  echo "  and could not be fetched. Remedy: apt install efitools, then run this again." >&2
+  echo "  The .crt and .cer above are written and usable for signing, but a key enrolled" >&2
+  echo "  from a bare .cer is one many firmwares accept and then do not store." >&2
+  exit 1
 fi
+
+for key in PK KEK db; do
+  cert-to-efi-sig-list -g "$GUID" "${key}.crt" "${key}.esl"
+done
+
+# Each list signed by the level above it; PK signs itself, which is what UEFI expects of
+# the root of its own hierarchy.
+sign-efi-sig-list -g "$GUID" -k PK.key  -c PK.crt  PK  PK.esl  PK.auth
+sign-efi-sig-list -g "$GUID" -k PK.key  -c PK.crt  KEK KEK.esl KEK.auth
+sign-efi-sig-list -g "$GUID" -k KEK.key -c KEK.crt db  db.esl  db.auth
+chmod 644 ./*.esl ./*.auth
+
+# Six files, or the set is not the set. Checked rather than assumed, because every tool
+# above exits 0 having written nothing if its input was not what it expected.
+for want in PK KEK db; do
+  for ext in esl auth; do
+    [ -s "${want}.${ext}" ] || { echo "${want}.${ext} was not written" >&2; exit 1; }
+  done
+done
 
 cat <<EOF
 
@@ -115,9 +159,22 @@ To build a signed image:
   export PLEXOS_SB_KEY=$DIR/db.key
   export PLEXOS_SB_CERT=$DIR/db.crt
 
-Then enrol db.cer in the machine's firmware, once, by hand. Until that is done the
-signed image will NOT boot with Secure Boot on -- the signature is present and the
-firmware has never heard of whoever made it. docs/DEVELOPMENT.md has the steps.
+To enrol, in this order, from the firmware's own setup screens:
+
+  1. db.auth   the key that signs the bootloader and the UKIs
+  2. KEK.auth  only once db is visibly listed in firmware
+  3. PK.auth   LAST -- this is what takes the platform out of Setup Mode and turns
+               enforcement ON. Until a PK is enrolled, Secure Boot is not enforced no
+               matter what the setup screen's toggle says, and the kernel will report
+               "Secure boot disabled" on a machine whose firmware claims it is enabled.
+
+Prefer .auth; fall back to .esl. A bare .cer is what many firmwares accept and then do
+not store, which looks identical to success until something checks. After each step,
+confirm the key is *listed* in firmware before going on to the next.
+
+Until db is really enrolled, a signed image boots exactly as an unsigned one did --
+the signature is present and the firmware has never heard of whoever made it.
+docs/DEVELOPMENT.md has the rest.
 
 Back these up. A machine that has enrolled this db and lost the key cannot be given a
 new signed image without going back into firmware setup.

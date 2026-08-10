@@ -349,14 +349,41 @@ sbverify --cert ~/.plexos-keys/secureboot/db.crt /tmp/boot.efi
 Nothing in PlexOS does this. It is a person, in the firmware's own setup screens, and that
 is deliberate — see ADR-0017.
 
-1. Copy `db.cer` somewhere the firmware can read: a FAT32 USB stick is the safe choice,
-   and the appliance's own ESP works on firmware that will browse it.
+1. Copy `db.auth`, `KEK.auth` and `PK.auth` somewhere the firmware can read. A FAT32 USB
+   stick is the safe choice; the appliance's own ESP works on firmware that will browse it.
 2. Enter firmware setup. Find Secure Boot, and put it in **Custom** or **Setup Mode** —
    the wording varies; what you are looking for is the mode in which the key databases can
    be edited at all.
-3. Enrol `db.cer` into **db**. Some firmware calls this "Enroll key from file", some
-   "Append", some hides it behind "Key Management".
-4. Turn Secure Boot back **on**, save, and boot.
+3. Enrol `db.auth` into **db**. Some firmware calls this "Enroll key from file", some
+   "Append", some hides it behind "Key Management". Then **look at the list** and confirm
+   `PlexOS Signature Database Key` is in it. Do not go on until it is.
+4. Enrol `KEK.auth` into **KEK**, and confirm it the same way.
+5. Enrol `PK.auth` into **PK** — **last**. This is the step that takes the platform out of
+   Setup Mode and switches enforcement on.
+6. Turn Secure Boot **on**, save, and boot.
+
+**Prefer `.auth`, fall back to `.esl`, and treat `.cer` as a last resort.** A `.cer` is a
+bare certificate; what firmware stores is an EFI signature list, and what an authenticated
+write takes is a signed variable update. Plenty of firmware offers "enrol key from file",
+accepts a `.cer` without complaint, and stores nothing — which is indistinguishable from
+success until something checks.
+
+### Confirming it actually took
+
+From a shell on the machine, after a reboot:
+
+```
+dmesg | grep -i 'secure boot'
+E=/sys/firmware/efi/efivars
+od -An -t u1 $E/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c   # 5th byte: 1 = enforcing
+od -An -t u1 $E/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c    # 5th byte: 0 = User Mode
+```
+
+`SetupMode = 1` means the platform is still in Setup Mode, and **in Setup Mode Secure Boot
+is never enforced no matter what the toggle in setup says**. That is the state a machine
+lands in when db was enrolled but PK was not, and it is quiet: the firmware reports Secure
+Boot as enabled, the kernel reports it disabled, and everything boots exactly as before.
+If `efivarfs` is not mounted, `mount -t efivarfs none /sys/firmware/efi/efivars` first.
 
 The reference laptop's firmware is a Huawei one; the option is under **Security → Secure
 Boot → Key Management**.

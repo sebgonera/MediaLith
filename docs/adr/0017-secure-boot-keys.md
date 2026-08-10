@@ -90,6 +90,37 @@ interesting target than anything the key protects.
   firmware's message will not mention PlexOS. That is the failure this needs documenting
   for, and `docs/DEVELOPMENT.md` documents it.
 
+## Found on the machine, after this was accepted
+
+Two things this ADR did not anticipate, both discovered by enrolling a key on the RTX
+appliance and watching what happened.
+
+**Enforcement is switched on by `PK`, not by the toggle.** Enrolling `db` and turning
+Secure Boot on in setup leaves a platform in **Setup Mode**, where Secure Boot is never
+enforced. The machine booted, the firmware reported Secure Boot as enabled, and the kernel
+reported `Secure boot disabled`. Nothing was wrong and nothing was being checked. The
+decision above is unaffected, but the order matters and the failure is silent, so
+`SetupMode` is now the thing to read rather than the setup screen.
+
+**A `.cer` is not what firmware stores.** The first enrolment attempt used the bare
+certificate this project published, and the db database stayed empty — the firmware
+accepted the file and kept nothing. What firmware stores is an EFI signature list
+(`.esl`), and an authenticated write takes a signed variable update (`.auth`).
+`tools/make-secureboot-keys.sh` now produces all three forms and treats failing to produce
+them as fatal; it had previously written the `.cer` alone and called that sufficient,
+which is the shape this repository keeps recording — a step that is correct in the state
+it was written in and wrong in the state that follows.
+
+**A network update never replaces the bootloader**, so a machine updated over the wire
+keeps the bootloader it was installed with, unsigned, for ever. Enabling Secure Boot on an
+existing appliance therefore needs either a reinstall or that one file replaced by hand.
+
+**Both slots must be signed before enforcement is turned on.** ADR-0005 hands a failed
+boot back to the other slot; if that slot's UKI is unsigned, the recovery path leads to a
+machine the firmware refuses, with nobody present. On the appliance this resolved itself —
+installing one more signed release pruned the older unsigned entry — but it is a
+precondition, not a coincidence to rely on.
+
 ## What has been demonstrated
 
 The build half, on the build host: `sbsign` over the bootloader and both UKIs, each
