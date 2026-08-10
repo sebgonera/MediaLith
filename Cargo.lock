@@ -258,6 +258,7 @@ dependencies = [
 name = "plexos-init"
 version = "0.1.0"
 dependencies = [
+ "plexos-gpu",
  "plexos-sys",
  "plexos-types",
 ]

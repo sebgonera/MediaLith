@@ -49,6 +49,7 @@ pub mod device;
 pub mod dm;
 pub mod hostname;
 pub mod landlock;
+pub mod module;
 pub mod mount;
 pub mod power;
 pub mod privilege;

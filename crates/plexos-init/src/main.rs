@@ -147,6 +147,17 @@ fn supervise_system() -> ExitCode {
         )),
     }
 
+    // NVIDIA, if there is one. Here rather than in the boot plan because the modules
+    // live in /usr and this is the first place /usr is certainly mounted, and because
+    // nothing about it should be able to stop a boot.
+    //
+    // There is no udev and no modprobe, so this is the thing ADR-0015 step 2 said would
+    // have to exist: the driver takes its majors with register_chrdev_region and never
+    // calls class_create, so devtmpfs makes no nodes and something has to. The uvm major
+    // is read from /proc/devices rather than assumed, because the kernel allocates it at
+    // load time -- proven on the RTX 5060, where it came back 241 while nvidia was 195.
+    plexos_init::nvidia::bring_up(&plexos_gpu::env::System, &mut |line| log.line(line));
+
     // ARCHITECTURE.md §2 step 6: services before the gate. Mounting Plex has to happen
     // first because step 7's verdict includes `plex-http`, and a gate that runs before
     // the thing it checks can only ever report NotApplicable — which is what it has

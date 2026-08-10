@@ -40,6 +40,7 @@
 pub mod clock;
 pub mod cmdline;
 pub mod execute;
+pub mod nvidia;
 pub mod plan;
 pub mod state;
 pub mod supervise;

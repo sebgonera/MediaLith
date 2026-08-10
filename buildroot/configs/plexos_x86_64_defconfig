@@ -149,6 +149,19 @@ BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_6E=y
 # Realtek USB Gigabit adapters (r8152). The reference laptop has no built-in Ethernet,
 # and a media server on wireless is not a serious configuration — see the note below.
 BR2_PACKAGE_LINUX_FIRMWARE_RTL_815X=y
+# And the PCIe side of the same vendor, which is a different symbol and was missing.
+# The RTX desktop's onboard NIC asked for it and did not get it:
+#
+#   r8169 0000:03:00.0: Unable to load firmware rtl_nic/rtl8168h-2.fw (-2)
+#
+# The link still came up at 1Gbps, which is why this would have gone unnoticed: r8169
+# falls back to running the PHY without the vendor's errata fixes and power-management
+# tables rather than refusing to work. Degraded and silent, like the GuC firmware and
+# for the same reason -- a firmware list assembled for the machines in the room.
+#
+# RTL_815X is the USB adapters (rtl8153*), which is what the reference laptop uses and
+# is why only that one was here.
+BR2_PACKAGE_LINUX_FIRMWARE_RTL_8169=y
 # The wireless regulatory database. cfg80211 asks for it as firmware; without it the
 # kernel uses the world domain, which is legal everywhere and weaker than the card is.
 BR2_PACKAGE_WIRELESS_REGDB=y
