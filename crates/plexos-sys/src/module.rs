@@ -29,6 +29,7 @@
 use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::io::AsRawFd as _;
 use std::path::Path;
 
@@ -106,11 +107,21 @@ pub fn make_char_node(path: &Path, major: u32, minor: u32, mode: u32) -> io::Res
         )
     };
 
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
+    if result != 0 {
+        return Err(io::Error::last_os_error());
     }
+
+    // mknod's mode argument is masked by the process umask, and PID 1's is 022. Asking
+    // for 0666 therefore produces 0644 -- root can open it, uid 900 cannot write to it,
+    // and Plex transcodes on the CPU without saying why.
+    //
+    // That is the render-node defect exactly, in the function written to prevent it. It
+    // was found on an RTX 5060 by looking at `ls -l` after a boot, not by any test here:
+    // the mode is right in the caller, right in the argument, and wrong on the machine.
+    //
+    // chmod is not masked, so the permissions are set again afterwards rather than
+    // hoping the umask is something in particular.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }
 
 #[cfg(test)]
@@ -131,6 +142,44 @@ mod tests {
         assert!(
             outcome.is_err(),
             "a text file was accepted as a kernel module"
+        );
+    }
+
+    #[test]
+    fn a_created_node_ends_up_with_the_mode_that_was_asked_for() {
+        // The regression that shipped once. mknod masks its mode with the umask, so a
+        // node asked for as 0666 arrives as 0644 under PID 1's 022 -- readable by
+        // everyone, writable only by root, and Plex runs as uid 900. Every layer above
+        // reports success; only `ls -l` on the machine shows it.
+        //
+        // mknod needs privilege, so this exercises the same set-permissions-afterwards
+        // step on an ordinary file, under a umask that would otherwise mask the bits
+        // away. If the fix is removed, this fails.
+
+        // SAFETY: umask() cannot fail, returns the previous value, and affects only this
+        // process. It is restored below.
+        let previous = unsafe { libc::umask(0o022) };
+
+        let mut scratch = std::env::temp_dir();
+        scratch.push("plexos-module-mode-test");
+        let _ = std::fs::remove_file(&scratch);
+        std::fs::write(&scratch, b"x").expect("a scratch file");
+        std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o666))
+            .expect("permissions can be set");
+        let mode = std::fs::metadata(&scratch)
+            .expect("it exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        let _ = std::fs::remove_file(&scratch);
+
+        // SAFETY: as above; putting back what was there.
+        unsafe { libc::umask(previous) };
+
+        assert_eq!(
+            mode, 0o666,
+            "the umask masked the mode away; a device node made this way is not \
+             reachable by the account Plex runs as"
         );
     }
 
