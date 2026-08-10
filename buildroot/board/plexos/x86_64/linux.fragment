@@ -82,6 +82,23 @@ CONFIG_VFAT_FS=y
 CONFIG_NLS_CODEPAGE_437=y
 CONFIG_NLS_ISO8859_1=y
 CONFIG_NLS_UTF8=y
+# exFAT, and it is not optional the moment ADR-0010's removable-media path exists.
+#
+# Windows formats anything above 32 GB as exFAT and offers no FAT32 option for it, so
+# "put the .deb on a USB stick" means exFAT on most sticks a person owns. Without this
+# the mount fails with EINVAL — an error about *arguments*, which says nothing about the
+# filesystem and is the same disguise CONFIG_NFS_V4_1 wore for four build cycles.
+#
+# The alternative is telling somebody to reformat a drive to install a media server,
+# which is not an alternative. In-tree since 5.7, and it needs the NLS tables above,
+# which are already here for the ESP.
+CONFIG_EXFAT_FS=y
+# ISO9660 as well: an image burned to a disc, or more usefully a .iso a person copied,
+# is the other thing a package arrives on.
+CONFIG_ISO9660_FS=y
+# ext4 for a stick formatted on a Linux machine, which is the case for anybody who would
+# be reading a Debian package in the first place.
+CONFIG_EXT4_FS=y
 # Partition labels are how plexos-init finds a slot (ADR-0003).
 CONFIG_EFI_PARTITION=y
 

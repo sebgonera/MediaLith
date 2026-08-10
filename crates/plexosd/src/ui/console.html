@@ -551,6 +551,11 @@ const PLEX_ENDPOINT = "/api/provision";
 // because this is the only request on this console that carries something large, and the
 // server has to know that before it reads a byte.
 const PLEX_UPLOAD_ENDPOINT = "/api/provision/upload";
+// Removable media: the scan needs no token because it changes nothing, and somebody
+// asking "why does it not see my stick" should not need one to find out. Installing from
+// what it found does.
+const MEDIA_ENDPOINT = "/api/media";
+const MEDIA_INSTALL_ENDPOINT = "/api/provision/media";
 const REFRESH_MS = 10000;
 
 // While an installation runs the page has something to say every second. The rest of the
@@ -1685,10 +1690,79 @@ function renderPlexInto(report) {
       <input type="file" id="plex-package" accept=".deb" ${busy ? "disabled" : ""}>
       <button id="plex-upload" ${busy ? "disabled" : ""}>Install from this file</button>
     </div>
+    <p class="hint">Or put the package on a USB stick and plug it into this machine —
+       for when the browser is not on the same network either.</p>
+    <div class="row">
+      <button id="plex-media-scan" class="ghost" ${busy ? "disabled" : ""}>Look for a package on a USB stick</button>
+    </div>
+    <div id="plex-media"></div>
     ${progress}`;
 
   document.getElementById("plex-install").addEventListener("click", startPlexInstall);
   document.getElementById("plex-upload").addEventListener("click", startPlexUpload);
+  document.getElementById("plex-media-scan").addEventListener("click", scanPlexMedia);
+}
+
+/** Looks for packages on removable media, and offers what it found.
+ *
+ * The paths this lists are deliberately not durable: the appliance mounts each volume,
+ * looks, and unmounts, so nothing is held open between two clicks and a stick can be
+ * pulled at any moment. Choosing one mounts again. That costs a second mount and buys a
+ * console that does not pin somebody's hardware while they think.
+ */
+async function scanPlexMedia() {
+  const out = document.getElementById("plex-media");
+  out.innerHTML = `<div class="progress"><span class="now">Looking…</span></div>`;
+  try {
+    const response = await fetch(MEDIA_ENDPOINT, { cache: "no-store" });
+    if (!response.ok) { out.innerHTML = `<div class="progress failed"><div>${esc(await response.text())}</div></div>`; return; }
+    const found = await response.json();
+    const packages = found.packages || [];
+    const skipped = (found.skipped || []).map(s => `<div>${esc(s)}</div>`).join("");
+
+    if (!packages.length) {
+      out.innerHTML = `<div class="progress failed"><span class="now">Nothing found</span>
+        <div>No .deb was found at the top level of any attached medium, or one directory
+          below it. Check the stick is plugged in and that the file is not inside a folder
+          within a folder.</div>${skipped}</div>`;
+      return;
+    }
+    out.innerHTML = `<div class="progress"><span class="now">Found ${packages.length}</span>` +
+      packages.map(p => `<div class="row"><span class="mono">${esc(p.name)}</span>
+        <span>${Math.round(p.bytes / (1024 * 1024))} MiB on ${esc(p.volume)}</span>
+        <button class="media-pick" data-path="${esc(p.path)}">Install this one</button></div>`).join("") +
+      skipped + `</div>`;
+    for (const button of out.querySelectorAll(".media-pick")) {
+      button.addEventListener("click", () => startPlexFromMedia(button.dataset.path));
+    }
+  } catch (e) {
+    out.innerHTML = `<div class="progress failed"><div>${esc(String(e))}</div></div>`;
+  }
+}
+
+/** Installs a package the scan found on a stick. */
+async function startPlexFromMedia(path) {
+  const value = token();
+  if (!value) {
+    sectionError("plex", "Enter the device token above first. It was printed on the screen attached to this machine when it started.");
+    return;
+  }
+  try {
+    const response = await fetch(MEDIA_INSTALL_ENDPOINT, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    if (!response.ok) {
+      plexError(await response.text());
+      return;
+    }
+  } catch (error) {
+    plexError(error.message || String(error));
+    return;
+  }
+  plexTick();
 }
 
 /** Sends a package the user already has, for a machine with no way to fetch one.

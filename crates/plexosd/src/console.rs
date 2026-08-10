@@ -79,6 +79,22 @@ pub fn respond(
         // in the browser with the install still running and no way to say so.
         ("POST", "/api/provision") => start_download(job, plex),
 
+        // ADR-0010's removable media, the half a browser cannot do. A scan is a GET
+        // because it changes nothing -- it mounts read-only, looks, and unmounts -- and
+        // because somebody diagnosing "why does it not see my stick" should not need a
+        // token to ask.
+        ("GET", "/api/media") => {
+            let running = crate::install::running_disk(env);
+            match serde_json::to_string(&crate::media::scan(env, running.as_deref())) {
+                Ok(body) => Response::json(body),
+                Err(error) => {
+                    Response::text(500, format!("could not describe the media: {error}\n"))
+                }
+            }
+        }
+
+        ("POST", "/api/provision/media") => start_from_media(request, env, job, plex),
+
         // Checking for, and installing, a new /usr. Same shape as provisioning and for
         // the same reason: the work is minutes and a request cannot be held open for it.
         ("POST", "/api/update") => {
@@ -797,6 +813,64 @@ fn start_download(
     Response::json("{\"started\":true}")
 }
 
+/// Installs from a package already on removable media.
+///
+/// The copy happens here rather than on the worker thread, and that is deliberate: a
+/// medium that cannot be read, or a path that is not on it, is a mistake somebody can fix
+/// in the next five seconds — so it is answered in the request rather than turned into a
+/// job that fails a moment later on a page they may have navigated away from.
+fn start_from_media(
+    request: &Request,
+    env: &impl plexos_gpu::env::Environment,
+    job: &std::sync::Arc<crate::provision::Job>,
+    plex: &std::sync::Arc<crate::plex::Handle>,
+) -> Response {
+    let body: serde_json::Value =
+        serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
+    let Some(path) = body.get("path").and_then(serde_json::Value::as_str) else {
+        return Response::text(
+            400,
+            "Choosing a package needs its path. Scan with GET /api/media and send one \
+             of the paths it lists, rather than typing one.\n",
+        );
+    };
+
+    if !job.begin() {
+        return Response::text(
+            409,
+            "An installation is already running on this machine. Watch it at \
+             GET /api/provision.\n",
+        );
+    }
+
+    let apps = std::path::Path::new(plexos_types::paths::PLEX_APPS);
+    let destination = apps.join(crate::provision::PACKAGE_FILE);
+
+    match crate::media::fetch(env, path, &destination) {
+        Err(error) => {
+            let _ = std::fs::remove_file(&destination);
+            // The job was claimed a moment ago and nothing else will end it, so it has to
+            // be released here or the console reports an installation for ever.
+            job.finish(Err(error.to_string()));
+            Response::text(400, format!("{error}\n"))
+        }
+        Ok(bytes) => {
+            job.note(&format!(
+                "copied {} MiB from removable media; nothing was downloaded",
+                bytes / (1024 * 1024)
+            ));
+            crate::provision::spawn(
+                job,
+                plex,
+                apps.to_path_buf(),
+                std::path::PathBuf::from(plexos_plex::verify::PLEX_KEYRING),
+                crate::provision::Source::Supplied,
+            );
+            Response::json("{\"started\":true}")
+        }
+    }
+}
+
 /// The one route that reads the socket itself, for the one thing too big to hold.
 ///
 /// Everything else this console accepts is a few hundred bytes of JSON, which is why
@@ -1350,6 +1424,41 @@ mod tests {
         assert!(
             PAGE.contains("application/octet-stream"),
             "the file goes as the request body itself"
+        );
+    }
+
+    #[test]
+    fn the_page_can_look_for_a_package_on_a_stick() {
+        // The last route in this project to be built and left uncalled was the auth gate,
+        // and it made every mutating request answer 503 for months. A media scanner with
+        // no button on the page is the same defect wearing different clothes.
+        assert!(
+            PAGE.contains("\"/api/media\""),
+            "the page must be able to scan"
+        );
+        assert!(
+            PAGE.contains("\"/api/provision/media\""),
+            "and to install what the scan found"
+        );
+        assert!(
+            PAGE.contains("id=\"plex-media-scan\""),
+            "with a control somebody can press"
+        );
+    }
+
+    #[test]
+    fn the_page_never_asks_somebody_to_type_a_path() {
+        // The route vets what it is given, and the vetting is what stops it reading
+        // /var/lib/plexos/device-token. A free-text path field would make that check the
+        // only thing standing between a typo and a refusal somebody would read as a bug,
+        // and would invite exactly the input the check exists to reject.
+        assert!(
+            !PAGE.contains("id=\"media-path\""),
+            "packages are chosen from the scan, never typed"
+        );
+        assert!(
+            PAGE.contains("data-path="),
+            "the choice carries the path the scan reported"
         );
     }
 

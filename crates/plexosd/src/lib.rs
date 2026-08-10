@@ -50,6 +50,7 @@ pub mod gate;
 pub mod health;
 pub mod http;
 pub mod install;
+pub mod media;
 pub mod net;
 pub mod netdiag;
 pub mod plex;
