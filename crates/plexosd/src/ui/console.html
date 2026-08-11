@@ -5592,6 +5592,7 @@ function renderUpdate(report) {
     <div class="row">
       <input type="text" id="update-source" placeholder="paste the address publish-update.sh prints"
              autocomplete="off" spellcheck="false" value="${esc(sessionStorage.getItem(SOURCE_KEY) || "")}">
+      <p class="hint" id="update-source-note" hidden></p>
     </div>
     <div class="row">
       <button id="update-check" ${busy ? "disabled" : ""}>Check</button>
@@ -5601,8 +5602,13 @@ function renderUpdate(report) {
 
   document.getElementById("update-check").addEventListener("click", () => startUpdate(false));
   document.getElementById("update-install").addEventListener("click", () => startUpdate(true));
-  document.getElementById("update-source").addEventListener("input",
-    event => sessionStorage.setItem(SOURCE_KEY, event.target.value));
+  document.getElementById("update-source").addEventListener("input", event => {
+    sessionStorage.setItem(SOURCE_KEY, event.target.value);
+    // The nudge goes as soon as it has been acted on. A hint that stays after it has been
+    // answered reads as an error that will not clear.
+    const note = document.getElementById("update-source-note");
+    if (note) note.hidden = true;
+  });
 
   if (typing) {
     const field = document.getElementById("update-source");
@@ -5618,9 +5624,29 @@ async function startUpdate(install) {
   }
   if (install && !confirm("Download and write a new system to the other slot?")) return;
 
-  const body = { install };
-  const source = (document.getElementById("update-source").value || "").trim();
-  if (source) body.source = source;
+  // An empty field is not an attempt that failed, so nothing is attempted. Said beside
+  // the field rather than in the section's error line, and the field is focused, because
+  // the answer to "what do I do" is "type here" and the cursor is the shortest way to say
+  // it. This used to POST, fail, and leave the card reading "Failed -- the update failed"
+  // at somebody who had not filled anything in.
+  const field = document.getElementById("update-source");
+  const source = (field.value || "").trim();
+  if (!source) {
+    const note = document.getElementById("update-source-note");
+    if (note) {
+      // No example address here. The page carries exactly one absolute URL -- Plex's own
+      // interface, built from this machine's host -- and a test enforces that, because a
+      // second one is how a CDN or a font sneaks in. An address typed into a hint is not
+      // one this appliance can vouch for anyway.
+      note.textContent =
+        "Paste the address that publish-update.sh prints on the build host. It ends in "
+        + "/medialith-update.";
+      note.hidden = false;
+    }
+    field.focus();
+    return;
+  }
+  const body = { install, source };
 
   try {
     const response = await fetch(UPDATE_ENDPOINT, {

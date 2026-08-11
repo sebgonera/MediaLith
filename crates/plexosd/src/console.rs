@@ -188,6 +188,21 @@ pub fn respond(request: &Request, env: &impl Environment, services: &Services) -
         // Checking for, and installing, a new /usr. Same shape as provisioning and for
         // the same reason: the work is minutes and a request cannot be held open for it.
         ("POST", "/api/update") => {
+            // Before a job exists, and that ordering is the whole of this fix. An empty
+            // source used to start an update, which then failed, which left the console
+            // saying "Failed — the update failed" about somebody who had simply not filled
+            // in a field yet. A missing argument is a bad request; it is not a failed
+            // update, and it must not leave a failed update behind for the page to draw.
+            let source = crate::update::source_in(&request.body);
+            if source.trim().is_empty() {
+                return Response::text(
+                    400,
+                    "no update source was given. Remedy: paste the address that \
+                     tools/publish-update.sh prints on the build host, then press the \
+                     button again. Guessing where to fetch a whole operating system from \
+                     is not something this appliance will do.\n",
+                );
+            }
             if !update.begin() {
                 return Response::text(
                     409,
@@ -195,7 +210,7 @@ pub fn respond(request: &Request, env: &impl Environment, services: &Services) -
                 );
             }
             let install = crate::update::wants_install(&request.body);
-            crate::update::spawn(update, crate::update::source_in(&request.body), install);
+            crate::update::spawn(update, source, install);
             Response::json(format!("{{\"install\":{install}}}"))
         }
 
