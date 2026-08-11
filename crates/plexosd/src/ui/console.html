@@ -48,9 +48,30 @@
     --radius: 12px;
     --radius-sm: 9px;
     --focus: 0 0 0 3px rgba(47, 95, 208, .32);
+
+    /* The chrome around the views: the bar across the top and the column down the side.
+       A step away from the page rather than a colour of its own, so the cards stay the
+       thing being looked at. */
+    --shell: #eef1f5;
+    --header-h: 3.5rem;
+    --nav-w: 14rem;
   }
+  /* ------------------------------------------------------------------------------------
+     The dark palette, written twice, and deliberately.
+
+     There are three states, not two: "dark", "light", and the default — no choice made, so
+     the operating system decides. An explicit choice stamps `data-theme` on the root
+     element; the default stamps nothing. So the media query has to be *guarded* against a
+     root that says "light", or a person who chose light on a machine set to dark would get
+     dark anyway; and the attribute selector has to exist separately, or a person who chose
+     dark on a machine set to light would get nothing.
+
+     The two blocks are identical on purpose. A shared block would need a selector list
+     naming both conditions, and a media query cannot be one of the things in a selector
+     list. This is what CSS costs for a three-state toggle with no build step to expand it.
+     ------------------------------------------------------------------------------------ */
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
       --bg: #14171b;
       --card: #1c2026;
       --ink: #e8eaed;
@@ -69,23 +90,52 @@
       --degraded-soft: #2e2413;
       --unavailable-soft: #2f1a19;
       --raised: #1f242b;
+      --shell: #171b21;
       --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 12px 30px -16px rgba(0, 0, 0, .75);
       --shadow-sm: 0 1px 2px rgba(0, 0, 0, .35);
       --focus: 0 0 0 3px rgba(127, 165, 245, .34);
     }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14171b;
+    --card: #1c2026;
+    --ink: #e8eaed;
+    --muted: #98a1ad;
+    --line: #2c323a;
+    --ready: #4ecb8b;
+    --degraded: #e0a83a;
+    --unavailable: #ef6a63;
+    --accent: #7fa5f5;
+    --screen: #0d1014;
+    --screen-ink: #dde3ec;
+
+    --accent-ink: #0f1216;
+    --accent-soft: #1d2942;
+    --ready-soft: #142c22;
+    --degraded-soft: #2e2413;
+    --unavailable-soft: #2f1a19;
+    --raised: #1f242b;
+    --shell: #171b21;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 12px 30px -16px rgba(0, 0, 0, .75);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, .35);
+    --focus: 0 0 0 3px rgba(127, 165, 245, .34);
   }
 
   * { box-sizing: border-box; }
 
   body {
     margin: 0;
-    padding: 0 1rem 3rem;
+    padding: 0;
     background: var(--bg);
     color: var(--ink);
     font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
 
-  .wrap { max-width: 60rem; margin: 0 auto; }
+  /* Full width now, because the width is decided inside: the header spans the window, the
+     sidebar is a fixed column, and it is the view that is capped. A cap here would have left
+     the sticky bar floating in the middle of a wide screen with the page's background
+     showing on both sides of it. */
+  .wrap { max-width: none; margin: 0; }
 
   /* A folded card keeps its heading and loses its body, and the heading is the control —
      there is no separate affordance to find, because a chevron on a bar people already
@@ -118,27 +168,163 @@
   header {
     position: sticky;
     top: 0;
-    z-index: 20;
+    z-index: 30;
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
-    gap: .5rem .75rem;
-    padding: .8rem 0 .7rem;
-    background: var(--bg);
+    gap: .5rem .7rem;
+    height: var(--header-h);
+    padding: 0 1rem;
+    background: var(--card);
     border-bottom: 1px solid var(--line);
   }
-  header h1 { margin: 0; font-size: 1.25rem; letter-spacing: -.01em; }
-  header .version { color: var(--muted); font-size: .85rem; }
+  /* The product name, and it is a wordmark rather than a heading that grows: this bar has a
+     fixed height and everything in it has to survive a 390 px screen. */
+  header h1 {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 700;
+    letter-spacing: -.01em;
+    white-space: nowrap;
+  }
+  header .version { color: var(--muted); font-size: .8rem; white-space: nowrap; }
+
+  /* The facts between the name and the controls. They scroll rather than wrap, because the
+     bar is a fixed height: a header that grew a second line on a narrow screen would push
+     the page down by its own height at exactly the width where there is least of it. */
+  header .facts {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  header .facts::-webkit-scrollbar { display: none; }
+
   /* The right-hand group: pushed over, and kept together when the header wraps on a narrow
      screen so the controls never end up split across two lines. */
   header .aside {
     margin-left: auto;
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
-    gap: .5rem;
+    flex-wrap: nowrap;
+    gap: .4rem;
   }
-  header .aside button { padding: .4rem .7rem; font-size: .85rem; }
+  header .aside button {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+    padding: .35rem .65rem;
+    font-size: .82rem;
+    white-space: nowrap;
+  }
+  header .aside button svg { width: 15px; height: 15px; flex: 0 0 auto; }
+
+  /* The hamburger. Present only where the sidebar is not. */
+  #nav-toggle {
+    display: none;
+    padding: .35rem .5rem;
+    line-height: 0;
+  }
+
+  /* The lock. Two states and they must not be told apart by colour alone -- the word
+     changes, and so does the icon. */
+  #admin-lock { padding: .35rem .7rem; font-size: .82rem; white-space: nowrap; }
+  #admin-lock .dot { color: var(--ready); font-size: 1.1em; line-height: 0; }
+  #admin-lock[data-state="unlocked"] { border-color: var(--ready); color: var(--ready); }
+
+  /* Appearance, at the foot of the sidebar. Pushed to the bottom on a screen tall enough to
+     have one, so it is never among the things being chosen between. */
+  .navfoot { margin-top: 1.5rem; padding: .8rem .6rem 0; border-top: 1px solid var(--line); }
+  .navfoot .group { display: block; margin: 0 0 .3rem; padding: 0; }
+  #theme {
+    width: 100%;
+    padding: .35rem .4rem;
+    font: inherit;
+    font-size: .82rem;
+    border: 1px solid var(--line);
+    color: var(--ink);
+  }
+
+  /* ------------------------------------------------------------------------------------
+     The shell: a column of navigation beside the views.
+
+     `min-height: 0` on the content column is not decoration. A grid item's floor is its
+     content, so one wide table -- and this page has several -- would widen the track and
+     push the whole page sideways rather than scrolling inside its own box.
+     ------------------------------------------------------------------------------------ */
+  .shell {
+    display: grid;
+    grid-template-columns: var(--nav-w) minmax(0, 1fr);
+    align-items: start;
+    gap: 0;
+  }
+
+  .sidebar {
+    position: sticky;
+    top: var(--header-h);
+    height: calc(100vh - var(--header-h));
+    overflow-y: auto;
+    padding: .9rem .6rem;
+    background: var(--shell);
+    border-right: 1px solid var(--line);
+  }
+  .sidebar .group {
+    margin: 1.1rem 0 .35rem;
+    padding: 0 .6rem;
+    font-size: .68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .09em;
+    color: var(--muted);
+  }
+  .sidebar .group:first-child { margin-top: 0; }
+
+  /* The navigation items are styled further down, after the base `button` rule they have to
+     out-rank. See the note there: this is a specificity problem, not a tidiness one. */
+
+  .content {
+    min-width: 0;
+    padding: 1.25rem 1.25rem 4rem;
+  }
+  .content > .view { max-width: 74rem; }
+
+  /* Only the current one is in the document's flow. `hidden` rather than a class, because
+     an element that is `hidden` is out of the accessibility tree as well as off the screen
+     -- a sidebar that tabbed into six invisible views would be worse than no sidebar. */
+  .view[hidden] { display: none; }
+
+  .view > h2 {
+    margin: 0 0 .2rem;
+    font-size: 1.25rem;
+    letter-spacing: -.01em;
+  }
+  .view > .lede {
+    margin: 0 0 1.1rem;
+    color: var(--muted);
+    font-size: .92rem;
+    max-width: 44rem;
+  }
+
+  /* Sections inside a view are stacked with air between them and nothing else: the card is
+     already the grouping, so a second border around a group of them is one line too many. */
+  .view .card { margin-bottom: 1rem; }
+  /* Anything the browser is asked to scroll to clears the sticky bar first. */
+  .card, .view { scroll-margin-top: calc(var(--header-h) + .75rem); }
+
+  /* The skip link. Off screen until it has the focus, which is the one moment it is for. */
+  .skip {
+    position: absolute;
+    left: -9999px;
+    z-index: 40;
+    padding: .6rem .9rem;
+    background: var(--accent);
+    color: var(--accent-ink);
+    border-radius: 0 0 var(--radius-sm) 0;
+    text-decoration: none;
+  }
+  .skip:focus { left: 0; top: 0; }
 
   .badge {
     font-size: .75rem;
@@ -703,13 +889,7 @@
      more specific to force it.
      -------------------------------------------------------------------------------- */
 
-  body {
-    /* More air, and a background a white card can sit on top of rather than beside. */
-    padding: 0 1.25rem 4rem;
-    -webkit-font-smoothing: antialiased;
-  }
-
-  h1 { font-size: 1.6rem; letter-spacing: -.02em; margin: 1.75rem 0 .25rem; }
+  body { -webkit-font-smoothing: antialiased; }
 
   /* Depth instead of outline. The border stays, for the dark theme and for anywhere a
      shadow renders as nothing at all. */
@@ -780,6 +960,52 @@
     filter: none;
   }
 
+  /* ------------------------------------------------------------------------------------
+     A navigation item is a button, not a link with an href this page then has to cancel:
+     nothing here navigates between documents, so nothing here should announce itself to a
+     keyboard or a screen reader as though it does.
+
+     Written as `button.navitem` and placed *after* the base rule above, and both halves are
+     needed. `.navitem` alone is one class and loses to `button:not(.ghost)`, which is an
+     element and a class — so the first version of this sidebar rendered as seven solid blue
+     buttons, which is what the base rule says a button looks like and is exactly what it was
+     written to guarantee. Equal specificity plus later in the sheet is what wins, and it
+     wins without naming where the button is.
+     ------------------------------------------------------------------------------------ */
+  button.navitem {
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    width: 100%;
+    margin-bottom: .12rem;
+    padding: .5rem .6rem;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    box-shadow: none;
+    color: var(--ink);
+    font: inherit;
+    font-size: .92rem;
+    font-weight: 500;
+    text-align: left;
+    cursor: pointer;
+  }
+  button.navitem:hover { background: var(--card); filter: none; }
+  button.navitem svg { flex: 0 0 auto; width: 18px; height: 18px; color: var(--muted); }
+  button.navitem[aria-current="page"] {
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  button.navitem[aria-current="page"] svg { color: var(--accent); }
+  /* A count or a state, on the right of the item that owns it. */
+  button.navitem .tail { margin-left: auto; font-size: .75rem; color: var(--muted); }
+  button.navitem .tail.bad { color: var(--unavailable); }
+  button.navitem .tail.warn { color: var(--degraded); }
+
+  /* Same problem, same answer: these two are buttons that must not look like one. */
+  button.linkish, button.linkish:hover { background: none; border: 0; box-shadow: none; }
+
   /* Focus that is visible on both themes, on every control the keyboard can reach. */
   :is(button, input, select, a):focus-visible {
     outline: none;
@@ -819,35 +1045,351 @@
 
   footer { border-top: 1px solid var(--line); padding-top: 1rem; }
 
+  /* ------------------------------------------------------------------------------------
+     The four cards at the top of the Overview.
+
+     Each answers one question in one glance, and the answer is a *state* before it is a
+     number: the strip down the left edge carries it, so the four read as a row of
+     indicators from across a room and as four cards from a desk.
+     ------------------------------------------------------------------------------------ */
+  .summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    gap: .9rem;
+    margin-bottom: 1.25rem;
+  }
+  .sum {
+    display: flex;
+    flex-direction: column;
+    padding: .95rem 1.05rem 1rem;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--muted);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    min-width: 0;
+  }
+  .sum.ready       { border-left-color: var(--ready); }
+  .sum.degraded    { border-left-color: var(--degraded); }
+  .sum.unavailable { border-left-color: var(--unavailable); }
+  .sum .head {
+    display: flex;
+    align-items: center;
+    gap: .45rem;
+    font-size: .7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--muted);
+  }
+  .sum .head svg { width: 15px; height: 15px; }
+  .sum .state {
+    margin-top: .45rem;
+    font-size: 1.15rem;
+    font-weight: 650;
+    letter-spacing: -.01em;
+    line-height: 1.25;
+  }
+  .sum.ready .state       { color: var(--ready); }
+  .sum.degraded .state    { color: var(--degraded); }
+  .sum.unavailable .state { color: var(--unavailable); }
+  .sum dl {
+    margin: .5rem 0 0;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: .18rem .6rem;
+    font-size: .84rem;
+  }
+  .sum dt { color: var(--muted); }
+  .sum dd { margin: 0; overflow-wrap: anywhere; }
+  .sum .note { margin: .25rem 0 0; font-size: .82rem; line-height: 1.4; color: var(--muted); }
+  /* Pushed to the bottom, so four cards of different heights still line their buttons up. */
+  .sum .act { margin-top: auto; padding-top: .8rem; display: flex; gap: .45rem; flex-wrap: wrap; }
+  .sum .act button, .sum .act a {
+    padding: .38rem .7rem;
+    font-size: .82rem;
+    border-radius: var(--radius-sm);
+  }
+  .sum .act a {
+    display: inline-block;
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: var(--ink);
+    font-weight: 500;
+    text-decoration: none;
+  }
+  .sum .act a:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ------------------------------------------------------------------------------------
+     The administrator panel.
+
+     The device token card, which used to be the first thing on the page and the largest
+     thing on it, is this now: hidden until the lock in the header is pressed, anchored under
+     it. `position: fixed` rather than absolute because the header is sticky and an absolute
+     child of a scrolled page walks away from the control it belongs to.
+     ------------------------------------------------------------------------------------ */
+  #token-card {
+    position: fixed;
+    top: calc(var(--header-h) + .4rem);
+    right: .75rem;
+    z-index: 35;
+    width: min(26rem, calc(100vw - 1.5rem));
+    max-height: calc(100vh - var(--header-h) - 1.5rem);
+    overflow-y: auto;
+    margin: 0;
+  }
+  #token-card[hidden] { display: none; }
+
+  /* ------------------------------------------------------------------------------------
+     The A/B slots, drawn as what they are.
+
+     Two boxes and an arrow: the one running, the one an update is written to, and what a
+     restart does with it. The architecture is the product feature here, so the page shows
+     the shape rather than describing it in a paragraph nobody reads twice.
+     ------------------------------------------------------------------------------------ */
+  .slots {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: stretch;
+    gap: .7rem;
+    margin: .2rem 0 .3rem;
+  }
+  .slot {
+    padding: .75rem .85rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--raised);
+    min-width: 0;
+  }
+  .slot.live { border-color: var(--ready); background: var(--ready-soft); }
+  .slot.target { border-style: dashed; }
+  .slot .k {
+    font-size: .68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .09em;
+    color: var(--muted);
+  }
+  .slot.live .k { color: var(--ready); }
+  .slot .name { font-size: 1.05rem; font-weight: 650; margin-top: .1rem; }
+  .slot .v {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .8rem;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+  }
+  .slots .arrow {
+    align-self: center;
+    color: var(--muted);
+    font-size: 1.1rem;
+    padding: 0 .1rem;
+  }
+
+  /* The four steps an update goes through, as a row rather than a paragraph. */
+  .lifecycle {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .35rem;
+    margin-top: .8rem;
+    font-size: .8rem;
+    color: var(--muted);
+  }
+  .lifecycle span {
+    padding: .25rem .55rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--raised);
+    white-space: nowrap;
+  }
+  .lifecycle span.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+
+  /* A filesystem's headline: the figure people came for, what it is out of, and the state
+     as a word beside it. */
+  .cap {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: .5rem;
+  }
+  .cap .figure { font-size: 1.5rem; font-weight: 650; letter-spacing: -.01em; }
+  .cap .of { color: var(--muted); font-size: .88rem; }
+  .cap .badge { margin-left: auto; }
+
+  /* A button that reads as a cross-reference, for the two places a sentence has to point at
+     another view. Still a button, because it does what a button does. */
+  .linkish {
+    padding: 0;
+    border: 0;
+    background: none;
+    box-shadow: none;
+    color: var(--accent);
+    font: inherit;
+    font-weight: 600;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .linkish:hover { filter: brightness(1.1); }
+
+  /* A statement the page makes about itself rather than about the machine: "there is no
+     source for this yet". Quiet, and never dressed as a failure. */
+  .absent {
+    padding: 1.1rem 1.15rem;
+    border: 1px dashed var(--line);
+    border-radius: var(--radius);
+    background: var(--raised);
+    color: var(--muted);
+    font-size: .92rem;
+  }
+  .absent strong { color: var(--ink); }
+
+  /* ------------------------------------------------------------------------------------
+     Narrower than a desk.
+
+     Tablet loses the labels down the side and keeps the icons; a phone loses the column
+     altogether and the same markup becomes a drawer. Nothing is duplicated for either --
+     one nav element, three shapes.
+     ------------------------------------------------------------------------------------ */
+  @media (max-width: 60rem) {
+    :root { --nav-w: 4.4rem; }
+    button.navitem { justify-content: center; padding: .6rem .3rem; }
+    button.navitem .label, button.navitem .tail { display: none; }
+    .sidebar .group { text-align: center; padding: 0; font-size: .6rem; }
+    /* The label goes; the control stays. A rail wide enough for an icon is wide enough for a
+       three-item select, and dropping it here would mean the one width with no way to choose
+       a theme at all. */
+    .navfoot { margin-top: 1rem; padding: .7rem .2rem 0; }
+    .navfoot .group { display: none; }
+    #theme { font-size: .68rem; padding: .3rem .1rem; }
+    .content { padding: 1rem .9rem 3rem; }
+    /* The first badge to go when the bar runs out of room, because the activity card says
+       the same thing and says more. A badge clipped halfway through its own text reads as a
+       rendering fault rather than as a bar that is full. */
+    #uptime { display: none; }
+  }
+
+  @media (max-width: 40rem) {
+    .shell { grid-template-columns: minmax(0, 1fr); }
+    #nav-toggle { display: inline-flex; }
+    header { padding: 0 .5rem; gap: .35rem; }
+    header .aside button { padding: .35rem .5rem; }
+    header .version { display: none; }
+    /* The health verdict stays; the address, the slot and the uptime go. All three are one
+       tap away in a view, and a bar that keeps everything on a 390 px screen keeps it by
+       pushing the controls off the right-hand edge -- which is what the first render of this
+       did to "Shut down". */
+    #host-ip, #slot, #uptime { display: none; }
+    /* Icons only. The two power controls keep their accessible names on the element, so
+       nothing is lost but the width. */
+    header .aside .label { display: none; }
+    header .aside button { padding: .4rem .45rem; }
+    /* The tablet rule above centres these; the drawer is full width and wants them left. */
+    .navfoot { padding: .8rem .6rem 0; }
+
+    /* The drawer. Off the left edge until it is asked for, and over the content rather than
+       beside it -- a 390 px screen has no room to give a column away permanently. */
+    .sidebar {
+      position: fixed;
+      top: var(--header-h);
+      left: 0;
+      z-index: 25;
+      width: 15rem;
+      max-width: 82vw;
+      height: calc(100vh - var(--header-h));
+      transform: translateX(-101%);
+      transition: transform .18s ease;
+      box-shadow: var(--shadow);
+    }
+    .sidebar.open { transform: none; }
+    .navitem { justify-content: flex-start; padding: .6rem .7rem; }
+    .navitem .label { display: inline; }
+    .sidebar .group { text-align: left; padding: 0 .6rem; font-size: .68rem; }
+
+    /* What a tap outside the drawer lands on. */
+    #scrim {
+      position: fixed;
+      inset: var(--header-h) 0 0;
+      z-index: 24;
+      background: rgba(0, 0, 0, .38);
+    }
+    #scrim[hidden] { display: none; }
+
+    .content { padding: .9rem .7rem 3rem; }
+    .summary { grid-template-columns: minmax(0, 1fr); gap: .7rem; }
+    .card { padding: .95rem 1rem; }
+    /* One column, and the arrow turns a quarter. */
+    .slots { grid-template-columns: minmax(0, 1fr); }
+    .slots .arrow { justify-self: center; }
+    #token-card { right: .4rem; left: .4rem; width: auto; }
+  }
+
   /* Nothing animates for somebody who has asked that it not. */
   @media (prefers-reduced-motion: reduce) {
     * { transition: none !important; }
+    .sidebar { transition: none !important; }
   }
 </style>
 </head>
 <body>
 <div class="wrap">
+  <a class="skip" href="#main">Skip to the current view</a>
+
   <header>
+    <!-- Present only below 40rem, where the sidebar is a drawer. Its label is on the
+         element rather than beside it: at this size there is no room for a word, and a
+         control with no accessible name is a control a screen reader announces as
+         "button". -->
+    <button id="nav-toggle" class="ghost" aria-label="Sections" aria-expanded="false"
+            aria-controls="nav">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" aria-hidden="true">
+        <path d="M3 6h18M3 12h18M3 18h18"/>
+      </svg>
+    </button>
+
     <h1 id="product">PlexOS</h1>
     <span class="version" id="version"></span>
-    <span class="badge" id="slot" hidden></span>
-    <span class="badge" id="gate" hidden></span>
-    <span class="aside">
+
+    <!-- What the machine is, right now. These scroll sideways rather than wrapping: the bar
+         is a fixed height, and one that grew a second line on a narrow screen would take a
+         bite out of the page at exactly the width where there is least of it. -->
+    <span class="facts">
+      <span class="badge" id="gate" hidden></span>
+      <span class="badge" id="host-ip" hidden></span>
+      <span class="badge" id="slot" hidden></span>
       <span class="badge" id="uptime"></span>
-      <button id="restart" class="ghost danger">Restart</button>
-      <button id="shutdown" class="ghost danger">Shut down</button>
+    </span>
+
+    <span class="aside">
+      <!-- The lock. Locked is the state a page loads in, because the token lives in
+           sessionStorage and a new tab has none. -->
+      <button id="admin-lock" class="ghost" aria-expanded="false" aria-controls="token-card">
+        <span id="admin-lock-text">Locked</span>
+      </button>
+      <!-- The word is hidden on a phone and the icon is not, so `aria-label` carries the
+           name at every width rather than only where the label happens to be showing. -->
+      <button id="restart" class="ghost danger" aria-label="Restart">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>
+        </svg><span class="label">Restart</span>
+      </button>
+      <button id="shutdown" class="ghost danger" aria-label="Shut down">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 3v9"/><path d="M6.5 6.9a8 8 0 1 0 11 0"/>
+        </svg><span class="label">Shut down</span>
+      </button>
     </span>
   </header>
 
-  <!-- The power card's one paragraph used to carry both the warning and any failure. The
-       warning has moved into the confirmation, which is where somebody actually reads it, and
-       this is what is left: a place for the answer when stopping the machine does not work.
-       Hidden until there is something to say, because an empty banner under a sticky header
-       is a permanent bite out of the page. -->
-  <p class="warn" id="power-note" hidden></p>
-
-  <section class="card plex" id="token-card">
-    <h3>Device token</h3>
+  <!-- The administrator panel, and the one card on this page whose position in the markup is
+       load-bearing: `.solo > :not(.wide):not(#token-card)` hides everything but this and the
+       terminal in the popup window, so it has to stay a direct child of `.wrap`. It was the
+       first and largest thing on the page before; it is a popover under the lock now, and the
+       security model behind it has not moved an inch -- the token is still typed here, still
+       kept in sessionStorage alone, and still sent as an Authorization header. -->
+  <section class="card plex" id="token-card" hidden>
+    <h3>Administrator access</h3>
     <p class="hint">Printed on the screen attached to this machine the first time it
        started — sixteen characters in four groups. Case does not matter and the dashes
        are optional. Reading this page needs nothing; every button that changes something
@@ -856,96 +1398,262 @@
       <input type="text" id="token" placeholder="4K7Q-M2XR-9T8B-HVWP"
              autocomplete="off" spellcheck="false" autocapitalize="characters">
     </div>
+    <p class="hint" id="token-note">Held for this browser tab only, and never written to
+       disk. Closing the tab locks it again.</p>
+    <div class="row">
+      <button id="token-lock" class="ghost">Lock</button>
+      <button id="token-rotate" class="ghost">Rotate the device token</button>
+    </div>
+    <p class="hint">Rotating issues a new one and revokes this one immediately. It is
+      shown once, here and on the attached screen, and cannot be asked for again.</p>
+    <div id="token-result"></div>
   </section>
 
-  <section class="card plex" id="plex" aria-live="polite">
-    <h3>Plex Media Server</h3>
-    <p class="empty">Loading…</p>
-  </section>
+  <p class="warn" id="power-note" hidden></p>
 
-  <section class="card setup" id="setup" hidden></section>
+  <!-- Tapping outside the drawer closes it. Present at every width and shown only where the
+       drawer is, so nothing has to be created or destroyed on a resize. -->
+  <div id="scrim" hidden></div>
 
-  <!-- Above <main> rather than after it, which is where this was first put. `main` is
-       regenerated on every status poll and the terminal is generated *into* it, so a card
-       placed after it sits below a tall black box — and this is the one card somebody opens
-       the page repeatedly to read. It cannot go inside `main` either: that would put a
-       section redrawn twice a second inside one rebuilt from scratch on every status poll,
-       and the outer rebuild would throw this one's DOM away mid-render.
+  <div class="shell">
+    <nav class="sidebar" id="nav" aria-label="Sections">
+      <div class="group">Appliance</div>
+      <button class="navitem" data-view="overview">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/>
+          <rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/>
+        </svg>
+        <span class="label">Overview</span><span class="tail" id="tail-overview"></span>
+      </button>
+      <button class="navitem" data-view="plex">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8"/>
+          <path d="M10.5 9.2v3.6l3.2-1.8z"/>
+        </svg>
+        <span class="label">Plex</span><span class="tail" id="tail-plex"></span>
+      </button>
+      <button class="navitem" data-view="storage">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/>
+          <path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>
+        </svg>
+        <span class="label">Storage</span><span class="tail" id="tail-storage"></span>
+      </button>
+      <button class="navitem" data-view="network">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"/><path d="M3 12h18"/>
+          <path d="M12 3c2.5 2.6 3.8 5.7 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z"/>
+        </svg>
+        <span class="label">Network</span><span class="tail" id="tail-network"></span>
+      </button>
+      <button class="navitem" data-view="system">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/>
+          <path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/>
+        </svg>
+        <span class="label">System</span><span class="tail" id="tail-system"></span>
+      </button>
+      <button class="navitem" data-view="events">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M5 3h14v18l-7-4-7 4z"/><path d="M9 8h6M9 12h4"/>
+        </svg>
+        <span class="label">Events</span><span class="tail" id="tail-events"></span>
+      </button>
 
-       Deliberately no aria-live. Every other card here announces itself because it changes
-       when the machine changes; this one changes twice a second by design, and a live region
-       reading eight percentages aloud on a loop would make the page unusable with a screen
-       reader rather than more accessible. Every figure is plain text in the document. -->
-  <section class="card plex" id="metrics" data-fold="metrics">
-    <div class="bar">
-      <h3 style="margin:0">Activity</h3>
-      <span class="state" id="metrics-window">measuring…</span>
-    </div>
-    <!-- Only this div is redrawn, twice a second. Everything below it is written once and
-         then left alone, and that division is the whole point rather than a tidiness: the
-         first version put the process table and the notes *inside* here, so opening either
-         one worked for up to two seconds and then the next poll replaced the element holding
-         it. It looked like a control that would not stay open. Reported from a machine, which
-         is the second time this card has needed somebody to look at the served page.
+      <div class="group">Advanced</div>
+      <button class="navitem" data-view="advanced">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/>
+        </svg>
+        <span class="label">Terminal</span><span class="tail" id="tail-advanced"></span>
+      </button>
 
-         The rule the card now follows: anything with state a person set — an open
-         `<details>`, a table they asked for — cannot live inside a region on a timer. -->
-    <div id="metrics-body">
-      <p class="empty">Measuring… a rate is the difference between two readings, so the
-         first figures arrive a couple of seconds after this page opens.</p>
-    </div>
-
-    <!-- The paragraph that used to explain why this needs a token is gone from the page. The
-         reason has not changed and is still written down where it belongs — on
-         `metrics_route` in console.rs — but a standing explanation of a thing that has not
-         gone wrong yet is clutter, and the one moment it matters is covered: pressing this
-         without a token says so, and says where to put one. -->
-    <div class="panel" id="procs-panel">
-      <h4>Processes</h4>
-      <div class="row">
-        <button id="procs-load" class="ghost">Show Processes</button>
-        <button id="procs-refresh" class="ghost" hidden>Refresh</button>
+      <!-- Appearance sits here rather than in the header, and not only because a 390 px bar
+           had no room left for it: this is a property of the browser doing the looking, not
+           of the machine being looked at, and the header is where the machine describes
+           itself. -->
+      <div class="navfoot">
+        <label class="group" for="theme">Appearance</label>
+        <select id="theme">
+          <option value="system">Match the system</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
       </div>
-      <!-- `hidden` from the start, so "is the list showing" is one fact from the first paint
-           rather than "empty now, hidden later". -->
-      <div id="procs" hidden></div>
+    </nav>
+
+    <div class="content">
+      <!-- Above every view rather than inside one: a machine five minutes old has nothing
+           else worth reading, and it disappears on its own when the required steps are
+           done. -->
+      <section class="card setup" id="setup" hidden></section>
+
+      <!-- ---------------------------------------------------------------- OVERVIEW -->
+      <section class="view" data-view="overview" id="view-overview">
+        <h2>Overview</h2>
+        <p class="lede">Whether this appliance is working, and what is wrong if it is not.</p>
+
+        <div class="summary">
+          <div class="sum" id="sum-plex"><div class="head">Plex</div>
+            <div class="state">…</div></div>
+          <div class="sum" id="sum-transcode"><div class="head">Transcoding</div>
+            <div class="state">…</div></div>
+          <div class="sum" id="sum-storage"><div class="head">Storage</div>
+            <div class="state">…</div></div>
+          <div class="sum" id="sum-network"><div class="head">Network</div>
+            <div class="state">…</div></div>
+        </div>
+
+        <!-- The activity card, unchanged in behaviour and moved whole. Deliberately no
+             aria-live: it changes twice a second by design, and a live region reading eight
+             percentages aloud on a loop would make the page unusable with a screen reader
+             rather than more accessible. Every figure is plain text in the document. -->
+        <section class="card plex" id="metrics" data-fold="metrics">
+          <div class="bar">
+            <h3 style="margin:0">System activity</h3>
+            <span class="state" id="metrics-window">measuring…</span>
+          </div>
+          <!-- Only this div is redrawn, twice a second. Everything below it is written once
+               and then left alone, and that division is the whole point rather than a
+               tidiness: the first version put the process table and the notes *inside* here,
+               so opening either one worked for up to two seconds and then the next poll
+               replaced the element holding it. It looked like a control that would not stay
+               open. Reported from a machine.
+
+               The rule the card follows: anything with state a person set -- an open
+               `<details>`, a table they asked for -- cannot live inside a region on a
+               timer. -->
+          <div id="metrics-body">
+            <p class="empty">Measuring… a rate is the difference between two readings, so the
+               first figures arrive a couple of seconds after this page opens.</p>
+          </div>
+
+          <div class="panel" id="procs-panel">
+            <h4>Processes</h4>
+            <div class="row">
+              <button id="procs-load" class="ghost">Show Processes</button>
+              <button id="procs-refresh" class="ghost" hidden>Refresh</button>
+            </div>
+            <!-- `hidden` from the start, so "is the list showing" is one fact from the first
+                 paint rather than "empty now, hidden later". -->
+            <div id="procs" hidden></div>
+          </div>
+
+          <!-- Written once; the poll replaces the contents of the list and never the details
+               element, so whether it is open belongs to whoever opened it. -->
+          <details id="metrics-notes" hidden>
+            <summary>What these numbers do not say</summary>
+            <ul id="metrics-notes-list"></ul>
+          </details>
+        </section>
+
+        <!-- The one region the status poll replaces wholesale. Nothing anybody types into
+             may live in here: it loses focus mid-word, closes its own datalist, and discards
+             what was not yet saved. The settings form and the terminal are both outside it
+             for exactly that reason, and the reasoning was written down each time. -->
+        <main id="main" aria-live="polite">
+          <p class="empty">Loading…</p>
+        </main>
+      </section>
+
+      <!-- -------------------------------------------------------------------- PLEX -->
+      <section class="view" data-view="plex" id="view-plex" hidden>
+        <h2>Plex</h2>
+        <p class="lede">The media server itself: what is installed, what Plex offers, and how
+           to move between them.</p>
+        <section class="card plex" id="plex" aria-live="polite">
+          <h3>Plex Media Server</h3>
+          <p class="empty">Loading…</p>
+        </section>
+        <div id="plex-future"></div>
+      </section>
+
+      <!-- ----------------------------------------------------------------- STORAGE -->
+      <section class="view" data-view="storage" id="view-storage" hidden>
+        <h2>Storage</h2>
+        <p class="lede">Where the appliance keeps its own state, and where the library it
+           plays actually lives.</p>
+        <div id="storage-body">
+          <p class="empty">Loading…</p>
+        </div>
+        <section class="card plex" id="shares" data-fold="shares" aria-live="polite">
+          <h3>Media shares</h3>
+          <p class="empty">Loading…</p>
+        </section>
+        <div id="storage-disks"></div>
+      </section>
+
+      <!-- ----------------------------------------------------------------- NETWORK -->
+      <section class="view" data-view="network" id="view-network" hidden>
+        <h2>Network</h2>
+        <p class="lede">How this machine is reached, and what to do when it is not.</p>
+        <div id="net-body">
+          <p class="empty">Loading…</p>
+        </div>
+        <section class="card plex" id="wifi" data-fold="wifi" aria-live="polite">
+          <h3>Wireless</h3>
+          <p class="empty">Loading…</p>
+        </section>
+        <div id="net-settings"></div>
+      </section>
+
+      <!-- ------------------------------------------------------------------ SYSTEM -->
+      <section class="view" data-view="system" id="view-system" hidden>
+        <h2>System</h2>
+        <p class="lede">The image this machine booted, the slot it booted from, and how a new
+           one gets here.</p>
+        <div id="sys-body">
+          <p class="empty">Loading…</p>
+        </div>
+        <section class="card plex" id="update" data-fold="update" aria-live="polite">
+          <h3>System update</h3>
+          <p class="empty">Loading…</p>
+        </section>
+        <div id="sys-settings"></div>
+        <section class="card plex" id="install" data-fold="install" aria-live="polite">
+          <h3>Install to a disk</h3>
+          <p class="empty">Loading…</p>
+        </section>
+      </section>
+
+      <!-- ------------------------------------------------------------------ EVENTS -->
+      <section class="view" data-view="events" id="view-events" hidden>
+        <h2>Events</h2>
+        <p class="lede">What this machine has recorded about itself. Not much yet, and this
+           view says which parts are missing rather than filling them in.</p>
+        <div id="events-body">
+          <p class="empty">Loading…</p>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- ADVANCED -->
+      <section class="view" data-view="advanced" id="view-advanced" hidden>
+        <h2>Terminal</h2>
+        <p class="lede">A root shell on the appliance, in the browser.</p>
+        <div class="absent" id="term-gate">
+          <strong>This is advanced administration.</strong> The shell below runs as root, in
+          the machine's own namespaces, with no confinement — that is deliberate, because a
+          confined shell cannot do the thing anyone opens one for. It is gated by the device
+          token and served over TLS, and ADR-0014 states plainly that this console is fit for
+          a trusted LAN and is not fit to expose beyond one. Everything else in this console
+          is a named operation with a remedy attached; this is the admission that the list of
+          operations cannot be complete.
+        </div>
+        <div id="term-host"></div>
+      </section>
+
+      <footer>
+        <span id="refreshed"></span>
+      </footer>
     </div>
-
-    <!-- Written once; the poll replaces the contents of the list and never the details
-         element, so whether it is open belongs to whoever opened it. -->
-    <details id="metrics-notes" hidden>
-      <summary>What these numbers do not say</summary>
-      <ul id="metrics-notes-list"></ul>
-    </details>
-  </section>
-
-  <main id="main" aria-live="polite">
-    <p class="empty">Loading…</p>
-  </main>
-
-  <section class="card plex" id="shares" data-fold="shares" aria-live="polite">
-    <h3>Media shares</h3>
-    <p class="empty">Loading…</p>
-  </section>
-
-  <section class="card plex" id="wifi" data-fold="wifi" aria-live="polite">
-    <h3>Wireless</h3>
-    <p class="empty">Loading…</p>
-  </section>
-
-  <section class="card plex" id="update" data-fold="update" aria-live="polite">
-    <h3>System update</h3>
-    <p class="empty">Loading…</p>
-  </section>
-
-  <section class="card plex" id="install" data-fold="install" aria-live="polite">
-    <h3>Install to a disk</h3>
-    <p class="empty">Loading…</p>
-  </section>
-
-  <footer>
-    <span id="refreshed"></span>
-  </footer>
+  </div>
 </div>
 
 <script>
@@ -1149,22 +1857,12 @@ function humanUptime(seconds) {
   return parts.join(" ");
 }
 
-function gpuSection(gpu) {
-  const [title, lead] = VERDICT[gpu.health] || ["Hardware transcoding: unknown", ""];
-
-  const findings = (gpu.findings || []).map(f => `
-    <li>
-      <span class="summary"><span class="sev ${esc(f.severity)}">${esc(f.severity)}</span>${esc(f.summary)}</span>
-      ${f.remedy ? `<span class="remedy">${esc(f.remedy)}</span>` : ""}
-    </li>`).join("");
-
-  return `
-    <section class="hero ${esc(gpu.health)}">
-      <h2>${esc(title)}</h2>
-      <p class="lead">${esc(lead)}</p>
-      ${findings ? `<ul class="findings">${findings}</ul>` : ""}
-    </section>`;
-}
+// `gpuSection` stood here and drew the transcoding verdict as the first thing on the page: a
+// full-width banner repeating a single word, above a findings list that on a healthy machine
+// was empty. Both halves have somewhere better to be now -- the verdict and its consequence
+// are the Transcoding card at the top of the Overview, and the findings are in
+// `healthSection` beside the boot gate's failures, which is where somebody looking for what
+// is wrong is already looking. `VERDICT` outlived it and is what the card's second line says.
 
 function devicesCard(gpu) {
   const rows = (gpu.gpus || []).map(d => `
@@ -1326,6 +2024,10 @@ function settingsCard() {
   const drift = settingsView.hostname_now && settingsView.hostname_now !== sys.hostname;
   const zones = settingsView.timezones || [];
 
+  // Rotating the device token used to be the last field in this card, at the bottom of
+  // something that starts folded. It is in the administrator panel now, beside the field the
+  // token is typed into and behind the lock in the header -- which is where somebody thinking
+  // about their credential is already looking.
   return `
     <div class="card form">
       <h3>Settings</h3>
@@ -1383,14 +2085,6 @@ function settingsCard() {
           console is still reachable.</p>` : ""}
       <div class="row"><button id="settings-save">Save settings</button></div>
       <div id="settings-result"></div>
-
-      <div class="field">
-        <label>Device token</label>
-        <p class="hint">Rotating issues a new one and revokes this one immediately. It is
-          shown once, here and on the attached screen, and cannot be asked for again.</p>
-        <div class="row"><button id="token-rotate" class="ghost">Rotate the device token</button></div>
-        <div id="token-result"></div>
-      </div>
     </div>`;
 }
 
@@ -2050,61 +2744,654 @@ function systemCard(status) {
     </div>`;
 }
 
+// ------------------------------------------------------------------------------------
+// The views.
+//
+// One page, seven views, and nothing here navigates: switching is `hidden` on six sections
+// and off one. That is deliberate rather than lazy. A second document would mean a second
+// copy of every poll, a second load of the terminal's state, and a second place for the
+// token to be typed -- and the console is a page people leave open on a second screen for
+// hours, which is the one workload a full page load per click is worst at.
+//
+// The address bar still moves, through pushState, so `#network` is a link somebody can send
+// and the back button steps between views. `popstate` is what puts a view back, so the two
+// can never disagree: there is one source of truth and it is the URL.
+// ------------------------------------------------------------------------------------
+const VIEWS = ["overview", "plex", "storage", "network", "system", "events", "advanced"];
+
+/// The view named in the address bar, or the one a page with nothing in it opens on.
+function viewInUrl() {
+  const asked = (location.hash || "").replace(/^#/, "");
+  return VIEWS.includes(asked) ? asked : "overview";
+}
+
+let currentView = null;
+
+/// Shows one view and hides the rest.
+///
+/// `hidden` rather than a class, because an element that is `hidden` leaves the
+/// accessibility tree as well as the screen -- a sidebar that tabbed a keyboard through six
+/// invisible views would be worse than no sidebar at all.
+function showView(name) {
+  const view = VIEWS.includes(name) ? name : "overview";
+  if (view === currentView) return;
+  currentView = view;
+
+  // Selected by attribute rather than by an id built up from a prefix and a name. A
+  // concatenated id is an element name no test can check against the markup, and this
+  // repository has a test whose whole job is to catch a script addressing something nothing
+  // creates -- so building one silently puts a hole back in the only check that closes it.
+  // (Written without quoting the call, because that test reads comments too.)
+  for (const section of document.querySelectorAll(".view[data-view]")) {
+    section.hidden = section.dataset.view !== view;
+  }
+  for (const item of document.querySelectorAll(".navitem")) {
+    const on = item.dataset.view === view;
+    // `aria-current` rather than a class: this is what the item *is*, and a screen reader
+    // gets it for free. The stylesheet paints the same attribute, so the two cannot drift.
+    if (on) {
+      item.setAttribute("aria-current", "page");
+    } else {
+      item.removeAttribute("aria-current");
+    }
+  }
+  document.title = view === "overview" ? "PlexOS" : "PlexOS — " + view[0].toUpperCase() + view.slice(1);
+
+  // A terminal measured while its view was hidden measured nothing, and the floor in
+  // termSize would then have told the shell it has eighty columns in a box that is now much
+  // wider. Same hazard as a folded card, one level up.
+  if (view === "advanced") termResize();
+  closeDrawer();
+}
+
+/// Switches view *and* records it, which is what makes the back button work.
+function navTo(name) {
+  if (name !== viewInUrl()) history.pushState({ view: name }, "", "#" + name);
+  showView(name);
+}
+
+// ------------------------------------------------------------------------------------
+// The drawer, on a screen too narrow for a column.
+// ------------------------------------------------------------------------------------
+function openDrawer(open) {
+  const nav = document.getElementById("nav");
+  const scrim = document.getElementById("scrim");
+  const toggle = document.getElementById("nav-toggle");
+  nav.classList.toggle("open", open);
+  scrim.hidden = !open;
+  toggle.setAttribute("aria-expanded", open ? "true" : "false");
+}
+function closeDrawer() { openDrawer(false); }
+
+// ------------------------------------------------------------------------------------
+// Light, dark, or whatever the machine reading this page prefers.
+//
+// Three states and not two. The choice is kept in localStorage rather than on the appliance:
+// it is a property of the browser looking, not of the machine being looked at, and two people
+// on two screens should not fight over it. Nothing is stored when the choice is "system",
+// so a browser that has never been told anything follows the operating system for ever.
+// ------------------------------------------------------------------------------------
+const THEME_KEY = "plexos-theme";
+
+function applyTheme(choice) {
+  if (choice === "light" || choice === "dark") {
+    document.documentElement.dataset.theme = choice;
+  } else {
+    delete document.documentElement.dataset.theme;
+  }
+}
+
+function chooseTheme(choice) {
+  if (choice === "system") {
+    localStorage.removeItem(THEME_KEY);
+  } else {
+    localStorage.setItem(THEME_KEY, choice);
+  }
+  applyTheme(choice);
+}
+
+// ------------------------------------------------------------------------------------
+// The lock.
+//
+// Two states, and the underlying security model is exactly what it was: the token is typed
+// into the same field, kept in sessionStorage and nowhere else, and sent as an Authorization
+// header. What changed is that a page with no token now *says so* in the header instead of
+// showing a large empty box, and every refusal further down already names this control.
+// ------------------------------------------------------------------------------------
+function updateLock() {
+  const held = Boolean(token());
+  const button = document.getElementById("admin-lock");
+  const text = document.getElementById("admin-lock-text");
+  button.dataset.state = held ? "unlocked" : "locked";
+  // Not colour alone: the word changes, and so does the title. Somebody who cannot tell the
+  // green from the grey still reads "Administrator" rather than "Locked".
+  text.innerHTML = held
+    ? `Administrator <span class="dot" aria-hidden="true">●</span>`
+    : "Locked";
+  button.title = held
+    ? "This tab holds the device token. Everything on this page can be changed."
+    : "Read-only. Enter the device token to change anything.";
+}
+
+function openAdmin(open) {
+  const card = document.getElementById("token-card");
+  card.hidden = !open;
+  document.getElementById("admin-lock").setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) document.getElementById("token").focus();
+}
+
+/// Forgets the token in this tab. The appliance is untouched -- rotating is the other button.
+function lockAdmin() {
+  sessionStorage.removeItem(TOKEN_KEY);
+  document.getElementById("token").value = "";
+  document.getElementById("token-result").innerHTML = "";
+  updateLock();
+  openAdmin(false);
+}
+
+// ------------------------------------------------------------------------------------
+// The four cards at the top of the Overview.
+//
+// Their data arrives from four different polls on four different schedules, so each poll
+// keeps its last reply here and any of them may redraw the row. The alternative -- four
+// cards each fetching for themselves -- would have doubled the requests this appliance
+// answers to show figures it is already sending.
+// ------------------------------------------------------------------------------------
+let latestStatus = null;
+let latestMetrics = null;
+let latestProvision = null;
+let latestShares = null;
+let latestUpdate = null;
+let lastSummaryRendered = null;
+
+const ICONS = {
+  plex: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M10.5 9.2v3.6l3.2-1.8z"/></svg>`,
+  chip: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg>`,
+  disk: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/></svg>`,
+  net: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.6 3.8 5.7 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z"/></svg>`,
+};
+
+/// Plex's own interface, on this machine, on the port Plex listens on.
+///
+/// The only absolute URL this page has, and now the only place the scheme is written. It
+/// cannot be relative -- it is a different port -- and it must be built from the host the
+/// page was served from, or a console served over TLS would hand out a link to somewhere
+/// else. Two things link to Plex now, the Overview's card and the Plex view, and a second
+/// copy of this string is exactly how the two would come to disagree about the scheme. The
+/// repository has a test that counts them.
+///
+/// Whether Plex answers TLS on 32400, under a certificate a browser accepts for a bare
+/// address, is a question about Plex and not one this repository can settle. If it turns out
+/// not to, the remedy is this one line.
+function plexUrl(path) {
+  return `https://${esc(location.hostname)}${esc(path)}`;
+}
+
+/// The interface a person would actually be reaching this page through.
+///
+/// The first one that is not loopback, has a carrier and holds an address -- in that order,
+/// because a machine with a wired adapter plugged into nothing and a working radio must not
+/// report the cable.
+function primaryInterface(net) {
+  const all = (net.interfaces || []).filter(i => i.kind !== "loopback");
+  return all.find(i => i.carrier && (i.addresses || []).length)
+      || all.find(i => (i.addresses || []).length)
+      || all.find(i => i.carrier)
+      || all[0]
+      || null;
+}
+
+/// One summary card: a state, what that state means, some facts, and at most two actions.
+function summaryCard(id, icon, title, level, state, note, facts, actions) {
+  const rows = facts.filter(Boolean)
+    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("");
+  return `<div class="sum ${esc(level)}" id="${esc(id)}">
+      <div class="head">${icon}${esc(title)}</div>
+      <div class="state">${esc(state)}</div>
+      ${note ? `<p class="note">${esc(note)}</p>` : ""}
+      ${rows ? `<dl>${rows}</dl>` : ""}
+      ${actions ? `<div class="act">${actions}</div>` : ""}
+    </div>`;
+}
+
+/// Draws all four, from whatever has arrived so far.
+///
+/// Signature-cached like every other polled region on this page, and for the same reason:
+/// the metrics poll fires twice a second and three of these four cards would otherwise be
+/// rebuilt under somebody's pointer sixty times a minute. The signature is built from the
+/// *rendered strings* rather than the raw numbers, so a processor moving from 0.08% to
+/// 0.09% is not a redraw.
+function renderSummary() {
+  if (!latestStatus) return;
+  const gpu = latestStatus.gpu || {};
+  const net = latestStatus.network || {};
+  const provision = latestProvision || {};
+  const metrics = latestMetrics || {};
+
+  // Plex.
+  const plexLevel = provision.running ? "ready" : provision.installed ? "degraded" : "";
+  const plexState = provision.running ? "Running"
+    : provision.installed ? "Installed, not running"
+    : "Not installed";
+  const plexFacts = [
+    provision.installed_version && ["Version", `<span class="mono">${esc(provision.installed_version)}</span>`],
+    provision.latest_version && provision.latest_version !== provision.installed_version
+      && ["Offered", `<span class="mono">${esc(provision.latest_version)}</span>`],
+  ];
+  const plexActions = (provision.running && provision.web)
+    ? `<a target="_blank" rel="noopener noreferrer"
+          href="${plexUrl(provision.web)}">Open Plex</a>
+       <button class="ghost" data-goto="plex">Manage</button>`
+    : `<button class="ghost" data-goto="plex">${provision.installed ? "Manage" : "Install Plex"}</button>`;
+
+  // Transcoding. The verdict is the GPU report's own; the clock beside it comes from the
+  // activity poll and is explicitly a clock rather than a load -- a part can sit at its
+  // ceiling doing very little.
+  const device = (gpu.gpus || [])[0] || {};
+  const clock = metrics.gpu && metrics.gpu.frequency_mhz !== null
+      && metrics.gpu.frequency_mhz !== undefined
+    ? `${metrics.gpu.frequency_mhz} MHz${metrics.gpu.max_frequency_mhz ? ` of ${metrics.gpu.max_frequency_mhz}` : ""}`
+    : null;
+  const transcodeState = { ready: "Ready", degraded: "Degraded", unavailable: "Unavailable" }[gpu.health]
+    || "Unknown";
+  const transcodeFacts = [
+    (device.model || device.vendor) && ["GPU", esc(device.model || device.vendor)],
+    device.kernel_driver && ["Driver", `<span class="mono">${esc(device.kernel_driver)}</span>`],
+    clock && ["Clock", esc(clock)],
+  ];
+
+  // Storage. /var is the one that fills, and it is the one a rollback cannot help with.
+  const varFs = (metrics.storage || []).find(f => f.path === "/var");
+  const mounted = (latestShares || []).filter(s => s.mounted).length;
+  const shareCount = (latestShares || []).length;
+  const storageLevel = !varFs ? ""
+    : varFs.percent_used >= 92 ? "unavailable"
+    : varFs.percent_used >= 80 ? "degraded"
+    : shareCount && mounted < shareCount ? "degraded"
+    : "ready";
+  const storageState = varFs
+    ? `${metricBytes(varFs.available)} free`
+    : "Not measured yet";
+  const storageFacts = [
+    varFs && ["/var", `${metricNum(varFs.percent_used, 0)}% of ${metricBytes(varFs.total)} used`],
+    ["Shares", shareCount
+      ? `${mounted} of ${shareCount} mounted`
+      : `<span class="empty">none — Plex has nothing to play</span>`],
+  ];
+
+  // Network.
+  const primary = primaryInterface(net);
+  const address = ((primary || {}).addresses || [])[0];
+  const netLevel = !primary ? "unavailable" : address && primary.carrier ? "ready" : "degraded";
+  const netState = !primary ? "No interface"
+    : !primary.carrier ? "No link"
+    : !address ? "No address"
+    : "Connected";
+  const netFacts = [
+    primary && ["Interface", `<span class="mono">${esc(primary.name)}</span> · ${esc(primary.kind)}`],
+    address && ["Address", `<span class="mono">${esc(address)}</span>`],
+    primary && !primary.carrier && ["Link", esc(primary.operstate || "down")],
+  ];
+
+  const plexNote = provision.running ? "" : provision.installed
+    ? "The supervisor restarts it. This is a start in progress, or one that will not start."
+    : "PlexOS does not ship Plex. Installing fetches it from Plex and checks its signature.";
+
+  const markup =
+    summaryCard("sum-plex", ICONS.plex, "Plex", plexLevel, plexState, plexNote,
+      plexFacts, plexActions) +
+    summaryCard("sum-transcode", ICONS.chip, "Transcoding",
+      gpu.health === "ready" ? "ready" : gpu.health === "degraded" ? "degraded"
+        : gpu.health === "unavailable" ? "unavailable" : "",
+      transcodeState,
+      // The consequence, not the verdict again. This is the sentence the whole project
+      // exists to be able to print, and "unavailable" on its own does not say that a
+      // high-bitrate file will stutter.
+      (VERDICT[gpu.health] || [])[1] || "",
+      transcodeFacts,
+      `<button class="ghost" data-goto="system">Graphics detail</button>`) +
+    summaryCard("sum-storage", ICONS.disk, "Storage", storageLevel, storageState, "",
+      storageFacts,
+      `<button class="ghost" data-goto="storage">Manage storage</button>`) +
+    summaryCard("sum-network", ICONS.net, "Network", netLevel, netState, "",
+      netFacts,
+      `<button class="ghost" data-goto="network">Network settings</button>`);
+
+  if (markup === lastSummaryRendered) return;
+  lastSummaryRendered = markup;
+  document.querySelector("#view-overview .summary").innerHTML = markup;
+}
+
+// ------------------------------------------------------------------------------------
+// Overview: what is wrong, and the boot gate's verdict.
+//
+// Whether it is folded is a variable rather than the element's own state, because this
+// region is replaced wholesale by the status poll -- an open `<details>` in here would shut
+// itself every ten seconds, which is the defect the activity card shipped with and had to be
+// restructured to fix.
+// ------------------------------------------------------------------------------------
+let healthOpen = false;
+
+function healthSection(status) {
+  const gpu = status.gpu || {};
+  const findings = gpu.findings || [];
+  const checks = (status.health && status.health.checks) || [];
+  const failed = checks.filter(c => c.status === "fail");
+  // `info` is not a problem. It is how the GPU report says something worth knowing about a
+  // machine that is working, and promoting it to a warning would teach people to ignore the
+  // colour -- which is the one thing on this page that must keep meaning something.
+  const problems = findings.filter(f => f.severity === "critical" || f.severity === "warning");
+
+  const level = failed.length || problems.some(f => f.severity === "critical")
+    ? "unavailable"
+    : problems.length ? "degraded" : "ready";
+
+  const headline = failed.length
+    ? `${failed.length} health ${failed.length === 1 ? "check has" : "checks have"} failed`
+    : problems.length
+      ? `${problems.length} ${problems.length === 1 ? "thing needs" : "things need"} attention`
+      : "Nothing is wrong";
+
+  const lead = failed.length
+    ? "The boot health gate is what decides whether this slot becomes permanent. A gate that keeps failing hands the machine back to the previous system."
+    : problems.length
+      ? "The machine works. These would make it slower, or worse, than the hardware allows."
+      : `Hardware transcoding is ${esc(gpu.health || "unknown")}, ${checks.length} boot ${checks.length === 1 ? "check passes" : "checks pass"}, and nothing has reported a fault.`;
+
+  const failures = failed.map(c => `
+    <li>
+      <span class="summary"><span class="sev critical">fail</span>${esc(c.name)}</span>
+      <span class="remedy">${esc(c.detail)}</span>
+    </li>`).join("");
+
+  const wrong = problems.map(f => `
+    <li>
+      <span class="summary"><span class="sev ${esc(f.severity)}">${esc(f.severity)}</span>${esc(f.summary)}</span>
+      ${f.remedy ? `<span class="remedy">${esc(f.remedy)}</span>` : ""}
+    </li>`).join("");
+
+  // The rest: the checks that pass and the findings that are merely informative. Behind a
+  // control, because a healthy machine has nothing here anybody needs to read, and in front
+  // of one rather than in another view because "prove it" is a fair thing to ask of a page
+  // that has just said nothing is wrong.
+  const quiet = findings.filter(f => f.severity !== "critical" && f.severity !== "warning");
+  const detail = !healthOpen ? "" : `
+    <ul class="checks">${checks.map(c => `
+      <li>
+        <span class="mark ${esc(c.status)}">${c.status === "not-applicable" ? "n/a" : esc(c.status)}</span>
+        <span><span class="name">${esc(c.name)}</span><br><span class="detail">${esc(c.detail)}</span></span>
+      </li>`).join("")}</ul>
+    ${quiet.length ? `<ul class="findings">${quiet.map(f => `
+      <li>
+        <span class="summary"><span class="sev ${esc(f.severity)}">${esc(f.severity)}</span>${esc(f.summary)}</span>
+        ${f.remedy ? `<span class="remedy">${esc(f.remedy)}</span>` : ""}
+      </li>`).join("")}</ul>` : ""}`;
+
+  return `
+    <section class="hero ${esc(level)}">
+      <h2>${esc(headline)}</h2>
+      <p class="lead">${lead}</p>
+      ${failures || wrong ? `<ul class="findings">${failures}${wrong}</ul>` : ""}
+      <div class="row">
+        <button id="health-toggle" class="ghost" aria-expanded="${healthOpen ? "true" : "false"}">
+          ${healthOpen ? "Hide" : "Show"} all ${checks.length} checks${quiet.length ? ` and ${quiet.length} notes` : ""}
+        </button>
+      </div>
+      ${detail}
+    </section>`;
+}
+
+/// System: what this image is, and what it is running on.
+function systemSection(status) {
+  return `<div class="grid">
+      ${systemCard(status)}
+      ${devicesCard(status.gpu || {})}
+      ${healthCard(status)}
+    </div>`;
+}
+
+// ------------------------------------------------------------------------------------
+// Storage.
+//
+// Two things that were three screens apart: what the appliance's own filesystems are doing,
+// which came off the activity card, and where the library lives, which was a card of its
+// own near the bottom. They are one subject and this is the view for it.
+// ------------------------------------------------------------------------------------
+let lastStorageRendered = null;
+
+/// What each filesystem this appliance has is for. Named here rather than guessed from the
+/// path, because "10% used" means something very different for the two of them.
+const FILESYSTEMS = {
+  "/var": ["Persistent state", "Plex's library database, its app images, the console's TLS key and the update record. This is the one filesystem a rollback does not revert — and the one whose largest writer nothing prunes."],
+  "/": ["The running root", "A tmpfs assembled at boot from nothing. Everything here is gone at the next restart, which is what makes a reset to factory state a one-line operation."],
+};
+
+function renderStorage() {
+  const host = document.getElementById("storage-body");
+  if (!host) return;
+  const filesystems = (latestMetrics || {}).storage || [];
+  const shares = latestShares || [];
+
+  const cards = filesystems.map(fs => {
+    const [title, why] = FILESYSTEMS[fs.path] || [fs.path, ""];
+    const level = fs.percent_used >= 92 ? "unavailable"
+      : fs.percent_used >= 80 ? "degraded" : "ready";
+    return `
+      <div class="card">
+        <h3>${esc(title)}</h3>
+        <div class="cap">
+          <span class="figure">${esc(metricBytes(fs.available))}</span>
+          <span class="of">free of ${esc(metricBytes(fs.total))}</span>
+          <span class="badge ${esc(level)}">${esc(metricNum(fs.percent_used, 0))}% used</span>
+        </div>
+        ${metricMeter(fs.percent_used, 80, 92)}
+        <p class="hint"><span class="mono">${esc(fs.path)}</span> — ${esc(why)}</p>
+      </div>`;
+  }).join("");
+
+  // Said plainly, because an appliance with no share is an appliance with nothing to play,
+  // and /var is far too small to be anybody's library.
+  const library = shares.length
+    ? ""
+    : `<div class="absent"><strong>No media share is configured.</strong> Plex has nothing
+         to play: this machine's own <span class="mono">/var</span> is sized for a database
+         and app images, not for films. Add the NAS or server the library lives on below.</div>`;
+
+  const markup = filesystems.length
+    ? `<div class="grid">${cards}</div>${library}`
+    : `<p class="empty">Measuring… capacity is read with the rest of the activity figures,
+         which arrive a couple of seconds after this page opens.</p>`;
+
+  if (markup === lastStorageRendered) return;
+  lastStorageRendered = markup;
+  host.innerHTML = markup;
+}
+
+/// The disks themselves: what is attached, and what each one already holds.
+///
+/// Read-only here on purpose. The same report drives the installer in System, which is the
+/// one control on this console that erases data, and putting it at the bottom of the view
+/// somebody opens to look at free space is how an afternoon goes wrong. What this shows is
+/// the inventory: model, size, partitions, and how hard each one is being worked.
+function renderStorageDisks(report) {
+  const host = document.getElementById("storage-disks");
+  if (!host) return;
+  const disks = (report || {}).disks || [];
+  const io = (latestMetrics || {}).disks || [];
+
+  const rows = disks.map(d => {
+    const rate = io.find(x => x.name === d.name);
+    return `
+      <tr>
+        <td class="name">${esc(d.name)}${d.is_source ? ' <span class="tag">PlexOS</span>' : ""}</td>
+        <td>${esc(d.model)}</td>
+        <td class="num">${esc(human(d.bytes))}</td>
+        <td class="num">${esc(metricRate(rate && rate.read_per_second))}</td>
+        <td class="num">${esc(metricRate(rate && rate.write_per_second))}</td>
+        <td class="dim">${(d.contents || []).length ? esc((d.contents || []).join(", ")) : "nothing on it"}</td>
+      </tr>`;
+  }).join("");
+
+  host.innerHTML = `
+    <section class="card">
+      <h3>Disks</h3>
+      ${rows
+        ? `<div class="scroll"><table class="mtable">
+             <thead><tr><th>Device</th><th>Model</th><th class="num">Size</th>
+               <th class="num">Read</th><th class="num">Write</th><th>Holds</th></tr></thead>
+             <tbody>${rows}</tbody>
+           </table></div>`
+        : `<p class="empty">No disk could be enumerated.</p>`}
+      <p class="hint">Read and write rates come from the activity poll and are for the whole
+         device. There is no SMART here: nothing in this image reads it yet, and a panel of
+         invented health figures would be worse than an honest gap. Installing PlexOS onto one
+         of these is in <button class="linkish" data-goto="system">System</button>.</p>
+    </section>`;
+}
+
+// ------------------------------------------------------------------------------------
+// Events.
+//
+// There is no event log on this appliance. Nothing writes /var/log, and
+// docs/PRODUCTION-READINESS.md lists that as an item with no owner. So this view shows the
+// two things the machine *does* record about its own history -- why a boot was handed back
+// to the other slot, and what the gate did with this one -- and then says plainly that the
+// rest does not exist. It does not invent a timeline out of the state it can see now.
+// ------------------------------------------------------------------------------------
+let lastEventsRendered = null;
+
+function renderEvents() {
+  const host = document.getElementById("events-body");
+  if (!host) return;
+  const update = latestUpdate || {};
+  const rollback = update.rollback;
+
+  // The one durable record on this machine. It survives a rollback because it is written to
+  // /var, which is the only surface a rollback leaves alone -- everything else that could
+  // explain the boot went away with the /usr that was reverted.
+  const rolled = rollback
+    ? `<section class="card">
+         <h3>Rollback record</h3>
+         <div class="progress failed">
+           <span class="now">Handed back from ${esc(rollback.version || "an unknown version")}${rollback.slot ? ` on slot ${esc(rollback.slot)}` : ""}</span>
+           <div>${rollback.version && rollback.version === update.running
+              ? "That is the version running now, so it was installed again or it was this slot that failed."
+              : "The bootloader gave up on it and came back to the system below."}</div>
+           ${rollback.tries_left !== null && rollback.tries_left !== undefined
+              ? `<div>Tries left when it was written: <span class="mono">${esc(rollback.tries_left)}</span>.</div>` : ""}
+           <div class="log">${esc((rollback.failures || []).join("\n") || rollback.verdict || "")}</div>
+         </div>
+         <p class="hint">Written to <span class="mono">/var/lib/plexos/update/rollback.json</span>,
+            which is why it is still here: reverting <span class="mono">/usr</span> takes the
+            log, the verdict and the version string with it, and the system that comes back
+            cannot tell it is a replacement.</p>
+       </section>`
+    : "";
+
+  const gate = update.gate
+    ? `<section class="card">
+         <h3>This boot</h3>
+         <p><span class="mono">${esc(update.gate)}</span></p>
+         <p class="hint">What the health gate did with the entry this machine booted. A name
+            losing its <span class="mono">+n-m</span> counter is the gate marking the slot
+            permanent — the success half of ADR-0005.</p>
+       </section>`
+    : "";
+
+  const markup = `${rolled}${gate}
+    <div class="absent">
+      <strong>Persistent event history is not available yet.</strong>
+      Nothing on this appliance writes an event log: there is no
+      <span class="mono">/var/log</span> writer, no clock synchronisation to timestamp one
+      against, and no retention policy for a <span class="mono">/var</span> whose largest
+      writer is never pruned. Those three are listed together in
+      <span class="mono">docs/PRODUCTION-READINESS.md</span> as items with no owner, and they
+      have to be answered before a log is worth keeping.
+      ${rolled || gate ? "What is above is what the machine records today, and it is durable." : ""}
+    </div>`;
+
+  if (markup === lastEventsRendered) return;
+  lastEventsRendered = markup;
+  host.innerHTML = markup;
+}
+
 function render(status) {
   const p = status.product || {};
-  document.getElementById("product").textContent = p.name || "PlexOS";
+
+  // `PRETTY_NAME` is "PlexOS 0.1.0.202608110811" and `VERSION_ID` is the tail of it, so
+  // printing both put a nineteen-digit version in the header twice, next to itself. The
+  // wordmark keeps the name with that tail removed; the badge keeps the version. Neither is
+  // hard-coded -- an image that renames itself still says so here, which is the whole reason
+  // this reads os-release rather than saying "PlexOS".
+  const name = p.name || "PlexOS";
+  const trimmed = p.version && name.endsWith(p.version)
+    ? name.slice(0, -p.version.length).trim()
+    : name;
+  document.getElementById("product").textContent = trimmed || name;
   document.getElementById("version").textContent = p.version ? "v" + p.version : "";
 
   const slot = document.getElementById("slot");
   slot.hidden = !p.slot;
   slot.textContent = p.slot ? "slot " + p.slot : "";
 
+  // Short, because this badge has to survive a 390 px bar beside a lock and two power
+  // controls, and "boot NOT healthy" is fifteen characters of which two carry the meaning.
+  // The sentence it used to be is the title, and the Overview says it in full.
   const gate = document.getElementById("gate");
   gate.hidden = false;
-  gate.textContent = status.healthy ? "boot healthy" : "boot NOT healthy";
-  gate.style.color = status.healthy ? "var(--ready)" : "var(--unavailable)";
-  gate.style.borderColor = status.healthy ? "var(--ready)" : "var(--unavailable)";
+  gate.textContent = status.healthy ? "Healthy" : "Not healthy";
+  gate.className = "badge " + (status.healthy ? "ready" : "unavailable");
+  gate.title = status.healthy
+    ? "Every boot health check passed, so this slot can be made permanent."
+    : "The boot health gate has failed. If this entry is still on trial the machine will hand itself back to the other slot.";
 
-  // The terminal is rendered once and never re-rendered: the status poll replaces #main
-  // every few seconds, and a terminal whose scrollback and focus vanished on a timer
-  // would be unusable. It lives outside that element for exactly that reason.
-  if (!document.getElementById("terminal")) {
-    const host = document.createElement("div");
-    host.className = "wide";
-    // Two containers, because they change on different schedules: the banner follows the
-    // settings, which are fetched, and the terminal must never be re-rendered at all.
+  // The address a person would type, in the header beside the version. It is the one fact
+  // about this machine that the page cannot derive from itself -- `location.hostname` is
+  // whatever was typed to get here, which on a machine with two interfaces is one of
+  // several answers and not necessarily the useful one.
+  const reachable = (status.network || {}).reachable_at || [];
+  const host = document.getElementById("host-ip");
+  host.textContent = reachable[0] || "";
+  host.hidden = !reachable.length;
+  host.title = reachable.length > 1
+    ? "also reachable at " + reachable.slice(1).join(", ")
+    : "";
+
+  // Each of these is created once and then left alone, and each is outside every region a
+  // poll replaces. The terminal because its scrollback and focus must survive; the settings
+  // form because it loses what somebody is typing; the address-change banner because it is
+  // driven by a fetch rather than by the status poll.
+  hostOnce("term-host", () => {
+    const box = document.createElement("div");
+    box.className = "wide";
+    box.innerHTML = terminalCard(false);
+    return box;
+  }, () => { observeTerminalSize(); termStatus("no session"); });
+
+  hostOnce("sys-settings", () => {
+    const box = document.createElement("div");
+    box.className = "wide";
+    box.innerHTML = hostedSettingsCard();
+    return box;
+  });
+
+  // Above every view rather than in one of them: an address change undoes itself in seconds
+  // unless it is confirmed, and a banner saying so is no use in a view somebody is not
+  // looking at.
+  if (!document.getElementById("net-trial")) {
     const trial = document.createElement("div");
     trial.id = "net-trial";
-    document.getElementById("main").after(trial);
-
-    host.innerHTML = terminalCard(false);
-    trial.after(host);
-    observeTerminalSize();
-    termStatus("no session");
+    document.querySelector(".content").prepend(trial);
     renderTrial();
   }
 
-  document.getElementById("main").innerHTML =
-    gpuSection(status.gpu || {}) +
-    `<div class="grid">
-       ${healthCard(status)}
-       ${devicesCard(status.gpu || {})}
-       ${networkCard(status.network || {})}
-       ${systemCard(status)}
-     </div>`;
-
-  // Settings deliberately not in there. #main is replaced wholesale every few seconds,
-  // and a form inside it loses focus mid-word, closes its own datalist, and discards
-  // anything typed but not yet saved -- reported as "the cursor escapes the field and
-  // the timezone list has two strange entries in it", which are one defect wearing two
-  // faces. The terminal was moved out of #main for this exact reason and the reasoning
-  // was written down at the time; it applies to every control somebody types into.
-  if (!document.getElementById("settings")) {
-    const host = document.createElement("div");
-    host.className = "wide";
-    host.innerHTML = hostedSettingsCard();
-    document.getElementById("net-trial").before(host);
-  }
+  // Overview keeps the question this project exists to answer and the things that are
+  // wrong; the inventory and the identity move to the views they belong to. Three regions
+  // rather than one, each replaced wholesale on its own -- which is the same arrangement as
+  // before and not a new hazard, because none of the three holds anything anybody types.
+  document.getElementById("main").innerHTML = healthSection(status);
+  document.getElementById("sys-body").innerHTML = systemSection(status);
+  document.getElementById("net-body").innerHTML = networkCard(status.network || {});
 
   // In the sticky header now, as a badge, so "how long has this been up" is answerable
   // without scrolling to the bottom of a page that is several screens long. The footer keeps
@@ -2115,6 +3402,22 @@ function render(status) {
   uptime.hidden = !since;
   document.getElementById("refreshed").textContent =
     "refreshed " + new Date().toLocaleTimeString();
+
+  latestStatus = status;
+  renderSummary();
+}
+
+/// Creates a persistent element inside `id`, once, and never again.
+///
+/// The three things this places -- the terminal, the settings form, the trial banner -- are
+/// all things a poll must never rebuild, and each one used to carry its own copy of "is it
+/// there yet". One function, so the next thing that must survive a redraw is placed the same
+/// way rather than the third way.
+function hostOnce(id, build, after) {
+  const parent = document.getElementById(id);
+  if (!parent || parent.firstElementChild) return;
+  parent.append(build());
+  if (after) after();
 }
 
 function renderError(error) {
@@ -2301,7 +3604,7 @@ function renderPlexInto(report) {
         ? ` Version <span class="mono">${esc(report.installed_version)}</span>.`
         : ""} Sign in and add your libraries from Plex itself.</p>
       <a class="visit" target="_blank" rel="noopener noreferrer"
-         href="https://${esc(location.hostname)}${esc(report.web)}">Open Plex</a>
+         href="${plexUrl(report.web)}">Open Plex</a>
       ${plexVersionsMarkup(report, busy)}
       ${progressMarkup(report, phase, busy)}`;
     wirePlexVersionControls(report);
@@ -2632,7 +3935,13 @@ async function sharesTick() {
   try {
     const response = await fetch(SHARES_ENDPOINT, { cache: "no-store" });
     if (!response.ok) throw new Error("HTTP " + response.status);
-    renderShares(await response.json());
+    const list = await response.json();
+    // Before the render, and outside its signature check, for the reason recorded on
+    // `latestProvision`: the Overview's Storage card counts these and is a different element.
+    latestShares = list;
+    renderSummary();
+    renderStorage();
+    renderShares(list);
   } catch (error) { /* the status card already says the daemon is unreachable */ }
   clearTimeout(sharesTimer);
   sharesTimer = setTimeout(sharesTick, PLEX_IDLE_MS);
@@ -2786,6 +4095,11 @@ async function updateTick() {
     updateTimer = setTimeout(updateTick, PLEX_IDLE_MS);
     return;
   }
+  // Outside renderUpdate's signature check, for the reason recorded on `latestProvision`:
+  // the Events view is drawn from the rollback record in this same reply.
+  latestUpdate = report;
+  renderEvents();
+
   renderUpdate(report);
   const busy = ["checking", "downloading", "writing", "activating"].includes(report.phase);
   clearTimeout(updateTimer);
@@ -2804,6 +4118,13 @@ async function plexTick() {
     plexTimer = setTimeout(plexTick, PLEX_IDLE_MS);
     return;
   }
+
+  // Kept whether or not the section redraws. `renderPlex` returns early when nothing a
+  // reader would notice has changed, and the Overview's Plex card is a different element
+  // with a different signature -- so reading the report from inside that early return would
+  // have left the summary showing the first reply for ever.
+  latestProvision = report;
+  renderSummary();
 
   renderPlex(report);
   const busy = ["catalogue", "downloading", "verifying", "building", "starting"].includes(report.phase);
@@ -2873,6 +4194,11 @@ function renderInstall(report) {
   const busy = ["partitioning", "copying", "formatting"].includes(phase);
   if (busy || phase === "failed") unfold("install");
   const disks = report.disks || [];
+
+  // The same enumeration, read-only, in Storage. Outside the signature check below, which
+  // returns early while somebody is typing into the confirmation field -- and an inventory
+  // that stopped updating because of a field in another view would be a puzzle.
+  renderStorageDisks(report);
 
   const typing = document.activeElement && document.activeElement.id === "install-confirm";
   const rendered = JSON.stringify([phase, report.detail, report.error, disks, (report.log || []).length]);
@@ -3114,6 +4440,12 @@ function metricTile(label, value, unit, sub, extra) {
 function renderMetrics(m) {
   const card = document.getElementById("metrics");
   card.classList.remove("stale");
+
+  // The Overview's Storage and Transcoding cards are drawn from this reply too -- /var's
+  // free space and the graphics clock come from here and from nowhere else.
+  latestMetrics = m;
+  renderSummary();
+  renderStorage();
 
   const cpu = m.cpu || {};
   const memory = m.memory || {};
@@ -3438,13 +4770,50 @@ async function power(action, label) {
 // simply stop working after a second, which is the kind of fault nobody reports because
 // it looks like a slow page.
 document.addEventListener("click", event => {
-  // Folding first, and it returns: a heading is not also a button, and the rest of this
+  // Navigation first, and by `closest` rather than by target: a nav item contains an icon
+  // and a label, and a click landing on either of those has a target that is not the button.
+  const item = event.target && event.target.closest ? event.target.closest(".navitem") : null;
+  if (item) {
+    navTo(item.dataset.view);
+    return;
+  }
+  // The same, for the cards on the Overview that point at a view. `data-goto` rather than an
+  // id apiece, because there are four of them and they are rebuilt on every poll.
+  const goto = event.target && event.target.closest ? event.target.closest("[data-goto]") : null;
+  if (goto) {
+    navTo(goto.dataset.goto);
+    return;
+  }
+
+  // Folding, and it returns: a heading is not also a button, and the rest of this
   // handler asks about ids that a heading does not have.
   const head = event.target && event.target.closest
     ? event.target.closest("[data-fold] > h3, [data-fold] > .bar")
     : null;
   if (head) {
     toggleFold(head.parentElement);
+    return;
+  }
+
+  const id = event.target ? event.target.id : "";
+  if (id === "nav-toggle") {
+    openDrawer(!document.getElementById("nav").classList.contains("open"));
+    return;
+  }
+  if (event.target === document.getElementById("scrim")) { closeDrawer(); return; }
+
+  if (id === "admin-lock") {
+    openAdmin(document.getElementById("token-card").hidden);
+    return;
+  }
+  if (id === "token-lock") { lockAdmin(); return; }
+  if (id === "health-toggle") {
+    healthOpen = !healthOpen;
+    // Redrawn from the reply already in hand rather than by asking again: the status poll is
+    // every ten seconds and a control that took that long to answer would read as broken.
+    if (latestStatus) document.getElementById("main").innerHTML = healthSection(latestStatus);
+    const button = document.getElementById("health-toggle");
+    if (button) button.focus();
     return;
   }
   if (event.target && event.target.id === "procs-load") toggleProcesses();
@@ -3496,8 +4865,35 @@ document.getElementById("restart").addEventListener("click", () => power("restar
 {
   const field = document.getElementById("token");
   field.value = groupToken(normaliseToken(token()));
-  field.addEventListener("input", event => rememberToken(formatTokenField(event.target)));
+  field.addEventListener("input", event => {
+    rememberToken(formatTokenField(event.target));
+    // The header follows the field as it is typed. Sixteen characters read off another
+    // screen is a slow thing to type, and a lock that only flipped on the next click would
+    // leave somebody wondering whether it had been accepted.
+    updateLock();
+  });
 }
+
+// Before anything is drawn, so the first paint is already the right colour: a page that
+// renders light and then turns dark is a flash somebody sees every single time.
+applyTheme(localStorage.getItem(THEME_KEY) || "system");
+{
+  const select = document.getElementById("theme");
+  select.value = localStorage.getItem(THEME_KEY) || "system";
+  select.addEventListener("change", event => chooseTheme(event.target.value));
+}
+updateLock();
+
+// The keyboard's way out of the panel and the drawer. Escape is what people press, and a
+// popover that only closes by clicking the thing that opened it is one that traps a keyboard.
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  if (!document.getElementById("token-card").hidden) {
+    openAdmin(false);
+    document.getElementById("admin-lock").focus();
+  }
+  closeDrawer();
+});
 
 // The three sections that fold are static markup, so they are drawn open and folded here
 // once. Everything else comes out of a template that already knows.
@@ -3505,6 +4901,13 @@ if (SOLO) {
   startTerminalWindow();
 } else {
   applyFolds();
+
+  // The URL is the one source of truth for which view is showing, so the back button steps
+  // between them and a link to `#network` opens on it.
+  showView(viewInUrl());
+  window.addEventListener("popstate", () => showView(viewInUrl()));
+  // For somebody who edits the address bar by hand, which pushState does not fire for.
+  window.addEventListener("hashchange", () => showView(viewInUrl()));
 
   tick();
   tickSetup();

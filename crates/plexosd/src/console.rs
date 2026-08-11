@@ -2047,22 +2047,54 @@ mod tests {
         // The console is a page people leave open and come back to — a status console
         // that navigates away from itself is one they have to find again. And it is
         // served over TLS, so the link out of it is too.
-        let anchor = PAGE
-            .split_once("Open Plex")
-            .map(|(before, _)| before)
-            .and_then(|before| before.rfind("<a ").map(|at| &before[at..]))
-            .expect("the running-Plex card links to Plex");
-        assert!(
-            anchor.contains("target=\"_blank\""),
-            "Open Plex must open in a new tab: {anchor}"
+        //
+        // There are two of these now: the Overview's Plex card and the Plex view. So the
+        // check is over *every* anchor whose text is "Open Plex" rather than over the first
+        // one, which is the version that would have passed while a second link added later
+        // handed a new tab an opener on this one.
+        //
+        // The scheme moved into `plexUrl` when the second link arrived, because two copies
+        // of an absolute URL is exactly how two links come to disagree about it — and the
+        // page's other rule is that it may hold only one absolute URL at all. So the TLS
+        // half is asserted of the helper, and the anchors are asserted to use it.
+        let anchors: Vec<&str> = PAGE
+            .match_indices("Open Plex</a>")
+            .filter_map(|(at, _)| {
+                PAGE[..at]
+                    .rfind("<a ")
+                    .map(|start| &PAGE[start..at + "Open Plex</a>".len()])
+            })
+            .collect();
+        assert_eq!(
+            anchors.len(),
+            2,
+            "the Overview card and the Plex view each link to Plex"
         );
+
+        for anchor in &anchors {
+            assert!(
+                anchor.contains("target=\"_blank\""),
+                "Open Plex must open in a new tab: {anchor}"
+            );
+            assert!(
+                anchor.contains("rel=\"noopener"),
+                "and must not hand the new tab a handle on this one: {anchor}"
+            );
+            assert!(
+                anchor.contains("href=\"${plexUrl("),
+                "and must build its address through the one function that decides the \
+                 scheme, rather than spelling it again: {anchor}"
+            );
+        }
+
+        let helper = PAGE
+            .split_once("function plexUrl(")
+            .map(|(_, rest)| rest)
+            .expect("plexUrl is a named function so that this can be checked");
+        let body = &helper[..helper.find("\n}").unwrap_or(helper.len())];
         assert!(
-            anchor.contains("rel=\"noopener"),
-            "and must not hand the new tab a handle on this one: {anchor}"
-        );
-        assert!(
-            anchor.contains("href=\"https://"),
-            "and must not drop out of TLS on the way: {anchor}"
+            body.contains("https://"),
+            "and that function must not drop out of TLS on the way: {body}"
         );
     }
 
