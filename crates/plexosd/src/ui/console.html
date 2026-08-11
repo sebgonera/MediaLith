@@ -383,6 +383,10 @@
     display: grid;
     gap: 1rem;
     grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+    /* Or a folded card is stretched to the height of the tallest thing beside it, and a
+       heading with three hundred pixels of nothing under it reads as a card that failed to
+       load rather than one somebody shut. */
+    align-items: start;
   }
 
   .card {
@@ -3066,7 +3070,7 @@ let currentView = null;
 const VIEW_OPENS = {
   storage: ["shares"],
   network: ["wifi"],
-  system: ["update"],
+  system: ["update", "system"],
 };
 const openedOnce = new Set();
 
@@ -4395,6 +4399,68 @@ const UPDATE_PHASES = {
   failed:      "Failed",
 };
 
+/// The two slots, drawn.
+///
+/// This is the product feature, and it was a paragraph. Two boxes and an arrow say the thing
+/// the paragraph was trying to: there are exactly two systems on this disk, the update goes
+/// to the one that is not running, and the one that works is left alone.
+///
+/// **Nothing here is invented.** The running slot and its version come off /api/update; the
+/// other slot's version is not reported by anything, and this says so rather than showing a
+/// dash that reads as "empty" or, worse, guessing the previous release. `staged` is the one
+/// case where the inactive slot's contents *are* known -- because this console just wrote
+/// them -- and only then does the box carry a version.
+function slotsMarkup(report) {
+  const running = (report.slot || "").toLowerCase();
+  const other = running === "a" ? "b" : running === "b" ? "a" : "";
+  const staged = report.staged;
+
+  const box = (letter, live) => `
+    <div class="slot ${live ? "live" : "target"}">
+      <div class="k">${live ? "Running now" : "Inactive slot"}</div>
+      <div class="name">Slot ${esc((letter || "?").toUpperCase())}</div>
+      <div class="v">${live
+        ? esc(report.running || "version not reported")
+        : staged
+          ? esc(staged) + " — written, waiting for a restart"
+          : "what is here is not reported"}</div>
+    </div>`;
+
+  return `
+    <div class="slots">
+      ${box(running, true)}
+      <div class="arrow" aria-hidden="true">→</div>
+      ${box(other, false)}
+    </div>
+    <p class="hint">An update is written to the slot this machine is <em>not</em> running
+       from, so the system answering this page is never the one being overwritten. What is
+       in the inactive slot is not something the appliance reports${staged
+         ? ", except when this console has just written it — which it has" : ""}.</p>`;
+}
+
+/// The stages an update passes through, with the one this machine is at marked.
+///
+/// Derived from what the report actually says rather than remembered, so it cannot drift
+/// from the machine: `staged` means written, `gate` naming a permanent entry means the last
+/// one finished, and a rollback record means the last one did not.
+function lifecycleMarkup(report, phase) {
+  const busy = ["checking", "downloading", "writing", "activating"].includes(phase);
+  const at = busy ? "writing"
+    : report.staged ? "restart"
+    : report.rollback && report.rollback.version === report.running ? "rollback"
+    : "permanent";
+
+  const step = (key, text) => `<span class="${at === key ? "on" : ""}">${esc(text)}</span>`;
+  return `
+    <div class="lifecycle">
+      ${step("writing", "1. Written to the inactive slot")}
+      ${step("restart", "2. Restart into it, on trial")}
+      ${step("gate", "3. The boot health gate decides")}
+      ${step("permanent", "4a. Healthy → the slot becomes permanent")}
+      ${step("rollback", "4b. Three bad boots → back to the other slot, with nobody present")}
+    </div>`;
+}
+
 /** The system-update section. */
 function renderUpdate(report) {
   const phase = report.phase || "idle";
@@ -4432,14 +4498,15 @@ function renderUpdate(report) {
   // so this note off /var is the only thing standing between "my appliance went
   // backwards a version" and knowing why. Reported as history, not as a current state:
   // it says which version it was about, and whether that is the one running now.
+  // A pointer rather than the record. The record itself is in Events, which is the view for
+  // what this machine has recorded about its own past; printing it in both places put the
+  // same red box on two views and left Events with nothing of its own to show.
   const rolledBack = rollback
-    ? `<div class="progress failed">
-         <span class="now">Rolled back from ${esc(rollback.version || "an unknown version")}${rollback.slot ? ` on slot ${esc(rollback.slot)}` : ""}</span>
-         <div>${rollback.version && rollback.version === report.running
-            ? "That is the version running now, so it was installed again or it was this slot that failed."
-            : "The bootloader gave up on it and came back to the system below."}</div>
-         <div class="log">${esc((rollback.failures || []).join("\n") || rollback.verdict || "")}</div>
-       </div>`
+    ? `<p class="warn">This machine handed itself back from
+         <span class="mono">${esc(rollback.version || "an unknown version")}</span>${
+           rollback.slot ? ` on slot ${esc(rollback.slot)}` : ""}, which is why it is running
+         what it is running.
+         <button class="linkish" data-goto="events">What happened</button>.</p>`
     : "";
 
   // Absent means nothing has been verified, which is not the same as unsigned and must
@@ -4454,18 +4521,19 @@ function renderUpdate(report) {
 
   document.getElementById("update").innerHTML = `
     <h3>System update</h3>
+    ${slotsMarkup(report)}
+    ${lifecycleMarkup(report, phase)}
     <dl>
-      <dt>Running</dt><dd class="mono">${esc(report.running)} (slot ${esc(report.slot)})</dd>
       ${report.available ? `<dt>Offered</dt><dd class="mono">${esc(report.available)}</dd>` : ""}
-      ${report.staged ? `<dt>Written</dt><dd class="mono">${esc(report.staged)} — restart to use it</dd>` : ""}
       ${report.gate ? `<dt>This boot</dt><dd>${esc(report.gate)}</dd>` : ""}
       ${signedBy}
     </dl>
     ${rolledBack}
-    <p class="hint">The update is written to the slot this machine is <em>not</em> running
-       from, and the entry that works now is left alone. If the new one fails to boot three
-       times the bootloader comes back to this one by itself.
-       ${developmentKey}</p>
+    ${developmentKey ? `<p class="hint">${developmentKey}</p>` : ""}
+    <!-- One line on purpose. A test asserts this sentence is on the page, because it is the
+         question anybody hesitating over that button is actually asking, and reflowing it
+         across two lines is enough to make the assertion miss it. -->
+    <p class="hint">If the new system fails to boot three times, the bootloader comes back to this one by itself, and nobody has to be at the machine for that to happen.</p>
     <div class="row">
       <input type="text" id="update-source" placeholder="paste the address publish-update.sh prints"
              autocomplete="off" spellcheck="false" value="${esc(sessionStorage.getItem(SOURCE_KEY) || "")}">
