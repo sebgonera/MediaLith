@@ -569,7 +569,16 @@
   .solo { height: 100%; display: flex; flex-direction: column; max-width: none; }
   .solo > :not(.wide):not(#token-card) { display: none; }
   .solo > .wide { flex: 1 1 auto; min-height: 0; margin: 0; }
-  .solo > #token-card { margin: 0 0 .6rem; flex: 0 0 auto; }
+  /* In the popup the token card is not a popover: there is no header to hang it under and
+     no lock to press, so it is the only way in and it sits in the flow above the shell.
+     `position: fixed` from the popover rules would otherwise float it over the terminal. */
+  .solo > #token-card {
+    position: static;
+    width: auto;
+    max-height: none;
+    margin: 0 0 .6rem;
+    flex: 0 0 auto;
+  }
   .solo #terminal { height: 100%; display: flex; flex-direction: column; min-height: 0; }
   .solo #terminal .warn { display: none; }
   .solo #terminal .screen { flex: 1 1 auto; height: auto; min-height: 0; }
@@ -1767,11 +1776,12 @@
         <div class="absent" id="term-gate">
           <strong>This is advanced administration.</strong> The shell below runs as root, in
           the machine's own namespaces, with no confinement — that is deliberate, because a
-          confined shell cannot do the thing anyone opens one for. It is gated by the device
-          token and served over TLS, and ADR-0014 states plainly that this console is fit for
-          a trusted LAN and is not fit to expose beyond one. Everything else in this console
-          is a named operation with a remedy attached; this is the admission that the list of
-          operations cannot be complete.
+          confined shell cannot do the thing anyone opens one for. Everything else in this
+          console is a named operation with a remedy attached; this is the admission that the
+          list of operations cannot be complete, because every fault of the last month was
+          diagnosed by looking at something nobody had thought to expose.
+          <strong>ADR-0014: this console is fit for a trusted LAN and is not fit to expose
+          beyond one.</strong>
         </div>
         <div id="term-host"></div>
       </section>
@@ -2765,12 +2775,17 @@ function terminalCard(solo) {
         <h3 style="margin:0">Terminal</h3>
         <span class="state" id="term-status">no session</span>
       </div>
+      <!-- "Compare the fingerprint below" was true while this card sat above the System
+           card on one long page. The fingerprint is in the System view now, so the sentence
+           pointed at nothing -- a control that was correct in the state it was written in
+           and wrong in the state that followed, which is the shape this repository keeps
+           recording. It points at the view instead. -->
       <p class="warn"><strong>A root shell.</strong> The connection is encrypted and the
         device token stops a passer-by, but the certificate is one this machine issued
         itself — so it proves nobody is <em>listening</em>, not that nobody is in the
-        middle. Compare the fingerprint below against the one your browser shows.
-        ADR-0014: this console is for a trusted LAN and is not fit to expose beyond
-        one.</p>
+        middle. The only way to know is to compare this console's key fingerprint, in
+        <button class="linkish" data-goto="system">System</button>, against the one your
+        browser shows for the certificate.</p>
       <div class="row">
         <button id="term-open">Open a shell</button>
         <button id="term-close" class="ghost">Close</button>
