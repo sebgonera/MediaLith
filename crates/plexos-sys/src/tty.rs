@@ -72,6 +72,89 @@ pub fn size(terminal: &File) -> io::Result<Size> {
     })
 }
 
+/// Asks the terminal to use one of the kernel's built-in fonts.
+///
+/// The glyph size is the only lever there is on how big text looks. The framebuffer mode is
+/// chosen by firmware before Linux starts and i915 then drives the panel at its native
+/// resolution regardless, so on the reference laptop — 2880x1620 on a fifteen-inch screen —
+/// the default 8x16 font produces a 360x101 grid and characters about three millimetres
+/// tall. `TER16x32` is four times the area and gives 180x50.
+///
+/// # Why this exists when the command line can already ask
+///
+/// Because it asked and nothing happened, twice, and the reason was two directories away:
+/// `CONFIG_FONT_TER16x32` depends on `CONFIG_FONTS`, which was unset, so kconfig dropped it
+/// without a word and `fbcon=font:TER16x32` looked up a font that had never been compiled
+/// in. The fragment sets `CONFIG_FONTS=y` now — but a request made at runtime, by the
+/// program that cares, fails *visibly* in a log line instead of silently in a kernel that
+/// carried on with what it had.
+///
+/// It also covers the case the command line cannot: fbcon rebinding when i915 takes the
+/// console over from the firmware framebuffer.
+///
+/// # The ioctl
+///
+/// `KDFONTOP` with `KD_FONT_OP_SET_DEFAULT`, whose `data` field is documented in
+/// `include/uapi/linux/kd.h` as "font data ... points to name / NULL". Read from Linux
+/// 6.19.14's own source rather than recalled: `con_font_default` copies at most
+/// `MAX_FONT_NAME - 1` bytes from that pointer and hands the name to `find_font`, which
+/// answers `-ENOENT` for a font that is not built in.
+///
+/// # Errors
+/// `ENOENT` when the kernel has no such font — the interesting failure, and the one that
+/// says a `CONFIG_FONT_*` symbol did not survive kconfig. `EINVAL` when the terminal is not
+/// in text mode, and `ENOSYS` when its driver cannot change fonts at all.
+pub fn use_font(terminal: &File, name: &str) -> io::Result<()> {
+    /// `KDFONTOP`, from `include/uapi/linux/kd.h`.
+    const KDFONTOP: libc::c_ulong = 0x4B72;
+    /// `KD_FONT_OP_SET_DEFAULT`: set the font by name.
+    const SET_DEFAULT: u32 = 2;
+    /// `MAX_FONT_NAME` from `include/linux/font.h`. The kernel copies one byte fewer.
+    const MAX_FONT_NAME: usize = 32;
+
+    /// `struct console_font_op`, laid out as the kernel declares it.
+    #[repr(C)]
+    struct ConsoleFontOp {
+        op: u32,
+        flags: u32,
+        width: u32,
+        height: u32,
+        charcount: u32,
+        data: *mut u8,
+    }
+
+    if name.len() >= MAX_FONT_NAME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("a font name may be at most {} bytes", MAX_FONT_NAME - 1),
+        ));
+    }
+
+    // NUL-terminated and owned for the whole call. The kernel reads through this pointer
+    // with `strncpy_from_user`, so it has to be a live buffer that ends.
+    let mut named = [0_u8; MAX_FONT_NAME];
+    named[..name.len()].copy_from_slice(name.as_bytes());
+
+    let mut request = ConsoleFontOp {
+        op: SET_DEFAULT,
+        flags: 0,
+        width: 0,
+        height: 0,
+        charcount: 0,
+        data: named.as_mut_ptr(),
+    };
+
+    // SAFETY: the descriptor is open for the lifetime of this call. `request` is a
+    // `console_font_op` laid out as the kernel declares it, and `request.data` points at a
+    // NUL-terminated buffer that outlives the call — the kernel copies at most
+    // MAX_FONT_NAME - 1 bytes from it and writes only the width and height fields back.
+    let result = unsafe { libc::ioctl(terminal.as_raw_fd(), KDFONTOP, &raw mut request) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// A terminal's settings, kept so they can be put back.
 ///
 /// Opaque on purpose: it exists to be handed to [`restore`] and there is nothing in it a
@@ -249,6 +332,37 @@ mod tests {
             current_lflag(&terminal),
             before,
             "a terminal left in raw mode is one where the next shell shows no typing"
+        );
+    }
+
+    #[test]
+    fn a_font_name_longer_than_the_kernel_accepts_is_refused_here() {
+        // The kernel copies at most MAX_FONT_NAME - 1 bytes and would silently truncate,
+        // so a long name would ask for a font nobody named. Refused with a sentence
+        // instead, because "the console font did not change" is a symptom with no clue in
+        // it.
+        let Some((terminal, _controller)) = a_terminal() else {
+            println!("skip: no pty available on this host");
+            return;
+        };
+        let too_long = "T".repeat(64);
+        let refused = use_font(&terminal, &too_long).expect_err("a name that cannot fit");
+        assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn a_pty_cannot_change_fonts_and_says_so_rather_than_appearing_to() {
+        // A pty has no glyphs, so its driver has no con_font_default and the kernel answers
+        // ENOSYS. What is being pinned is that the call *reports* rather than succeeding
+        // quietly: on the appliance this is the one signal that a CONFIG_FONT_* symbol did
+        // not survive kconfig, which is exactly how the console came to be unreadable.
+        let Some((terminal, _controller)) = a_terminal() else {
+            println!("skip: no pty available on this host");
+            return;
+        };
+        assert!(
+            use_font(&terminal, "TER16x32").is_err(),
+            "a pty has no font to set, and pretending otherwise would hide the real failure"
         );
     }
 

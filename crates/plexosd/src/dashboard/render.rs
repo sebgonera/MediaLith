@@ -339,11 +339,13 @@ fn countdown(seconds: u64) -> String {
 
 /// The symbol as lines, or why there is not one.
 fn symbol_rows(url: &str, rows: usize, columns: usize) -> Result<Vec<Line>, String> {
-    // Room for the wordmark, the countdown and the footer as well as the symbol. Measured
-    // rather than guessed: eleven lines of text surround it, and a symbol that used every
-    // row would push the countdown off the bottom -- which is the one part of this screen
-    // that changes and therefore the one a person is looking at.
-    const SURROUND: usize = 12;
+    // Room for the wordmark, the countdown and the footer as well as the symbol. Counted
+    // rather than guessed, and counted again when the console font doubled and halved the
+    // rows: the pairing screen puts nine lines around the symbol, and one spare row keeps
+    // the arithmetic from being exactly tight. A symbol that used every row would push the
+    // countdown off the bottom -- the one part of this screen that changes, and therefore
+    // the one a person is looking at.
+    const SURROUND: usize = 10;
 
     let symbol = Symbol::encode(url)?;
     let scale = symbol

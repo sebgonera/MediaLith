@@ -37,7 +37,7 @@
 //! genuinely depend on. Drawn explicitly rather than left to the surrounding screen being
 //! dark, because the surrounding screen *is* dark and the quiet zone has to be light.
 
-use qrcode::{Color, QrCode};
+use qrcode::{Color, EcLevel, QrCode};
 
 /// Modules of light around the symbol, per ISO/IEC 18004.
 pub const QUIET: usize = 4;
@@ -62,7 +62,22 @@ impl Symbol {
     /// happen — but a `Result` rather than a panic, because the alternative to reporting it
     /// is a dashboard that takes the appliance down when somebody gives it a long hostname.
     pub fn encode(payload: &str) -> Result<Self, String> {
-        let code = QrCode::new(payload.as_bytes())
+        // Error correction L, deliberately, where the crate's own default is M.
+        //
+        // Error correction buys tolerance of a damaged symbol, and this one is not printed
+        // on a box that gets scuffed -- it is drawn on a monitor a metre from the camera and
+        // it lasts five minutes. What it costs is size: the same payload needs a version 4
+        // symbol at M and a version 3 at L, which is 33 modules against 29.
+        //
+        // Four modules is the difference between fitting and not. The console runs at
+        // 180x50 once the Terminus font is compiled in, and after the wordmark, the
+        // countdown and the footer there are forty rows for the symbol. At M there is no
+        // whole-number scale that fits, and the screen would have to say it had no room --
+        // on the very machine whose font was made bigger to help.
+        //
+        // Fewer modules in the same space also means *larger* modules, which is the thing a
+        // camera actually cares about.
+        let code = QrCode::with_error_correction_level(payload.as_bytes(), EcLevel::L)
             .map_err(|error| format!("this address will not fit in a QR code: {error}"))?;
 
         Ok(Self {
@@ -305,6 +320,32 @@ mod tests {
         let rows = symbol.rows(scale);
         assert!(rows.len() <= 101, "{} rows", rows.len());
         assert!(visible_cells(&rows[0]) <= 360);
+    }
+
+    #[test]
+    fn the_symbol_still_fits_once_the_console_font_gets_bigger() {
+        // The screen this is drawn on has half as many rows as it used to. CONFIG_FONTS was
+        // unset, so the Terminus fonts were dropped by kconfig and the panel ran at 8x16 --
+        // 360x101. With them compiled in it runs at 16x32, which is 180x50, and a symbol
+        // laid out for a hundred rows would report that it had no room on the very machine
+        // the change was made to help.
+        //
+        // The physical size does not change, which is the part worth understanding: the
+        // modules are drawn in cells and the cells are twice as big, so the symbol covers
+        // the same number of pixels either way.
+        let symbol = Symbol::encode(PAYLOAD).expect("encodes");
+        let available = 50 - 12;
+        let scale = symbol
+            .scale_for(available, 180)
+            .expect("a 180x50 console has room for a pairing code");
+
+        let rows = symbol.rows(scale);
+        assert!(
+            rows.len() <= available,
+            "{} rows of the {available} available",
+            rows.len()
+        );
+        assert!(visible_cells(&rows[0]) <= 180);
     }
 
     #[test]

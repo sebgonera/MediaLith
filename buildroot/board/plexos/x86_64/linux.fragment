@@ -54,6 +54,23 @@ CONFIG_EFI_EARLYCON=y
 #
 # The smaller fonts stay compiled in so fbcon=font:<name> can pick another at boot
 # without rebuilding; the default is set on the kernel command line in post-image.sh.
+#
+# CONFIG_FONTS is the one that makes the rest of this section mean anything, and its
+# absence cost this project four months of a console nobody could read. Every font below
+# `depends on !SPARC && FONTS`, so with FONTS unset kconfig dropped all four **without
+# erroring** and left the two the kernel picks by default — 8x16 and 8x8. The command line
+# then asked for `fbcon=font:TER16x32`, `find_font` returned NULL for a font that was never
+# compiled in, and fbcon carried on with 8x16.
+#
+# The symptom is not a missing font. It is a 2880x1620 panel showing a 360x101 character
+# grid, which on a 15-inch screen is text about three millimetres tall — and it was
+# diagnosed as "the command line does not take effect" twice before anybody looked in
+# `.config`. That is the trap already recorded at the top of CLAUDE.md, walked into from the
+# one direction where the evidence points somewhere else entirely.
+#
+# `ls lib/fonts/*.o` in the build directory answers it in a second: two object files where
+# there should be four.
+CONFIG_FONTS=y
 CONFIG_FONT_TER16x32=y
 CONFIG_FONT_TER10x18=y
 CONFIG_FONT_8x16=y

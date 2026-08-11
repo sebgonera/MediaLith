@@ -152,6 +152,11 @@ pub fn run(first_boot_code: Option<String>, log: &mut dyn FnMut(&str)) {
         )),
     }
 
+    // Before the size is read, because changing the glyph size changes the grid: 8x16 on
+    // this panel is 360x101 and TER16x32 is 180x50, and laying out for the wrong one puts
+    // the footer off the bottom of the screen.
+    choose_a_legible_font(&screen, log);
+
     let size = plexos_sys::tty::size(&screen)
         .map_or(FALLBACK, |size| (size.rows as usize, size.columns as usize));
     log(&format!(
@@ -437,6 +442,51 @@ fn pairing_url(facts: &Facts, secret: &str) -> String {
     // somebody is decided once, in `Facts::gather`, and the screen prints the same one it
     // encodes -- a QR and a printed URL that disagree is a machine contradicting itself.
     format!("https://{}/#pair={secret}", facts.address().unwrap_or(""))
+}
+
+/// Asks for the largest built-in font the kernel has.
+///
+/// The reference laptop is a fifteen-inch panel at 2880x1620, and the default 8x16 font
+/// puts characters about three millimetres tall on it — legible in a photograph and not to
+/// somebody standing in front of the machine. `TER16x32` is four times the area.
+///
+/// Tried in order and the first that works wins, because "what fonts does this kernel
+/// have" is a question about the image rather than about the hardware, and an appliance
+/// built without the Terminus fonts should get a readable screen rather than an error.
+///
+/// The failure is logged rather than swallowed, and that line is the point of doing this at
+/// runtime at all: `fbcon=font:TER16x32` on the kernel command line asked for exactly this
+/// and did nothing for months, because `CONFIG_FONT_TER16x32` depends on `CONFIG_FONTS`,
+/// which was unset, so kconfig dropped it without a word. A kernel that has no such font
+/// answers `ENOENT` here, in a sentence, on a terminal somebody reads.
+fn choose_a_legible_font(screen: &std::fs::File, log: &mut dyn FnMut(&str)) {
+    /// Largest first. `TER16x32` and `TER10x18` need `CONFIG_FONTS`; `VGA8x16` is what the
+    /// kernel falls back to on its own and is always there.
+    const PREFERRED: &[&str] = &["TER16x32", "TER10x18", "VGA8x16"];
+
+    let mut refusals = Vec::new();
+    for name in PREFERRED {
+        match plexos_sys::tty::use_font(screen, name) {
+            Ok(()) => {
+                if !refusals.is_empty() {
+                    log(&format!(
+                        "the screen is using {name}; larger fonts were not available ({})",
+                        refusals.join(", ")
+                    ));
+                }
+                return;
+            }
+            Err(error) => refusals.push(format!("{name}: {error}")),
+        }
+    }
+
+    log(&format!(
+        "the console font could not be changed ({}). The screen still works and its text \
+         will be small on a high-resolution panel. Remedy: check that CONFIG_FONTS and \
+         CONFIG_FONT_TER16x32 both survived kconfig -- the second depends on the first and \
+         is dropped without an error when it is missing.",
+        refusals.join("; ")
+    ));
 }
 
 /// Lowers how much the kernel prints to the screen, once there is a screen worth keeping.
