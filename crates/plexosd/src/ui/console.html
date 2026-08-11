@@ -2029,7 +2029,15 @@ let lastNetdiag = "";
 // the diagnosis was the second exception after the process list, and it was worse, because
 // its output is long and sat under the network card for the rest of the session.
 let netdiagShown = false;
+/// The last reply from /api/network, as data. See the note where it is set.
+let netdiagData = null;
 
+/// The Network view's three cards: the connection, the interfaces, and the diagnosis.
+///
+/// One function rather than three, because they are drawn from two sources between them --
+/// the status poll and the on-demand diagnosis -- and either arriving has to redraw the lot.
+/// A card that held half of one source's answer and half of another's is how a page comes to
+/// show a gateway from four minutes ago beside a link state from now.
 function networkCard(net) {
   const rows = (net.interfaces || [])
     .filter(i => i.kind !== "loopback")
@@ -2037,19 +2045,89 @@ function networkCard(net) {
       <tr>
         <td class="mono">${esc(i.name)}</td>
         <td>${esc(i.kind)}</td>
-        <td>${i.carrier ? "link" : "no link"}</td>
+        <td>${i.carrier
+          ? `<span class="badge ready">link</span>`
+          // `operstate` cannot tell "nothing brought it up" from "no cable", and the two
+          // take opposite remedies -- so the state the kernel reports is shown beside the
+          // verdict rather than translated into one.
+          : `<span class="badge degraded">no link</span> <span class="hint">${esc(i.operstate || "")}</span>`}</td>
         <td class="mono">${esc((i.addresses || []).join(", ")) || "—"}</td>
+        <td class="mono dim">${esc(i.mac || "")}</td>
       </tr>`).join("");
+
+  const primary = primaryInterface(net);
+  const address = ((primary || {}).addresses || [])[0];
+  const d = netdiagData || {};
+  const route = d.default_route;
+  const resolver = d.resolver || {};
+  const lookup = d.lookup || {};
+
+  // Everything at the top comes from something that has actually answered. The three lines
+  // that need the diagnosis say "not checked yet" until it has run, rather than a dash --
+  // "no gateway" and "nobody has looked" are opposite states and a dash is both.
+  const unchecked = `<span class="hint">not checked yet</span>`;
+  const reachable = lookup.outcome === "resolved"
+    ? "ready" : lookup.outcome ? "unavailable" : "";
 
   return `
     <div class="card">
-      <h3>Network</h3>
+      <h3>Connection</h3>
+      <div class="server ${!primary ? "degraded" : address && primary.carrier ? "ready" : "degraded"}">
+        <span class="statedot" aria-hidden="true"></span>
+        <div>
+          <div class="what">${!primary ? "No interface"
+            : !primary.carrier ? "No link"
+            : !address ? "No address"
+            : "Connected"}</div>
+          <p class="hint">${!primary
+            ? "Nothing but loopback. On this hardware Ethernet arrives over USB, which enumerates seconds after PCI — check the adapter is plugged in."
+            : !primary.carrier
+              ? "The interface is up and nothing is on the other end of it. A cable, a switch port, or a radio that has not associated."
+              : !address
+                ? "The link is up and DHCP has produced nothing. Check for a DHCP server on this segment, or set an address below."
+                : "This page reached you, so the path from your browser to the appliance works. Whether the appliance can reach the internet is the diagnosis below."}</p>
+        </div>
+      </div>
+      <dl>
+        ${primary ? `<dt>Interface</dt><dd class="mono">${esc(primary.name)} · ${esc(primary.kind)}</dd>` : ""}
+        ${address ? `<dt>Address</dt><dd class="mono">${esc(address)}</dd>` : ""}
+        <dt>Gateway</dt>
+        <dd class="mono">${netdiagData
+          ? (route ? `${esc(route.gateway)} via ${esc(route.interface)}`
+                   : `<span class="warnink">none — nothing can leave this network</span>`)
+          : unchecked}</dd>
+        <dt>Nameservers</dt>
+        <dd class="mono">${netdiagData
+          ? (resolver.error ? esc(resolver.error)
+             : esc((resolver.nameservers || []).join(", ")) || "none")
+          : unchecked}</dd>
+        <dt>Reaches the internet</dt>
+        <dd>${netdiagData
+          ? `<span class="badge ${reachable}">${lookup.outcome === "resolved" ? "yes" : "no"}</span>
+             <span class="hint">${esc(lookup.host || "")} ${lookup.outcome === "resolved"
+               ? "resolves" : lookup.outcome === "timed_out" ? "— no answer at all"
+               : `— ${esc(lookup.error || "failed")}`}</span>`
+          : unchecked}</dd>
+      </dl>
+    </div>
+
+    <div class="card">
+      <h3>Interfaces</h3>
       ${rows
         ? `<div class="scroll"><table>
-             <thead><tr><th>Interface</th><th>Kind</th><th>Link</th><th>Address</th></tr></thead>
+             <thead><tr><th>Interface</th><th>Kind</th><th>Link</th><th>Address</th><th>MAC</th></tr></thead>
              <tbody>${rows}</tbody>
            </table></div>`
         : `<p class="empty">No interface besides loopback. On this hardware Ethernet arrives over USB — check the adapter is plugged in.</p>`}
+    </div>
+
+    <div class="card">
+      <h3>Connectivity diagnostics</h3>
+      <p class="hint">Asks the appliance three questions a browser cannot: whether it has a
+         default route, which resolver it is using and what that resolver is a symlink to,
+         and whether a name it needs actually resolves. Not polled — the lookup blocks for
+         several seconds when a resolver is not answering, and this page has to keep working
+         on a machine that is unwell.</p>
       <div class="row">
         <!-- Ghost, because it reads and changes nothing. The accent is for the controls that
              do something to the machine, and a diagnostic wearing it competed with them. -->
@@ -2064,6 +2142,29 @@ function networkCard(net) {
            happened when this comment was first written.) -->
       <div id="netdiag">${netdiagShown ? lastNetdiag : ""}</div>
     </div>`;
+}
+
+/// Whether the diagnosis has been asked for since this page loaded.
+let netdiagAsked = false;
+
+/// Runs the diagnosis once, when somebody opens the view that reports it.
+///
+/// Opening the Network view *is* the asking -- the gateway and the resolver are three of the
+/// six lines at the top of it, and a view whose headline facts said "not checked yet" until
+/// a second click would be a view that had not answered the question it exists for.
+///
+/// Still never polled, and still only once: the lookup blocks for several seconds when a
+/// resolver is not answering, and repeating that every ten seconds on a machine whose
+/// network is broken is the one thing this must not do.
+///
+/// Called from two places because either can be the one that is ready first: the view can be
+/// opened before the status poll has built the card, and the card can be built before
+/// anybody opens the view.
+function maybeDiagnose() {
+  if (currentView !== "network" || netdiagAsked) return;
+  if (!document.getElementById("netdiag")) return;
+  netdiagAsked = true;
+  runNetworkDiagnosis();
 }
 
 // Asked for, never polled. The name lookup blocks for up to eight seconds, and the
@@ -2081,6 +2182,10 @@ async function runNetworkDiagnosis() {
 
   try {
     const d = await (await fetch("/api/network")).json();
+    // Kept as data as well as as markup. The Connection card at the top of this view reports
+    // the gateway, the resolver and whether a name resolves, and re-deriving those by reading
+    // them back out of a string would be the same answer written twice.
+    netdiagData = d;
     const r = d.resolver || {};
     const route = d.default_route;
     const lookup = d.lookup || {};
@@ -2111,6 +2216,15 @@ async function runNetworkDiagnosis() {
     out.innerHTML = lastNetdiag;
   } finally {
     if (button) { button.disabled = false; button.textContent = "Diagnose the network"; }
+    // The Connection card above is drawn from the same reply, so it is redrawn from the
+    // status already in hand rather than waiting up to ten seconds for the next poll.
+    if (latestStatus) {
+      document.getElementById("net-body").innerHTML = networkCard(latestStatus.network || {});
+      // The reply also decides which interface is the primary one, which the Overview's
+      // Network card reports.
+      lastSummaryRendered = null;
+      renderSummary();
+    }
   }
 }
 
@@ -2135,6 +2249,59 @@ function hostedSettingsCard() {
     `class="card form${foldClass("settings")}" id="settings" data-fold="settings"`);
 }
 
+/// The addressing half, which lives in the Network view.
+///
+/// Split from the card above when the console gained views, because "what this machine is
+/// called and what time it thinks it is" and "what address it answers on" are two subjects
+/// that happened to share a file. They are still one configuration and one endpoint: the
+/// body of a save carries only the fields its own form edits, and `settings::patch` leaves
+/// anything the body does not mention alone -- which is the property that lets two forms
+/// write to one document without either reverting the other.
+/// One return and one `id="net-config"`, deliberately. The first version of this had a
+/// loading branch and a loaded branch, each carrying the id -- and `no_id_is_given_to_two_elements`
+/// caught it at once, which is exactly the defect that once wrote an entire card into a
+/// button because two elements were called `install`.
+function addressingCard() {
+  const net = settingsView ? ((settingsView.config || {}).network || { mode: "dhcp" }) : null;
+
+  return `
+    <div class="card form" id="net-config">
+      <h3>IP configuration</h3>
+      ${!net ? `<p class="empty">Loading…</p>` : `
+      <p class="hint">DHCP is the default and is right for almost every appliance. A fixed
+         address is worth having when something else has to find this machine by number —
+         a router's port forward, or a client that will not use its name.</p>
+      <div class="field">
+        <label for="mode-dhcp">Addressing</label>
+        <div class="row">
+          <button id="mode-dhcp" class="${net.mode === "static" ? "ghost" : ""}">DHCP</button>
+          <button id="mode-static" class="${net.mode === "static" ? "" : "ghost"}">Static</button>
+        </div>
+      </div>
+      ${net.mode === "static" ? `
+        <div class="field">
+          <label for="set-address">Address and prefix</label>
+          <input type="text" id="set-address" autocomplete="off" spellcheck="false"
+                 placeholder="192.168.2.50/24" value="${esc(net.address || "")}">
+        </div>
+        <div class="field">
+          <label for="set-gateway">Gateway</label>
+          <input type="text" id="set-gateway" autocomplete="off" spellcheck="false"
+                 placeholder="192.168.2.1" value="${esc(net.gateway || "")}">
+        </div>
+        <div class="field">
+          <label for="set-dns">Nameservers, comma separated</label>
+          <input type="text" id="set-dns" autocomplete="off" spellcheck="false"
+                 placeholder="192.168.2.1" value="${esc((net.nameservers || []).join(", "))}">
+        </div>
+        <p class="warn">A wrong address takes this page away. Saving applies it and then
+          undoes it unless you confirm from the new address, which is the only proof the
+          console is still reachable.</p>` : ""}
+      <div class="row"><button id="net-save">Save addressing</button></div>
+      <div id="net-result"></div>`}
+    </div>`;
+}
+
 function settingsCard() {
   if (!settingsView) {
     return `<div class="card form"><h3>Settings</h3>
@@ -2143,7 +2310,6 @@ function settingsCard() {
 
   const c = settingsView.config || {};
   const sys = c.system || {};
-  const net = c.network || { mode: "dhcp" };
   const drift = settingsView.hostname_now && settingsView.hostname_now !== sys.hostname;
   const zones = settingsView.timezones || [];
 
@@ -2180,34 +2346,10 @@ function settingsCard() {
            : `<p class="hint">This image carries no timezone database, so any zone but UTC
                 will be refused. It needs a build with BR2_TARGET_TZ_INFO.</p>`}
       </div>
-      <div class="field">
-        <label for="set-mode">Addressing</label>
-        <div class="row">
-          <button id="mode-dhcp" class="${net.mode === "static" ? "ghost" : ""}">DHCP</button>
-          <button id="mode-static" class="${net.mode === "static" ? "" : "ghost"}">Static</button>
-        </div>
-      </div>
-      ${net.mode === "static" ? `
-        <div class="field">
-          <label for="set-address">Address and prefix</label>
-          <input type="text" id="set-address" autocomplete="off" spellcheck="false"
-                 placeholder="192.168.2.50/24" value="${esc(net.address || "")}">
-        </div>
-        <div class="field">
-          <label for="set-gateway">Gateway</label>
-          <input type="text" id="set-gateway" autocomplete="off" spellcheck="false"
-                 placeholder="192.168.2.1" value="${esc(net.gateway || "")}">
-        </div>
-        <div class="field">
-          <label for="set-dns">Nameservers, comma separated</label>
-          <input type="text" id="set-dns" autocomplete="off" spellcheck="false"
-                 placeholder="192.168.2.1" value="${esc((net.nameservers || []).join(", "))}">
-        </div>
-        <p class="hint">A wrong address takes this page away. Saving applies it and then
-          undoes it unless you confirm from the new address, which is the only proof the
-          console is still reachable.</p>` : ""}
       <div class="row"><button id="settings-save">Save settings</button></div>
       <div id="settings-result"></div>
+      <p class="hint">The address this machine answers on is
+        <button class="linkish" data-goto="network">in Network</button>.</p>
     </div>`;
 }
 
@@ -2288,43 +2430,69 @@ async function loadSettings() {
     settingsView = { config: {}, timezones: [], error: String(e) };
   }
   // Replaced in place, and only from here -- this is the one path that redraws the
-  // form, so it is the one place a half-typed value can be lost, and it happens because
+  // forms, so it is the one place a half-typed value can be lost, and it happens because
   // somebody pressed Save or switched addressing mode rather than because a timer fired.
+  //
+  // Two forms since the console gained views: identity in System, addressing in Network.
+  // Both are always in the document, hidden view or not, which is what lets a save read its
+  // own fields by id without caring which view is showing.
   const host = document.getElementById("settings");
   if (host) host.outerHTML = hostedSettingsCard();
+  const addressing = document.getElementById("net-config");
+  if (addressing) {
+    addressing.outerHTML = addressingCard();
+  } else {
+    const box = document.getElementById("net-settings");
+    if (box) box.innerHTML = addressingCard();
+  }
   renderTrial();
 }
 
 // Every field reports what happened to the machine, not merely that it was stored.
 // "Saved" over a setting that changed nothing is the failure this whole path exists to
 // avoid, so pending and failed are rendered differently from applied.
-async function saveSettings() {
-  const out = document.getElementById("settings-result");
-  const button = document.getElementById("settings-save");
+/// Saves one half of the configuration.
+///
+/// `which` is "identity" or "network", and the split is why two forms in two views can write
+/// to one document safely: the body carries only the fields that form edits, and
+/// `settings::patch` leaves anything the body does not mention alone. A replacement would
+/// mean the Network view silently reverting a hostname somebody set in System.
+///
+/// It also keeps the address confirmation honest. `patch_network` is what arms the
+/// undo-unless-confirmed sequence, so a save that only renamed the machine must not carry a
+/// network object at all -- otherwise renaming an appliance would start a countdown nobody
+/// asked for.
+async function saveSettings(which) {
+  const network = which === "network";
+  const out = document.getElementById(network ? "net-result" : "settings-result");
+  const button = document.getElementById(network ? "net-save" : "settings-save");
+  const label = network ? "Save addressing" : "Save settings";
   const value = token();
   if (!value) {
     if (out) out.innerHTML = `<div class="progress failed"><span class="now">Not saved</span>
-      <div>The device token is needed to change settings. Enter it in the Device token
-      box at the top of this page.</div></div>`;
+      <div>The device token is needed to change settings. Unlock with the control in the
+      header, at the top right of this page.</div></div>`;
     return;
   }
   const val = id => (document.getElementById(id) || {}).value || "";
-  const body = {
-    system: { hostname: val("set-hostname"), timezone: val("set-timezone") },
-  };
-  // Sent only when the form is showing the fields, so a save that only renamed the
-  // machine does not arm a confirmation nobody is expecting.
-  if (document.getElementById("set-address")) {
-    body.network = {
-      mode: "static",
-      address: val("set-address"),
-      gateway: val("set-gateway"),
-      nameservers: val("set-dns").split(",").map(x => x.trim()).filter(Boolean),
-    };
-  } else if (pendingMode) {
-    body.network = { mode: pendingMode };
+  const body = {};
+  if (network) {
+    // Sent only when the form is showing the fields, so switching back to DHCP sends a mode
+    // and nothing else rather than a half-filled static configuration.
+    if (document.getElementById("set-address")) {
+      body.network = {
+        mode: "static",
+        address: val("set-address"),
+        gateway: val("set-gateway"),
+        nameservers: val("set-dns").split(",").map(x => x.trim()).filter(Boolean),
+      };
+    } else {
+      body.network = { mode: pendingMode || "dhcp" };
+    }
+    pendingMode = null;
+  } else {
+    body.system = { hostname: val("set-hostname"), timezone: val("set-timezone") };
   }
-  pendingMode = null;
 
   if (button) { button.disabled = true; button.textContent = "Saving…"; }
   try {
@@ -2342,11 +2510,11 @@ async function saveSettings() {
     const applied = result.applied || {};
     const rows = Object.keys(applied).map(name => {
       const o = applied[name] || {};
-      const label = o.state === "applied" ? "in force now"
+      const state = o.state === "applied" ? "in force now"
                   : o.state === "pending" ? "stored — takes effect later"
                   : o.state === "failed" ? "NOT applied"
                   : "unchanged";
-      return `<div><strong>${esc(name)}</strong>: ${esc(label)}${o.detail ? ` — ${esc(o.detail)}` : ""}</div>`;
+      return `<div><strong>${esc(name)}</strong>: ${esc(state)}${o.detail ? ` — ${esc(o.detail)}` : ""}</div>`;
     }).join("");
     const bad = Object.keys(applied).some(n => (applied[n] || {}).state === "failed");
 
@@ -2355,7 +2523,7 @@ async function saveSettings() {
     if (out) out.innerHTML = `<div class="progress failed"><span class="now">Not saved</span>
       <div>${esc(String(e))}</div></div>`;
   } finally {
-    if (button) { button.disabled = false; button.textContent = "Save settings"; }
+    if (button) { button.disabled = false; button.textContent = label; }
   }
 }
 
@@ -2943,6 +3111,7 @@ function showView(name) {
     openedOnce.add(view);
     for (const key of VIEW_OPENS[view] || []) unfold(key);
   }
+  maybeDiagnose();
 
   // A terminal measured while its view was hidden measured nothing, and the floor in
   // termSize would then have told the shell it has eighty columns in a box that is now much
@@ -3083,7 +3252,16 @@ function plexUrl(path) {
 /// report the cable.
 function primaryInterface(net) {
   const all = (net.interfaces || []).filter(i => i.kind !== "loopback");
-  return all.find(i => i.carrier && (i.addresses || []).length)
+  // The interface the default route goes out of, when anything has asked. That is not a
+  // guess at all, and it beats every rule below it: this machine has a cable and a radio both
+  // up with addresses, and the first-with-carrier rule named the cable while everything
+  // leaving the machine went over the radio. Reported by the Connection card naming eth0 one
+  // line above a gateway "via wlan0", which is two true statements that read as a
+  // contradiction.
+  const route = (netdiagData || {}).default_route;
+  const viaRoute = route && all.find(i => i.name === route.interface);
+  return viaRoute
+      || all.find(i => i.carrier && (i.addresses || []).length)
       || all.find(i => (i.addresses || []).length)
       || all.find(i => i.carrier)
       || all[0]
@@ -3592,6 +3770,8 @@ function render(status) {
 
   latestStatus = status;
   renderSummary();
+  // The card it writes into has just been built, which may be the thing it was waiting for.
+  maybeDiagnose();
 }
 
 /// Creates a persistent element inside `id`, once, and never again.
@@ -5119,15 +5299,19 @@ document.addEventListener("click", event => {
     if (out) out.innerHTML = "";
     event.target.remove();
   }
-  if (event.target && event.target.id === "settings-save") saveSettings();
+  if (event.target && event.target.id === "settings-save") saveSettings("identity");
+  if (event.target && event.target.id === "net-save") saveSettings("network");
   if (event.target && event.target.id === "token-rotate") rotateToken();
   if (event.target && event.target.id === "net-confirm") confirmNetwork();
   if (event.target && (event.target.id === "mode-dhcp" || event.target.id === "mode-static")) {
     pendingMode = event.target.id === "mode-static" ? "static" : "dhcp";
     settingsView.config = settingsView.config || {};
     settingsView.config.network = Object.assign({}, settingsView.config.network, { mode: pendingMode });
-    const host = document.getElementById("settings");
-    if (host) host.outerHTML = hostedSettingsCard();
+    // Only the addressing card. Redrawing the identity form as well would throw away a
+    // hostname somebody had typed and not yet saved, two views away, because they pressed
+    // Static here.
+    const host = document.getElementById("net-config");
+    if (host) host.outerHTML = addressingCard();
   }
   if (event.target && event.target.id === "wifi-scan") wifiPost({ action: "scan" });
   if (event.target && event.target.id === "wifi-join") wifiJoin();
