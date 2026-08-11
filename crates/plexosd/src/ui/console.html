@@ -325,6 +325,9 @@
     text-decoration: none;
   }
   .skip:focus { left: 0; top: 0; }
+  /* The container is focusable only so the skip link can land on it; it must not then draw
+     a ring around a third of the page. */
+  #content:focus { outline: none; }
 
   .badge {
     font-size: .75rem;
@@ -1422,9 +1425,17 @@
       box-shadow: var(--shadow);
     }
     .sidebar.open { transform: none; }
-    .navitem { justify-content: flex-start; padding: .6rem .7rem; }
-    .navitem .label { display: inline; }
+    /* `button.navitem`, not `.navitem`, and the reason is the rule in the block above: the
+       tablet rail hides these with `button.navitem .label`, which is a class more specific
+       than a bare `.navitem .label` and wins however far down the sheet it sits. A phone is
+       narrower than a tablet, so both blocks apply, and the drawer opened to a column of
+       seven unlabelled icons -- which is a rail, not a drawer, and the whole point of the
+       drawer is that there is room for the words. */
+    button.navitem { justify-content: flex-start; padding: .6rem .7rem; }
+    button.navitem .label, button.navitem .tail { display: inline; }
     .sidebar .group { text-align: left; padding: 0 .6rem; font-size: .68rem; }
+    .navfoot .group { display: block; }
+    #theme { font-size: .82rem; padding: .35rem .4rem; }
 
     /* What a tap outside the drawer lands on. */
     #scrim {
@@ -1442,6 +1453,12 @@
     .slots { grid-template-columns: minmax(0, 1fr); }
     .slots .arrow { justify-self: center; }
     #token-card { right: .4rem; left: .4rem; width: auto; }
+    /* The update lifecycle. `nowrap` keeps a pill from breaking mid-phrase on a screen with
+       room, and on a 390 px one the longest of them -- "4b. Three bad boots -> back to the
+       other slot, with nobody present" -- pushed the whole page 54 px sideways. Measured
+       rather than eyeballed: a page wider than the window is cropped in a screenshot, which
+       looks exactly like a page that fits. */
+    .lifecycle span { white-space: normal; }
   }
 
   /* Nothing animates for somebody who has asked that it not. */
@@ -1453,7 +1470,10 @@
 </head>
 <body>
 <div class="wrap">
-  <a class="skip" href="#main">Skip to the current view</a>
+  <!-- Points at the container rather than at `#main`, which is the Overview's own region and
+       is `hidden` whenever another view is showing -- a skip link whose target does not exist
+       lands nowhere, which is worse than not having one. -->
+  <a class="skip" href="#content">Skip to the current view</a>
 
   <header>
     <!-- Present only below 40rem, where the sidebar is a drawer. Its label is on the
@@ -1611,7 +1631,9 @@
       </div>
     </nav>
 
-    <div class="content">
+    <!-- `tabindex="-1"` so the skip link above can actually put the focus here. A container
+         with no tabindex is a jump target the keyboard's focus does not follow. -->
+    <div class="content" id="content" tabindex="-1">
       <!-- Above every view rather than inside one: a machine five minutes old has nothing
            else worth reading, and it disappears on its own when the required steps are
            done. -->
