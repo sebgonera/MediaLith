@@ -968,6 +968,145 @@ pub fn source_from_metadata(body: &str) -> Option<Source> {
     })
 }
 
+/// A report of each kind, for looking at the page in a state the appliance is not in.
+///
+/// Two callers, and neither is decoration. `examples/plex-activity-fixture.rs` prints these
+/// for `tools/preview-console.py`, which is how a card gets *rendered* before it ships —
+/// four CSS faults in one afternoon during the console redesign were invisible to every test
+/// in this repository and obvious in a screenshot. And the console's own test reads the
+/// serialised form to check that every field the page reaches for is one the server sends.
+///
+/// Built here rather than hand-written as JSON on purpose. A fixture written by hand is a
+/// fixture that agrees with whoever wrote it: it would keep the old spelling of a renamed
+/// field and show a preview with a line missing, which reads as a broken card rather than a
+/// stale file.
+#[must_use]
+pub fn sample(kind: &str) -> Report {
+    let full = |sessions: Vec<Session>| Report {
+        available: true,
+        state: State::Playing,
+        detail: State::Playing.detail().to_owned(),
+        active: sessions.len(),
+        sessions,
+    };
+
+    match kind {
+        "hardware" => full(vec![sample_transcode(Some(true))]),
+        "software" => full(vec![sample_transcode(Some(false))]),
+        "starting" => full(vec![sample_transcode(None)]),
+        "direct" => full(vec![sample_direct()]),
+        "three" => full(vec![
+            sample_transcode(Some(true)),
+            sample_direct(),
+            sample_transcode(Some(false)),
+        ]),
+        // A session Plex has never actually produced: everything optional missing. The
+        // card has to come out shorter rather than full of the word "unknown".
+        "sparse" => full(vec![Session {
+            id: Some("9".to_owned()),
+            decision: Decision::DirectPlay,
+            ..Session::default()
+        }]),
+        "idle" => Report {
+            available: true,
+            state: State::Idle,
+            detail: State::Idle.detail().to_owned(),
+            active: 0,
+            sessions: Vec::new(),
+        },
+        "not-claimed" => Report::of(State::NotClaimed),
+        "not-running" => Report::of(State::NotRunning),
+        _ => Report::of(State::NotProvisioned),
+    }
+}
+
+/// The fields every sample session shares: somebody, watching something, part way through.
+fn sample_watcher(title: &str, user: &str, player: &str) -> Session {
+    Session {
+        id: Some("1".to_owned()),
+        rating_key: Some("118".to_owned()),
+        kind: Some("movie".to_owned()),
+        title: Some(title.to_owned()),
+        user: Some(user.to_owned()),
+        player: Some(player.to_owned()),
+        platform: Some("tvOS".to_owned()),
+        product: Some("Plex for Apple TV".to_owned()),
+        state: Some("playing".to_owned()),
+        local: Some(true),
+        position_ms: Some(5_538_000),
+        duration_ms: Some(10_143_000),
+        ..Session::default()
+    }
+}
+
+/// 4K HDR to 1080p, with the hardware verdict as the caller wants it.
+///
+/// `None` is the state every hardware transcode passes through for its first second or
+/// two, and is the one worth looking at before it ships: it must not draw as a warning.
+fn sample_transcode(hardware: Option<bool>) -> Session {
+    Session {
+        decision: Decision::Transcode,
+        source_bitrate_kbps: Some(24_399),
+        stream_bitrate_kbps: Some(2798),
+        // Throttled with a speed of 0.0, which is what the appliance actually reported on a
+        // stream that was playing perfectly.
+        transcode: Some(Transcode {
+            progress: Some(1.3),
+            speed: Some(0.0),
+            throttled: Some(true),
+            error: Some(false),
+        }),
+        video: Video {
+            decision: Decision::Transcode,
+            source_codec: Some("hevc".to_owned()),
+            source_resolution: Some("4K".to_owned()),
+            source_hdr: Some("HDR10".to_owned()),
+            target_codec: Some("h264".to_owned()),
+            target_resolution: Some("1080p".to_owned()),
+            hardware,
+            hardware_detail: hardware
+                .unwrap_or(false)
+                .then(|| "Intel (VA API)".to_owned()),
+            full_pipeline: hardware,
+        },
+        audio: Audio {
+            decision: Decision::Transcode,
+            source_codec: Some("truehd".to_owned()),
+            source_channels: Some(8),
+            target_codec: Some("aac".to_owned()),
+            target_channels: Some(2),
+        },
+        ..sample_watcher("Test Feature", "Sebastian", "Living Room TV")
+    }
+}
+
+/// An episode, paused, playing exactly as it sits on the disk.
+fn sample_direct() -> Session {
+    Session {
+        decision: Decision::DirectPlay,
+        source_bitrate_kbps: Some(2085),
+        video: Video {
+            decision: Decision::DirectPlay,
+            source_codec: Some("hevc".to_owned()),
+            source_resolution: Some("1080p".to_owned()),
+            target_codec: Some("hevc".to_owned()),
+            target_resolution: Some("1080p".to_owned()),
+            ..Video::default()
+        },
+        audio: Audio {
+            decision: Decision::DirectPlay,
+            source_codec: Some("ac3".to_owned()),
+            source_channels: Some(6),
+            target_codec: Some("ac3".to_owned()),
+            target_channels: Some(6),
+        },
+        state: Some("paused".to_owned()),
+        series: Some("Test Series".to_owned()),
+        episode: Some("S02E05".to_owned()),
+        ..sample_watcher("The One With The Long Title", "Ada", "Bedroom iPad")
+    }
+}
+
 /// How long a remembered source stays trusted.
 ///
 /// A library item's codec and resolution cannot change without the file changing, so this

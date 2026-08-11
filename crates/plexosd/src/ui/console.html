@@ -1206,7 +1206,11 @@
        browser shares its height between them and the snapshot was pushed a hundred pixels
        clear of the health card above it -- a gap that looked like a missing card. `auto 1fr`
        sizes row one to the health card and lets row two absorb the rest. */
-    grid-template-rows: auto 1fr;
+    /* Three rail rows now: what is playing, whether the machine is well, and what it is.
+       The last one still takes the slack, for the reason below -- the activity card spans
+       every row and is much the tallest thing here, so without a `1fr` the browser shares
+       its height between the rows and opens gaps in the rail that look like missing cards. */
+    grid-template-rows: auto auto 1fr;
     gap: 1rem;
     align-items: start;
   }
@@ -1218,17 +1222,24 @@
      1rem bottom margin, which stacked on top of the row gap and pushed the snapshot 16 px
      further from the health card than the health card is from anything else. */
   .ovgrid > #metrics,
+  .ovgrid > #nowplaying,
   .ovgrid > #main,
   .ovgrid > #snapshot { margin: 0; }
   .ovgrid > #main > .card { margin-bottom: 0; }
 
-  .ovgrid > #metrics  { grid-column: 1; grid-row: 1 / span 2; }
-  .ovgrid > #main     { grid-column: 2; grid-row: 1; }
-  .ovgrid > #snapshot { grid-column: 2; grid-row: 2; }
+  .ovgrid > #metrics    { grid-column: 1; grid-row: 1 / span 3; }
+  .ovgrid > #nowplaying { grid-column: 2; grid-row: 1; }
+  .ovgrid > #main       { grid-column: 2; grid-row: 2; }
+  .ovgrid > #snapshot   { grid-column: 2; grid-row: 3; }
 
-  .ovgrid.alert > #main     { grid-column: 1 / -1; grid-row: 1; }
-  .ovgrid.alert > #metrics  { grid-row: 2 / span 2; }
-  .ovgrid.alert > #snapshot { grid-row: 2; }
+  /* Something is wrong with the machine, so the health panel takes the width and goes
+     first. What is playing keeps its place at the top of the rail underneath: a stream in
+     trouble is often *why* somebody opened the page, and hiding it while explaining the
+     fault would take away half the explanation. */
+  .ovgrid.alert > #main       { grid-column: 1 / -1; grid-row: 1; }
+  .ovgrid.alert > #metrics    { grid-row: 2 / span 2; }
+  .ovgrid.alert > #nowplaying { grid-column: 2; grid-row: 2; }
+  .ovgrid.alert > #snapshot   { grid-column: 2; grid-row: 3; }
 
   /* One column below roughly 1250 px, where a 1fr rail stops being wide enough for a meter
      and a label on one line. Everything reverts to document order: health, activity,
@@ -1236,9 +1247,11 @@
   @media (max-width: 78rem) {
     .ovgrid { grid-template-columns: minmax(0, 1fr); }
     .ovgrid > #metrics,
+    .ovgrid > #nowplaying,
     .ovgrid > #main,
     .ovgrid > #snapshot,
     .ovgrid.alert > #metrics,
+    .ovgrid.alert > #nowplaying,
     .ovgrid.alert > #main,
     .ovgrid.alert > #snapshot { grid-column: 1; grid-row: auto; }
   }
@@ -1530,6 +1543,153 @@
     font-size: .92rem;
   }
   .absent strong { color: var(--ink); }
+
+  /* ------------------------------------------------------------------------------------
+     Now playing.
+
+     The rail card and the full stream cards in the Plex view are one family and share every
+     class below, because they show the same facts at two densities: the rail answers "is
+     anything playing and is this machine coping", and the Plex view answers "what exactly is
+     happening to this stream".
+
+     Deliberately not a copy of Plex's own interface. No artwork, no gradients, nothing
+     animated: this is PlexOS reporting on Plex, and the value of it is that codecs,
+     resolutions and a hardware verdict are readable at a glance. A title set in 2rem would
+     push the technical line -- the only thing here Plex's own dashboard does not say as
+     plainly -- below the fold of a rail card.
+     ------------------------------------------------------------------------------------ */
+  .np-head {
+    display: flex;
+    align-items: baseline;
+    gap: .5rem;
+    margin-bottom: .85rem;
+  }
+  .np-head h3 { margin: 0; }
+  /* The count sits at the far end of the heading, which is where a number that says "how
+     many" belongs -- next to the word it counts, not inside the list it describes. */
+  .np-head .count {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+    font-weight: 650;
+  }
+
+  .np-list { display: grid; gap: .8rem; }
+
+  /* One session. In the rail these stack; in the Plex view the same element is given more
+     room by `.streams` below and grows a detail grid. */
+  .np-item {
+    display: grid;
+    gap: .45rem;
+    padding: .75rem .8rem;
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--muted);
+    border-radius: var(--radius-sm);
+    background: var(--raised);
+    min-width: 0;
+  }
+  /* The edge is the verdict, the same device the summary and health cards use. Direct play
+     is the cheap case and reads as good; a hardware transcode is this appliance doing its
+     job, so it reads as good too. Software transcode is amber and *only* amber -- it is a
+     client asking for something this machine has to work harder at, not a fault. */
+     The names are prefixed rather than plain -- `is-software` and not `software` -- because
+     this page already carries a `.warn` that draws a bordered amber box, and a verdict
+     labelled with it would have come out as a box instead of a word. A class name is a
+     shared namespace on a single-file page. */
+  .np-item.is-direct { border-left-color: var(--ready); }
+  .np-item.is-hardware { border-left-color: var(--ready); }
+  .np-item.is-software { border-left-color: var(--degraded); }
+  .np-item.is-working { border-left-color: var(--accent); }
+
+  .np-title {
+    font-weight: 650;
+    font-size: .98rem;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+  }
+  .np-title .np-series { color: var(--muted); font-weight: 600; }
+  .np-who { color: var(--muted); font-size: .86rem; overflow-wrap: anywhere; }
+
+  /* The transformation line: what came off the disk, and what is going down the wire.
+     Wraps as a whole rather than mid-arrow, so a phone breaks it between the two halves
+     and never between "1080p" and "H.264". */
+  .np-path {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: .3rem .45rem;
+    font-size: .86rem;
+  }
+  .np-path .np-side { font-weight: 600; }
+  .np-path .np-to { color: var(--muted); }
+  .np-path .np-quiet { color: var(--muted); font-weight: 400; }
+
+  /* The verdict, as a lamp and a word. `.badge` would work and says less: this is the one
+     line somebody scans for, and it earns a lamp of its own. */
+  .np-verdict {
+    display: inline-flex;
+    align-items: center;
+    gap: .45rem;
+    font-size: .74rem;
+    font-weight: 700;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+  }
+  .np-verdict .statedot { color: currentColor; }
+  .np-verdict.tone-good { color: var(--ready); }
+  .np-verdict.tone-warn { color: var(--degraded); }
+  .np-verdict.tone-plain { color: var(--muted); }
+
+  /* Playback position. A bar and two clock faces, and nothing animates between polls --
+     see the comment on `renderNowPlaying`. */
+  .np-bar {
+    height: 5px;
+    border-radius: 999px;
+    background: var(--line);
+    overflow: hidden;
+  }
+  .np-bar > span {
+    display: block;
+    height: 100%;
+    border-radius: 999px;
+    background: var(--accent);
+  }
+  .np-item.is-software .np-bar > span { background: var(--degraded); }
+  .np-times {
+    display: flex;
+    justify-content: space-between;
+    gap: .5rem;
+    color: var(--muted);
+    font-size: .78rem;
+    font-variant-numeric: tabular-nums;
+  }
+  /* Paused is a state a person should be able to see without reading: the bar goes quiet
+     and the position keeps its place. */
+  .np-item.is-paused .np-bar > span { background: var(--muted); }
+
+  /* "View all 3 in Plex" — the rail shows a few and says where the rest are. */
+  .np-more { font-size: .84rem; color: var(--muted); }
+
+  /* The Plex view's version: the same items, with room for the detail grid. */
+  .streams .np-item { padding: .9rem 1rem; gap: .6rem; }
+  .streams .np-title { font-size: 1.05rem; }
+  .streams dl {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: .35rem .9rem;
+    font-size: .86rem;
+    margin-top: .15rem;
+  }
+  .streams dd { text-align: right; }
+  /* Two columns of detail once there is room for them, which there is in the Plex view on
+     anything wider than a phone. */
+  @media (min-width: 46rem) {
+    .streams dl {
+      grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+      /* A wide column gap, because the values are right-aligned: without it the value of
+         the left pair ends a few pixels from the label of the right pair and the two read
+         as one phrase — "movie Platform". */
+      column-gap: 2.5rem;
+    }
+  }
 
   /* ------------------------------------------------------------------------------------
      Narrower than a desk.
@@ -1889,6 +2049,21 @@
           </details>
         </section>
 
+        <!-- What Plex is playing, at the top of the rail: the most product-important thing
+             this appliance can say about itself, and the only card here about other people
+             rather than about the machine.
+
+             Its own poll, not the status one — see `plexActivityTick`. Nothing anybody types
+             lives inside `#np-body`, so the poll may replace it wholesale; the heading and
+             the count are outside it because they are written once and only updated. -->
+        <section class="card" id="nowplaying" aria-live="polite">
+          <div class="np-head">
+            <h3>Now playing</h3>
+            <span class="count" id="np-count"></span>
+          </div>
+          <div id="np-body"><p class="empty">Loading…</p></div>
+        </section>
+
         <!-- The one region the status poll replaces wholesale. Nothing anybody types into
              may live in here: it loses focus mid-word, closes its own datalist, and discards
              what was not yet saved. The settings form and the terminal are both outside it
@@ -1917,7 +2092,16 @@
           <h3>Plex Media Server</h3>
           <p class="empty">Loading…</p>
         </section>
-        <div id="plex-future"></div>
+        <!-- Every stream, in full. The rail on the Overview shows the first few compactly and
+             points here; this is where all of them belong, with the whole video and audio
+             path for each. Same poll, same data, two densities. -->
+        <section class="card plex streams" id="streams" aria-live="polite">
+          <div class="np-head">
+            <h3>Active streams</h3>
+            <span class="count" id="streams-count"></span>
+          </div>
+          <div id="streams-body"><p class="empty">Loading…</p></div>
+        </section>
       </section>
 
       <!-- ----------------------------------------------------------------- STORAGE -->
@@ -4338,33 +4522,6 @@ function renderPlexInto(report) {
   document.getElementById("plex-install").addEventListener("click", startPlexInstall);
   document.getElementById("plex-upload").addEventListener("click", startPlexUpload);
   document.getElementById("plex-media-scan").addEventListener("click", scanPlexMedia);
-  renderPlexFuture(report);
-}
-
-/// What this view will hold, and does not.
-///
-/// Streams, libraries and live transcodes are the three things anybody would expect here,
-/// and this console cannot answer any of them: all three live behind Plex's own API, which
-/// needs a Plex account token, and ADR-0013's device token is not one. Putting the sections
-/// in with invented numbers would be worse than an empty view -- so the shape is here, the
-/// reason is here, and the figures are not.
-function renderPlexFuture(report) {
-  const host = document.getElementById("plex-future");
-  if (!host) return;
-  const markup = !report.installed ? "" : `
-    <div class="absent">
-      <strong>Active streams, libraries and live transcodes are not here yet.</strong>
-      All three come from Plex's own API, which authenticates with a Plex account token —
-      not this appliance's device token. Reading them would mean the console holding a
-      credential to somebody's Plex account, which is a decision worth taking deliberately
-      rather than as a side effect of wanting a nicer page. Until it is taken, Plex's own
-      interface is the place to see them, and
-      <button class="linkish" data-goto="overview">the Overview</button> reports what the
-      machine underneath is doing while they play.
-    </div>`;
-  if (host.dataset.rendered === markup) return;
-  host.dataset.rendered = markup;
-  host.innerHTML = markup;
 }
 
 /** Looks for packages on removable media, and offers what it found.
@@ -5609,6 +5766,394 @@ async function metricsTick() {
   metricsTimer = setTimeout(metricsTick, METRICS_MS);
 }
 
+// ======================================================================================
+// Now playing.
+//
+// The one thing on this page about other people rather than about the machine, and the
+// only region that is deliberately blank without a credential.
+//
+// # Why this needs the token when the rest of the page does not
+//
+// Every `GET` here answers without one on purpose: a console that will not say why a boot
+// failed until you authenticate has defeated its own reason for existing. That argument is
+// about *diagnostics*. A film title, a username, a device name and a position in a film are
+// not diagnostics — they are what somebody in this house is doing this evening, and a `GET`
+// would leave a household's viewing readable by anything on the LAN. So the endpoint is a
+// `POST`, the server's method-based gate refuses it without the device token, and this code
+// does not ask at all until there is one. Nothing is fetched and then hidden.
+//
+// # Its own poll
+//
+// Not on the status poll and not on the metrics poll. The metrics card asks twice a second
+// and this must not; the status poll is what every other section depends on and must not
+// acquire a dependency on Plex answering. So: ten seconds when nothing is playing, three
+// when something is, thirty in a background tab, and nothing at all while locked.
+const PLEX_SESSIONS_ENDPOINT = "/api/plex/sessions";
+const NP_IDLE_MS = 10000;
+const NP_ACTIVE_MS = 3000;
+const NP_HIDDEN_MS = 30000;
+// Locked. This interval costs the appliance nothing — it only looks at whether a token has
+// appeared in this tab, so unlocking the header lights the card up a moment later without
+// anything to press.
+const NP_LOCKED_MS = 3000;
+// How many sessions the rail shows before it stops and points at the Plex view. Two, so a
+// full house cannot make the Overview several screens tall — which is the failure this
+// number exists to prevent.
+const NP_RAIL_MAX = 2;
+
+/** "01:32:18", or "32:18" for anything under an hour. Never invents an hour that is zero. */
+function npClock(ms) {
+  if (ms === null || ms === undefined || !Number.isFinite(Number(ms))) return null;
+  const total = Math.max(0, Math.floor(Number(ms) / 1000));
+  const seconds = String(total % 60).padStart(2, "0");
+  const minutes = total < 3600 ? String(Math.floor(total / 60))
+    : String(Math.floor(total / 60) % 60).padStart(2, "0");
+  return total < 3600 ? `${minutes}:${seconds}`
+    : `${Math.floor(total / 3600)}:${minutes}:${seconds}`;
+}
+
+/**
+ * A codec as it is written down rather than as Plex stores it.
+ *
+ * Plex writes `hevc`, `truehd`, `eac3`, and a page that passed those straight through would
+ * be the only place in this house where Dolby is spelled in lower case. The map covers what
+ * the appliance has actually seen; anything else is upper-cased, which is right for every
+ * codec name there is.
+ */
+const NP_CODECS = {
+  hevc: "HEVC", h264: "H.264", h265: "HEVC", av1: "AV1", vp9: "VP9", mpeg4: "MPEG-4",
+  aac: "AAC", ac3: "AC3", eac3: "E-AC3", truehd: "TrueHD", dca: "DTS", "dts-hd": "DTS-HD",
+  flac: "FLAC", mp3: "MP3", opus: "Opus", pcm: "PCM",
+};
+function npCodec(name) {
+  if (!name) return null;
+  return NP_CODECS[String(name).toLowerCase()] || String(name).toUpperCase();
+}
+
+/** "4K HEVC HDR10" — whichever of the three are known, in the order people say them. */
+function npSide(resolution, codec, hdr) {
+  const parts = [resolution, npCodec(codec), hdr].filter(Boolean);
+  return parts.length ? parts.join(" ") : null;
+}
+
+/**
+ * The one line somebody scans for: what is happening to this stream, and whose work it is.
+ *
+ * `hardware === null` is its own answer and not a "no". Plex does not populate the hardware
+ * fields until the transcoder is actually running, so for the first second or two of every
+ * hardware transcode the honest report is that it is transcoding and the rest is not yet
+ * known — see the module comment in plexactivity.rs. Rendering that as "software" would put
+ * an amber warning on this appliance's best case every time somebody pressed play.
+ */
+function npVerdict(session) {
+  const video = session.video || {};
+  if (session.decision === "direct_play") {
+    return { tone: "tone-good", edge: "is-direct", label: "Direct play" };
+  }
+  if (session.decision === "direct_stream") {
+    return { tone: "tone-plain", edge: "is-direct", label: "Direct stream" };
+  }
+  if (session.decision === "transcode") {
+    if (video.hardware === true) {
+      return { tone: "tone-good", edge: "is-hardware", label: "Hardware transcode" };
+    }
+    if (video.hardware === false) {
+      return { tone: "tone-warn", edge: "is-software", label: "Software transcode" };
+    }
+    return { tone: "tone-plain", edge: "is-working", label: "Transcode", note: "starting" };
+  }
+  return { tone: "tone-plain", edge: "is-working", label: "Playing" };
+}
+
+/**
+ * Why a stream is on the processor, when this appliance has a GPU that says it need not be.
+ *
+ * Two different questions, and the console is the only place both answers exist: `/api/gpu`
+ * says whether this machine *can* transcode in hardware, and the session says whether this
+ * *stream* is. When they disagree the disagreement is the finding, and it is said out loud
+ * rather than smoothed over — a software transcode on a `ready` GPU usually means the client
+ * asked for something the hardware cannot do (a subtitle burn-in, or a codec the part has no
+ * encoder for), and a software transcode on a `degraded` one means the GPU is the reason.
+ */
+function npSoftwareNote() {
+  const health = (latestStatus && latestStatus.gpu && latestStatus.gpu.health) || null;
+  if (health === "ready") {
+    return `This machine's GPU reports itself ready, so this stream is on the processor for
+      a reason of its own — usually burned-in subtitles or a format the part cannot encode.`;
+  }
+  if (health === "degraded" || health === "unavailable") {
+    return `This machine's hardware transcoding is <button class="linkish"
+      data-goto="overview">${esc(health)}</button>, which is very likely why.`;
+  }
+  return null;
+}
+
+/** The progress bar and the two clock faces, or nothing at all when Plex did not say. */
+function npProgress(session) {
+  const position = npClock(session.position_ms);
+  const duration = npClock(session.duration_ms);
+  if (position === null || duration === null || !session.duration_ms) return "";
+  // Clamped, because a position past the end is a thing Plex reports briefly at the end of
+  // an item and a bar wider than its track breaks the card.
+  const through = Math.max(0, Math.min(100, (session.position_ms / session.duration_ms) * 100));
+  return `
+    <div class="np-bar"><span style="width:${through.toFixed(1)}%"></span></div>
+    <div class="np-times"><span>${esc(position)}</span><span>${esc(duration)}</span></div>`;
+}
+
+/** What is playing, as one line: the film, or the series and the episode. */
+function npTitle(session) {
+  const title = session.title || "Something";
+  if (!session.series) return esc(title);
+  const episode = session.episode ? ` · ${esc(session.episode)}` : "";
+  return `<span class="np-series">${esc(session.series)}${episode}</span><br>${esc(title)}`;
+}
+
+/**
+ * One session.
+ *
+ * The same element at two densities: the rail gets the four lines somebody glances at, and
+ * the Plex view gets those plus the whole path in a detail list. Nothing here is invented to
+ * fill a gap — a field Plex did not report is a row that is not drawn, so a sparse session
+ * produces a shorter card rather than a column of "unknown".
+ */
+function npItem(session, detailed) {
+  const verdict = npVerdict(session);
+  const video = session.video || {};
+  const audio = session.audio || {};
+
+  const from = npSide(video.source_resolution, video.source_codec, video.source_hdr);
+  const to = npSide(video.target_resolution, video.target_codec, null);
+  const changed = session.decision === "transcode" && from && to;
+  const path = changed
+    ? `<span class="np-side">${esc(from)}</span>
+       <span class="np-to">→</span><span class="np-side">${esc(to)}</span>`
+    : (from || to)
+      ? `<span class="np-side">${esc(from || to)}</span>
+         <span class="np-quiet">as it is on disk</span>`
+      : "";
+
+  const audioFrom = npCodec(audio.source_codec);
+  const audioTo = npCodec(audio.target_codec);
+  const audioChanged = audio.decision === "transcode" && audioFrom && audioTo;
+  const audioLine = audioChanged
+    ? `<div class="np-path"><span class="np-quiet">Audio</span>
+        <span class="np-side">${esc(npChannels(audioFrom, audio.source_channels))}</span>
+        <span class="np-to">→</span>
+        <span class="np-side">${esc(npChannels(audioTo, audio.target_channels))}</span></div>`
+    : audioFrom
+      ? `<div class="np-path"><span class="np-quiet">Audio</span>
+          <span class="np-side">${esc(npChannels(audioFrom, audio.source_channels))}</span></div>`
+      : "";
+
+  const who = [session.user, session.player].filter(Boolean).map(esc).join(" · ");
+  const paused = session.state === "paused";
+  const note = verdict.note ? `<span class="np-quiet">${esc(verdict.note)}</span>` : "";
+  const software = verdict.edge === "is-software" ? npSoftwareNote() : null;
+
+  return `
+    <div class="np-item ${verdict.edge}${paused ? " is-paused" : ""}">
+      <div class="np-title">${npTitle(session)}</div>
+      ${who ? `<div class="np-who">${who}${paused ? " · paused" : ""}</div>` : ""}
+      ${path ? `<div class="np-path">${path}</div>` : ""}
+      ${audioLine}
+      <div class="np-verdict ${verdict.tone}"><span class="statedot"></span>${esc(verdict.label)}${note}</div>
+      ${software ? `<p class="hint">${software}</p>` : ""}
+      ${npProgress(session)}
+      ${detailed ? npDetail(session) : ""}
+    </div>`;
+}
+
+/** "TrueHD 7.1", or just "TrueHD" when the channel count is not known. */
+function npChannels(codec, channels) {
+  if (!channels) return codec;
+  const layout = { 1: "1.0", 2: "2.0", 6: "5.1", 8: "7.1" }[channels] || `${channels}ch`;
+  return `${codec} ${layout}`;
+}
+
+/**
+ * The rows the Plex view has room for and the rail does not.
+ *
+ * Every one is dropped when its value is missing. The alternative — a fixed grid with
+ * "unknown" in it — makes a card look full while saying less, which is the opposite of what
+ * a card is for.
+ */
+function npDetail(session) {
+  const video = session.video || {};
+  const transcode = session.transcode || null;
+  const rows = [
+    session.kind && ["Type", esc(session.kind)],
+    session.platform && ["Platform", esc(session.platform)],
+    session.product && ["App", esc(session.product)],
+    session.state && ["State", esc(session.state)],
+    session.local === true ? ["Network", "This LAN"] : session.local === false ? ["Network", "Remote"] : null,
+    video.hardware_detail && ["Hardware", esc(video.hardware_detail)],
+    video.full_pipeline === true && ["Pipeline", "Decode and encode on the GPU"],
+    session.source_bitrate_kbps && ["Source", `${esc(npBitrate(session.source_bitrate_kbps))}`],
+    session.stream_bitrate_kbps && ["Stream", `${esc(npBitrate(session.stream_bitrate_kbps))}`],
+    // A throttled transcode reports a speed of 0.0 and is perfectly healthy — Plex has
+    // paused it because it has run far enough ahead of the player. Printing "0.0×" under
+    // the word Speed says the opposite of what is happening, so the throttled case is
+    // described rather than measured. Observed on the appliance: `throttled: true` beside
+    // `speed: 0.0` on a stream that was playing without a stutter.
+    transcode && transcode.throttled === true ? ["Transcoder", "Ahead of the player, paused"]
+      : transcode && transcode.speed !== null && transcode.speed !== undefined
+        ? ["Speed", `${transcode.speed.toFixed(1)}× real time`]
+        : null,
+  ].filter(Boolean);
+  if (!rows.length) return "";
+  return `<dl>${rows.map(([term, value]) => `<dt>${term}</dt><dd>${value}</dd>`).join("")}</dl>`;
+}
+
+/** "15.6 Mbps" — Plex counts in kilobits, and nobody says 15563 kbps out loud. */
+function npBitrate(kbps) {
+  const value = Number(kbps);
+  if (!Number.isFinite(value) || value <= 0) return "—";
+  return value >= 1000 ? `${(value / 1000).toFixed(1)} Mbps` : `${Math.round(value)} kbps`;
+}
+
+/**
+ * What the card says when there is nothing to show, which is most of the time.
+ *
+ * Compact on purpose: a card that reserves a screen for a thing that is not happening is
+ * worse than no card, and this one sits at the top of the rail where the cost of being
+ * wrong is highest.
+ */
+function npQuiet(report) {
+  if (!report) {
+    return `<p class="empty">Asking Plex…</p>`;
+  }
+  if (report.state === "idle") {
+    return `<p class="empty">No active streams. Plex is ready.</p>`;
+  }
+  // Everything else is a state with a remedy attached, written on the appliance. The page
+  // does not paraphrase it: the server is the thing that knows, and two wordings of one
+  // condition is how they drift apart.
+  return `<p class="empty">${esc(report.detail || "Plex activity is not available.")}</p>`;
+}
+
+/** The locked state: what is behind the lock, and no hint of what is playing. */
+function npLocked() {
+  return `<p class="empty">Unlock administrator access to view Plex activity. Titles, users
+    and devices are private, so this is the one thing on the page that stays behind the
+    device token.</p>`;
+}
+
+let lastNowPlayingRendered = null;
+let lastStreamsRendered = null;
+
+/**
+ * The rail card.
+ *
+ * Signature-cached like every other polled region here. The signature includes the position,
+ * because the bar moving *is* the meaningful change — and nothing anybody can type into or
+ * open lives inside the replaced element, which is the rule this page learned the hard way
+ * when the process table was rendered into a region on a timer and shut itself twice a
+ * second.
+ *
+ * The bar is not animated between polls. Interpolating would mean the page inventing a
+ * position Plex did not report, and the one thing this card must be is believable.
+ */
+function renderNowPlaying(report, locked) {
+  const body = document.getElementById("np-body");
+  const count = document.getElementById("np-count");
+  if (!body) return;
+
+  const sessions = (report && report.sessions) || [];
+  const shown = sessions.slice(0, NP_RAIL_MAX);
+  const markup = locked ? npLocked()
+    : !sessions.length ? npQuiet(report)
+    : `<div class="np-list">${shown.map(s => npItem(s, false)).join("")}</div>` +
+      (sessions.length > shown.length
+        ? `<p class="np-more">And ${sessions.length - shown.length} more —
+             <button class="linkish" data-goto="plex">view all ${sessions.length} in Plex</button>.</p>`
+        : "");
+
+  const signature = markup;
+  if (signature !== lastNowPlayingRendered) {
+    lastNowPlayingRendered = signature;
+    body.innerHTML = markup;
+  }
+  if (count) count.textContent = locked || !sessions.length ? "" : String(sessions.length);
+}
+
+/** The Plex view: every session, in full. */
+function renderStreams(report, locked) {
+  const body = document.getElementById("streams-body");
+  const count = document.getElementById("streams-count");
+  if (!body) return;
+
+  const sessions = (report && report.sessions) || [];
+  const markup = locked ? npLocked()
+    : !sessions.length ? npQuiet(report)
+    : `<div class="np-list">${sessions.map(s => npItem(s, true)).join("")}</div>`;
+
+  if (markup !== lastStreamsRendered) {
+    lastStreamsRendered = markup;
+    body.innerHTML = markup;
+  }
+  if (count) count.textContent = locked || !sessions.length ? "" : String(sessions.length);
+}
+
+let plexActivityTimer = null;
+
+/**
+ * Asks the appliance what Plex is playing, at a rate that matches what is happening.
+ *
+ * Three seconds while something is playing, ten while nothing is, thirty in a background
+ * tab, and **no request at all** while this browser has no device token. The last of those
+ * is the important one: an unlocked console is not merely one that hides the answer, it is
+ * one that never asks the question.
+ */
+async function plexActivityTick() {
+  clearTimeout(plexActivityTimer);
+  const value = token();
+  let next = NP_IDLE_MS;
+
+  if (!value) {
+    renderNowPlaying(null, true);
+    renderStreams(null, true);
+    next = NP_LOCKED_MS;
+  } else if (document.hidden) {
+    next = NP_HIDDEN_MS;
+  } else {
+    try {
+      const response = await fetch(PLEX_SESSIONS_ENDPOINT, {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
+        body: "{}",
+      });
+      if (response.status === 401 || response.status === 403) {
+        // The token in this tab is not this machine's. The locked card is the honest state:
+        // there is no credential here that works, which is what "locked" means.
+        renderNowPlaying(null, true);
+        renderStreams(null, true);
+        next = NP_LOCKED_MS;
+      } else if (!response.ok) {
+        throw new Error("HTTP " + response.status);
+      } else {
+        const report = await response.json();
+        renderNowPlaying(report, false);
+        renderStreams(report, false);
+        next = report.active > 0 ? NP_ACTIVE_MS : NP_IDLE_MS;
+      }
+    } catch (error) {
+      // The console itself not answering. Not the same thing as Plex not answering, which
+      // the appliance reports as a state of its own with a remedy attached — so this says
+      // what actually happened rather than blaming Plex for the network.
+      const unreachable = { state: "unreachable", sessions: [], detail:
+        "The console did not answer the request for what Plex is playing. Remedy: it is " +
+        "this page's connection to the appliance rather than Plex, so everything else on " +
+        "the page will be showing the same thing." };
+      renderNowPlaying(unreachable, false);
+      renderStreams(unreachable, false);
+    }
+  }
+
+  plexActivityTimer = setTimeout(plexActivityTick, next);
+}
+
 /** Says something in the banner under the header, and makes it visible. */
 function powerNote(message) {
   const note = document.getElementById("power-note");
@@ -5772,6 +6317,12 @@ document.getElementById("restart").addEventListener("click", () => power("restar
     // screen is a slow thing to type, and a lock that only flipped on the next click would
     // leave somebody wondering whether it had been accepted.
     updateLock();
+    // And so does Now Playing, which is blank without a token and is the most visible thing
+    // on the page that unlocking changes. Asking straight away rather than at the next tick
+    // makes the lock and the card agree at the moment of the last keystroke; the token is
+    // only complete for one of those keystrokes, and a request refused before then costs
+    // nothing and is what the locked state already handles.
+    if (!SOLO) plexActivityTick();
   });
 }
 
@@ -5849,6 +6400,10 @@ if (!SOLO) {
   sharesTick();
   wifiTick();
   metricsTick();
+  // Self-scheduling rather than on an interval, because its rate depends on what it finds:
+  // three seconds while something is playing, ten while nothing is, and no request at all
+  // while this tab holds no device token.
+  plexActivityTick();
 }
 </script>
 </body>

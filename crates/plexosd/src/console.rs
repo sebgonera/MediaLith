@@ -3077,6 +3077,188 @@ mod tests {
     }
 
     #[test]
+    fn what_somebody_is_watching_cannot_be_read_without_a_credential() {
+        // The same argument as the process list, and the stronger case of the two. The open
+        // `GET` exists so a *broken* machine can be diagnosed; a film title, a username and a
+        // device name are not diagnostics, and a `GET` here would leave a household's viewing
+        // readable by anything on the LAN for as long as the appliance runs.
+        //
+        // Being a POST *is* the protection, because the gate in `http::route` is method-based
+        // — so a GET arriving here has to find nothing at all.
+        assert_eq!(
+            respond_test(&get("/api/plex/sessions"), &Fixture::new()).status,
+            404,
+            "a GET must not answer with what is playing, or the gate is bypassed by asking \
+             politely"
+        );
+
+        let post = Request {
+            method: "POST".to_owned(),
+            path: "/api/plex/sessions".to_owned(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let answered = respond_test(&post, &Fixture::new());
+        assert_eq!(
+            answered.status, 200,
+            "and the POST is the route that exists"
+        );
+
+        // On a build host with no Plex, the answer is a state with a remedy rather than an
+        // error — the whole point of the failure model. Whatever it says, it says nothing
+        // about anybody: there are no sessions to describe.
+        let body = String::from_utf8_lossy(&answered.body);
+        assert!(
+            body.contains("\"available\":false") || body.contains("\"sessions\":[]"),
+            "an appliance with no Plex has nothing to report: {body}"
+        );
+        assert!(body.contains("Remedy:"), "and it names one: {body}");
+    }
+
+    #[test]
+    fn the_page_never_asks_what_is_playing_without_the_token() {
+        // From the page's side, and this is the half that matters for privacy: the rule is
+        // not "fetch it and hide it", it is "do not ask". A page that downloaded the titles
+        // and then declined to draw them would have put them in a browser that was never
+        // entitled to them.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("one script block");
+
+        let request = script
+            .split_once("PLEX_SESSIONS_ENDPOINT, {")
+            .map(|(_, rest)| rest)
+            .expect("the page posts to the sessions route");
+        let call = &request[..request.find("})").unwrap_or(request.len())];
+        assert!(call.contains("method: \"POST\""), "as a POST: {call}");
+        assert!(
+            call.contains("Authorization"),
+            "and carrying the device token: {call}"
+        );
+
+        // And the guard in front of it: the poll returns before the fetch when the tab holds
+        // no token. Asserted on the shape rather than the wording, because this is the one
+        // control on the page whose absence is invisible -- everything would still work, and
+        // an unauthenticated browser would be told what somebody is watching.
+        let poll = script
+            .split_once("async function plexActivityTick()")
+            .map(|(_, rest)| rest)
+            .expect("the activity poll exists");
+        let head = &poll[..poll.find("PLEX_SESSIONS_ENDPOINT").unwrap_or(poll.len())];
+        assert!(
+            head.contains("const value = token();") && head.contains("if (!value)"),
+            "the poll must decide on the token before it reaches the fetch: {head}"
+        );
+    }
+
+    #[test]
+    fn every_field_the_page_reads_off_a_session_is_one_the_server_sends() {
+        // The fourth question about this page, asked about a fifth pair of files. Three tests
+        // already check that the script parses, that every id it addresses exists and that
+        // every class it draws with is defined — and all three would pass while the page read
+        // `session.player_title` from a server that sends `player`. The symptom is a card
+        // that renders perfectly with one line quietly missing from it.
+        //
+        // So: build the document the route actually serialises, and look up every field the
+        // page reaches for. `session`, `video` and `audio` are names this page uses nowhere
+        // else, which is what makes the extraction exact rather than a guess.
+        let sample = crate::plexactivity::Report {
+            available: true,
+            state: crate::plexactivity::State::Playing,
+            detail: crate::plexactivity::State::Playing.detail().to_owned(),
+            active: 1,
+            sessions: vec![crate::plexactivity::Session {
+                id: Some("1".to_owned()),
+                rating_key: Some("118".to_owned()),
+                kind: Some("movie".to_owned()),
+                title: Some("Test Feature".to_owned()),
+                series: Some("Test Series".to_owned()),
+                episode: Some("S02E05".to_owned()),
+                user: Some("Sebastian".to_owned()),
+                player: Some("Living Room TV".to_owned()),
+                platform: Some("tvOS".to_owned()),
+                product: Some("Plex for Apple TV".to_owned()),
+                state: Some("playing".to_owned()),
+                local: Some(true),
+                position_ms: Some(5_538_000),
+                duration_ms: Some(10_143_000),
+                decision: crate::plexactivity::Decision::Transcode,
+                source_bitrate_kbps: Some(24_399),
+                stream_bitrate_kbps: Some(2798),
+                transcode: Some(crate::plexactivity::Transcode {
+                    progress: Some(1.3),
+                    speed: Some(0.0),
+                    throttled: Some(true),
+                    error: Some(false),
+                }),
+                video: crate::plexactivity::Video {
+                    decision: crate::plexactivity::Decision::Transcode,
+                    source_codec: Some("hevc".to_owned()),
+                    source_resolution: Some("4K".to_owned()),
+                    source_hdr: Some("HDR10".to_owned()),
+                    target_codec: Some("h264".to_owned()),
+                    target_resolution: Some("1080p".to_owned()),
+                    hardware: Some(true),
+                    hardware_detail: Some("Intel (VA API)".to_owned()),
+                    full_pipeline: Some(true),
+                },
+                audio: crate::plexactivity::Audio {
+                    decision: crate::plexactivity::Decision::Transcode,
+                    source_codec: Some("truehd".to_owned()),
+                    source_channels: Some(8),
+                    target_codec: Some("aac".to_owned()),
+                    target_channels: Some(2),
+                },
+            }],
+        };
+
+        let document: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&sample).expect("serialises"))
+                .expect("is JSON");
+        let session = &document["sessions"][0];
+
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("one script block");
+
+        let mut checked = 0;
+        for (holder, node) in [
+            ("session", session),
+            ("video", &session["video"]),
+            ("audio", &session["audio"]),
+        ] {
+            let prefix = format!("{holder}.");
+            for occurrence in script.match_indices(&prefix) {
+                let rest = &script[occurrence.0 + prefix.len()..];
+                let field: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || *c == '_')
+                    .collect();
+                // `session.` followed by nothing lowercase is a sentence in a comment, not a
+                // field access.
+                if field.is_empty() {
+                    continue;
+                }
+                assert!(
+                    node.get(&field).is_some(),
+                    "the page reads {holder}.{field}, which the server does not send. \
+                     What it does send: {node}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 20,
+            "only {checked} field accesses found — the extraction has stopped working, which \
+             would make this test pass by looking at nothing"
+        );
+    }
+
+    #[test]
     fn nothing_a_person_opened_lives_inside_the_region_on_a_timer() {
         // Reported from the machine: expanding the process list or the notes worked for up to
         // two seconds and then shut itself. Both were rendered *into* `#metrics-body`, which
