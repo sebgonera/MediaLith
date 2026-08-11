@@ -760,15 +760,24 @@ build_uki() {
     # GuC submission, which is a scheduling change with its own history on Gen9 and
     # buys a transcoding appliance nothing. HuC is what affects encode quality, and
     # loading it pulls in GuC anyway, because GuC is what authenticates it.
-    # video=1280x720 -- the console has to be readable, and TER16x32 is the largest font
-    # the kernel has. On a 2160x1440 panel that is still 135 columns of very small text,
-    # which is how an `ls -la` came to be unreadable and a diagnosis had to go round by
-    # experiment. Shrinking the framebuffer is the only lever left: at 1280x720 the same
-    # font gives 80 columns at roughly three times the physical size.
+    # No video= here either, and this one is a retraction.
     #
-    # No connector name, so it applies to whichever output exists. A mode the panel
-    # cannot do is not fatal -- DRM falls back to the preferred mode, which is today's
-    # behaviour, so the worst case is no improvement rather than no picture.
+    # It said `video=1280x720`, and the reasoning was sound at the time: the console had to
+    # be readable, TER16x32 was the largest font available, and shrinking the framebuffer
+    # was "the only lever left". It was not the only lever -- it was the only lever *then*,
+    # because the font it wanted had never actually been compiled in. With CONFIG_FONTS set
+    # and the dashboard choosing a font by measuring the grid it produces, the readable
+    # console arrives without touching the mode at all.
+    #
+    # What the line costs is the picture. Where it takes effect, 1280x720 is scaled up to
+    # whatever the panel is, and a scaled console is a soft one -- reported from a machine
+    # as the boot being "in such a poor resolution". Where it does not take effect it was
+    # doing nothing: the reference laptop runs 2880x1620 with this line present, because
+    # i915 drives the panel at its native mode once it takes the console over.
+    #
+    # So it was inert on the machine it was written for and blurry on the machines it was
+    # not. Without it the driver picks the display's preferred mode, which is the sharpest
+    # thing that panel can do.
     #
     # panic=20 -- without it ADR-0005 does not work, and this was missing for the whole
     # life of the project. A boot that cannot verify /usr ends in plexos-init's fail(),
@@ -784,7 +793,7 @@ build_uki() {
     # machine the only way to capture a panic is to photograph it. Three failed boots
     # then cost about four minutes end to end, which is the right side of the trade for
     # a path that runs when an update was already broken.
-    printf 'plexos.slot=%s plexos.roothash=%s i915.enable_guc=2 panic=20 earlycon=efifb console=ttyS0,115200 console=tty0 video=1280x720\n' \
+    printf 'plexos.slot=%s plexos.roothash=%s i915.enable_guc=2 panic=20 earlycon=efifb console=ttyS0,115200 console=tty0\n' \
         "${slot}" "${ROOT_HASH}" > "${WORK}/cmdline"
 
     # Written by stage_os_release, before the /usr image was built. See there for why

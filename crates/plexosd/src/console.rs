@@ -1172,7 +1172,10 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     // The certificate is issued here rather than before the wait, so that it names the
     // address somebody is about to type. The socket is already bound, so a browser that
     // arrives during this waits in the backlog instead of being refused.
-    let tls = identity_for(&addresses, log)?;
+    identity_for(&addresses, log)?;
+    // And reissued when the machine's addresses change, which on DHCP they do. The key is
+    // kept, so the fingerprint does not move.
+    watch_addresses();
 
     if let Some(cleartext) = cleartext {
         std::thread::spawn(move || {
@@ -1278,7 +1281,6 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     };
     http::serve_tls(
         &listener,
-        &tls,
         credential,
         move |request| respond(request, &System, &services),
         move |request, reader| upload_route(request, reader, &uploading_job, &uploading_plex),
@@ -1740,10 +1742,7 @@ fn wait_for_addresses(
 }
 
 /// Issues or reloads the console's certificate and reports what a person has to check.
-fn identity_for(
-    addresses: &[String],
-    log: &mut dyn FnMut(&str),
-) -> io::Result<std::sync::Arc<rustls::ServerConfig>> {
+fn identity_for(addresses: &[String], log: &mut dyn FnMut(&str)) -> io::Result<()> {
     let names = crate::tls::names_for(addresses, &hostname());
     let identity =
         crate::tls::load_or_create(std::path::Path::new(plexos_types::paths::TLS_DIR), &names)?;
@@ -1769,7 +1768,71 @@ fn identity_for(
         );
     }
 
-    crate::tls::server_config(&identity)
+    crate::tls::install(crate::tls::server_config(&identity)?);
+    Ok(())
+}
+
+/// Reissues the certificate when the machine's addresses change.
+///
+/// The certificate names the addresses the machine has, and until this existed it named the
+/// ones it had *at the moment the console started* — for ever. That is wrong on an appliance
+/// whose address comes from DHCP, and it was wrong on a real machine within a day: one of
+/// them ended up answering at `192.168.2.190` under a certificate for `192.168.2.102`,
+/// because the wired adapter it had booted with was unplugged.
+///
+/// Nothing a browser does breaks — a self-signed certificate warns either way. What breaks
+/// is the only thing that makes a self-signed certificate mean anything: comparing the
+/// fingerprint at `/api/status` against what the browser was shown. Those were about
+/// different addresses.
+///
+/// **The key is kept**, which is the property that makes this safe to do on a timer.
+/// `load_or_create` reissues under the existing key, so the fingerprint does not move and
+/// nobody who has already checked it is asked to check it again. A certificate that changed
+/// its fingerprint whenever a router handed out a different address would teach exactly one
+/// lesson: that the warning means nothing.
+///
+/// A minute is often enough. A lease changes in seconds and is then stable for hours, and
+/// the cost of noticing late is a certificate naming an address the machine no longer has —
+/// which is the state this replaces, so a minute of it is not a regression.
+fn watch_addresses() {
+    /// How often the machine is asked what addresses it has.
+    const EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+    std::thread::spawn(move || {
+        let mut log = |line: &str| println!("plexosd: tls: {line}");
+        loop {
+            std::thread::sleep(EVERY);
+
+            let addresses: Vec<String> = crate::net::addresses(&System)
+                .iter()
+                .map(|a| a.ip().to_owned())
+                .collect();
+            let wanted = crate::tls::names_for(&addresses, &hostname());
+
+            // Compared against what is in force rather than against what was last seen, so
+            // a reissue that failed is retried rather than remembered as done.
+            if crate::tls::issued_for() == wanted {
+                continue;
+            }
+
+            match identity_for(&addresses, &mut log) {
+                Ok(()) => log(&format!(
+                    "the certificate now names {}",
+                    if addresses.is_empty() {
+                        "no address; this machine has none".to_owned()
+                    } else {
+                        addresses.join(", ")
+                    }
+                )),
+                Err(error) => log(&format!(
+                    "could not reissue the certificate for {}: {error}. The console keeps \
+                     serving the one it has, which may name an address this machine no \
+                     longer answers at.",
+                    addresses.join(", ")
+                )),
+            }
+        }
+    });
 }
 
 /// This machine's host name, for the certificate.

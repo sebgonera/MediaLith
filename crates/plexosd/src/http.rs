@@ -630,7 +630,6 @@ where
 /// If accepting fails in a way that ends the loop.
 pub fn serve_tls<F, U>(
     listener: &TcpListener,
-    config: &std::sync::Arc<rustls::ServerConfig>,
     credential: crate::auth::Credential,
     handler: F,
     upload: U,
@@ -649,14 +648,19 @@ where
             Ok(stream) => {
                 let handler = std::sync::Arc::clone(&handler);
                 let upload = std::sync::Arc::clone(&upload);
-                let config = std::sync::Arc::clone(config);
                 std::thread::spawn(move || {
                     let credential = crate::auth::current();
+                    // Read per connection rather than captured, so a certificate reissued
+                    // because the machine's address changed takes effect at once -- the
+                    // same reasoning, and the same shape, as the credential above.
+                    let Some(config) = crate::tls::serving() else {
+                        return;
+                    };
                     if set_timeouts(&stream).is_err() {
                         return;
                     }
-                    // A failure here is not per-connection: the configuration was
-                    // accepted when the console started, or the console never started.
+                    // A failure here is not per-connection: the configuration was accepted
+                    // when it was installed, or it was never installed.
                     if let Ok(connection) = rustls::ServerConnection::new(config) {
                         let mut tls = rustls::StreamOwned::new(connection, stream);
                         let _ = handle(&mut tls, &credential, handler.as_ref(), upload.as_ref());
@@ -1338,7 +1342,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let identity =
             crate::tls::load_or_create(&dir, &["localhost".to_owned()]).expect("an identity");
-        let config = crate::tls::server_config(&identity).expect("a server config");
+        // Installed rather than passed: the server reads the configuration in force per
+        // connection now, so that a certificate reissued for a new address takes effect
+        // without a restart.
+        crate::tls::install(crate::tls::server_config(&identity).expect("a server config"));
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
         let port = listener.local_addr().unwrap().port();
@@ -1347,7 +1354,6 @@ mod tests {
             let mut log = |_: &str| {};
             let _ = serve_tls(
                 &listener,
-                &config,
                 crate::auth::Credential::Unset,
                 |request| Response::text(200, format!("served {}", request.path)),
                 |_: &Request, _: &mut dyn BufRead| None,
