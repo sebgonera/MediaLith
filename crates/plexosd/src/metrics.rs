@@ -237,7 +237,31 @@ pub struct Plex {
     /// be answering a different question. The page draws it against the core count.
     pub cpu_percent: Option<f64>,
     /// Memory charged to the cgroup, including page cache it caused.
+    ///
+    /// **This is not "how much memory Plex is using", and reporting it as though it were
+    /// made the console alarming about a machine that was perfectly well.** On the
+    /// reference appliance it read 4.33 GB against a 13.1 GB ceiling after an evening of
+    /// playing, of which 534 MB was Plex and 3.78 GB was the page cache of the films it had
+    /// read. `memory.current` counts everything the kernel charges here, and the kernel
+    /// keeps file cache until something needs the memory — so the figure climbs all evening
+    /// and drops to nothing on a restart, which reads as a leak and is the opposite: it is
+    /// the machine using memory it would otherwise be wasting.
+    ///
+    /// Kept, because "what would this cgroup have to give back if the limit were reached"
+    /// is a real question and this is its answer. [`Plex::memory_anon`] is the one the page
+    /// draws.
     pub memory: Option<u64>,
+    /// What Plex itself holds: anonymous pages, from `memory.stat`.
+    ///
+    /// Heap and stack — memory with nothing on disk behind it, which is the part that
+    /// cannot be handed back and therefore the part that can push a cgroup into its limit.
+    /// This is the number a person means by "how much memory is Plex using".
+    pub memory_anon: Option<u64>,
+    /// Page cache charged to the cgroup: the media it has read.
+    ///
+    /// Reclaimable, almost all of it — `inactive_file` was 3.0 GB of the 3.78 on the
+    /// appliance — so it is reported beside the working set rather than added into it.
+    pub memory_cache: Option<u64>,
     /// The ceiling ADR-0007 set, if one is set.
     pub memory_max: Option<u64>,
     /// The most it has ever held, which outlives a restart of Plex itself.
@@ -974,6 +998,14 @@ fn read_plex(env: &impl Environment, cpu_percent: Option<f64>) -> Plex {
             .and_then(|text| text.trim().parse::<u64>().ok())
     };
 
+    // The breakdown, which is what separates "Plex is using four gigabytes" from "the kernel
+    // is holding four gigabytes of films it will hand back the moment anything wants them".
+    let stat = env.read(&group.join("memory.stat")).unwrap_or_default();
+    let field = |name: &str| {
+        stat.lines()
+            .find_map(|line| line.strip_prefix(name)?.trim().parse::<u64>().ok())
+    };
+
     Plex {
         // `cpu.stat` rather than the directory: a cgroup directory that exists with nothing
         // in it is what a stopped Plex leaves behind, and reporting that as present would
@@ -981,6 +1013,10 @@ fn read_plex(env: &impl Environment, cpu_percent: Option<f64>) -> Plex {
         present: env.read(&group.join("cpu.stat")).is_ok(),
         cpu_percent,
         memory: number("memory.current"),
+        // `anon ` and `file ` with the space, or `anon_thp` and `file_mapped` — both real
+        // keys in this file — would match first and answer a different question.
+        memory_anon: field("anon "),
+        memory_cache: field("file "),
         // `max` is the literal in an unset ceiling, and parsing it as a number fails —
         // which is the correct answer to "what is the limit" but had to be deliberate.
         memory_max: number("memory.max"),
@@ -1780,6 +1816,68 @@ ctxt 2390000
             "over 100 on purpose: a transcode uses more than one core, and capping it \
              would answer a different question"
         );
+    }
+
+    #[test]
+    fn most_of_what_is_charged_to_plex_is_films_the_kernel_will_hand_back() {
+        // Captured from the appliance after an evening of playing, and the reason the gauge
+        // changed: `memory.current` read 4.33 GB against a 13.1 GB ceiling, which drew as a
+        // third of the way to a limit and looked like a leak. 534 MB of it was Plex. The rest
+        // was the page cache of the films it had read, and 3.0 GB of that was `inactive_file`
+        // — memory the kernel returns the moment anything else wants it.
+        //
+        // Somebody asked what the figure meant, which is the sort of question a number nobody
+        // can act on provokes.
+        let env = plexos_gpu::env::Fixture::new()
+            .file(plex_cgroup().join("cpu.stat"), "usage_usec 1\n")
+            .file(plex_cgroup().join("memory.current"), "4330409984\n")
+            .file(plex_cgroup().join("memory.max"), "13105426432\n")
+            .file(
+                plex_cgroup().join("memory.stat"),
+                // Trimmed to the keys that matter, in the order the kernel writes them. The
+                // two decoys are real and adjacent: a reader matching on `anon` alone takes
+                // `anon_thp`, and one matching on `file` takes `file_mapped`.
+                "anon 534048768\nfile 3775758336\nkernel 18046976\nslab 13659216\n\
+                 sock 40960\nshmem 764751872\nfile_mapped 73232384\nfile_dirty 0\n\
+                 inactive_file 2997583872\nactive_file 17551360\nanon_thp 0\n",
+            );
+
+        let plex = read_plex(&env, None);
+
+        assert_eq!(
+            plex.memory_anon,
+            Some(534_048_768),
+            "what Plex itself holds"
+        );
+        assert_eq!(
+            plex.memory_cache,
+            Some(3_775_758_336),
+            "and the films, which are not Plex using memory"
+        );
+        assert_eq!(
+            plex.memory,
+            Some(4_330_409_984),
+            "the total is kept: it answers what this cgroup would have to give back"
+        );
+        assert!(
+            plex.memory_anon.unwrap() * 4 < plex.memory.unwrap(),
+            "the whole point — the honest figure is a fraction of the alarming one"
+        );
+    }
+
+    #[test]
+    fn a_cgroup_with_no_breakdown_still_reports_what_it_has() {
+        // An older kernel, or a file that cannot be read. The gauge falls back to the total
+        // rather than to nothing, because a card that goes blank is worse than one that is
+        // pessimistic.
+        let env = plexos_gpu::env::Fixture::new()
+            .file(plex_cgroup().join("cpu.stat"), "usage_usec 1\n")
+            .file(plex_cgroup().join("memory.current"), "554053632\n");
+
+        let plex = read_plex(&env, None);
+        assert_eq!(plex.memory, Some(554_053_632));
+        assert_eq!(plex.memory_anon, None);
+        assert_eq!(plex.memory_cache, None);
     }
 
     #[test]

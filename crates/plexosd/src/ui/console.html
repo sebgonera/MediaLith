@@ -5547,11 +5547,26 @@ function renderMetrics(m) {
       undefined, undefined,
       plex.present ? metricSpark(metricsHistory.plex, 100 * (cores || 1)) : ""),
 
-    metricGauge("Plex memory", plex.present ? metricBytes(plex.memory) : "—", "",
-      plex.present && plex.memory_max
-        ? `limit ${metricBytes(plex.memory_max)}` + (plex.pids ? ` · ${plex.pids} processes` : "")
-        : plex.present ? "no limit set" : "",
-      plex.present && plex.memory_max ? (plex.memory / plex.memory_max) * 100 : undefined),
+    // What Plex *holds*, not what the kernel has charged to it. Those were the same figure
+    // until somebody asked why this read 4.24 GB on a machine that was perfectly well: of
+    // the 4.33 GB in `memory.current`, 534 MB was Plex and 3.78 GB was the page cache of the
+    // films it had read — memory the kernel hands straight back when anything wants it. So
+    // the gauge, and the meter under it, are the working set, and the cache is stated beside
+    // it rather than added into it. A cache filling up is the machine doing its job; drawn
+    // as a gauge climbing towards a limit it looked like a leak.
+    metricGauge("Plex memory",
+      plex.present ? metricBytes(plex.memory_anon !== null && plex.memory_anon !== undefined
+        ? plex.memory_anon : plex.memory) : "—", "",
+      plex.present
+        ? [
+            plex.memory_cache ? `${metricBytes(plex.memory_cache)} cached` : null,
+            plex.memory_max ? `limit ${metricBytes(plex.memory_max)}` : "no limit set",
+            plex.pids ? `${plex.pids} processes` : null,
+          ].filter(Boolean).join(" · ")
+        : "",
+      plex.present && plex.memory_max && plex.memory_anon !== null && plex.memory_anon !== undefined
+        ? (plex.memory_anon / plex.memory_max) * 100
+        : plex.present && plex.memory_max ? (plex.memory / plex.memory_max) * 100 : undefined),
 
     gpuGauge,
 
