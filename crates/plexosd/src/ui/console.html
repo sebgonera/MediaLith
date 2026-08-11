@@ -2890,6 +2890,18 @@ function viewInUrl() {
 
 let currentView = null;
 
+/// The card each view exists to show, opened when that view is first opened.
+///
+/// Deliberately not the installer: erasing a disk is the one operation on this console that
+/// cannot be undone, and it stays behind a deliberate click at every width. Nor the settings
+/// form, which would make System open three screens tall.
+const VIEW_OPENS = {
+  storage: ["shares"],
+  network: ["wifi"],
+  system: ["update"],
+};
+const openedOnce = new Set();
+
 /// Shows one view and hides the rest.
 ///
 /// `hidden` rather than a class, because an element that is `hidden` leaves the
@@ -2919,6 +2931,18 @@ function showView(name) {
     }
   }
   document.title = view === "overview" ? "PlexOS" : "PlexOS — " + view[0].toUpperCase() + view.slice(1);
+
+  // A card that is the subject of the view somebody just opened should not be shut. The
+  // defaults in `folded` are about the page as a whole -- what a console loading on an
+  // Overview should not be showing -- and they were right when everything was one column.
+  // Opening Storage to a closed Media shares card is not the same decision.
+  //
+  // Once per view, not every time: somebody who shuts it again has said something, and a
+  // page that reopened it on the next visit would be arguing.
+  if (!openedOnce.has(view)) {
+    openedOnce.add(view);
+    for (const key of VIEW_OPENS[view] || []) unfold(key);
+  }
 
   // A terminal measured while its view was hidden measured nothing, and the floor in
   // termSize would then have told the shell it has eighty columns in a box that is now much
@@ -3026,6 +3050,7 @@ let latestProvision = null;
 let latestShares = null;
 let latestUpdate = null;
 let latestSetup = null;
+let latestInstall = null;
 let lastSummaryRendered = null;
 
 const ICONS = {
@@ -4060,14 +4085,28 @@ function renderShares(list) {
   const typingIn = active && active.closest && active.closest("#shares") ? active.id : null;
   const caret = typingIn ? active.selectionStart : 0;
 
+  // Mounted or not is the whole question about a share, and it was a word in a cell reading
+  // exactly like the three cells beside it. A share that is configured and not mounted is a
+  // library Plex cannot see, which is indistinguishable from an empty server -- so it says
+  // so in a colour, and says what to do about it underneath.
   const rows = (list || []).map(s => `
     <tr>
       <td class="mono">${esc(s.name)}</td>
       <td>${esc(s.kind)}</td>
       <td class="mono">${esc(s.source)}</td>
-      <td>${s.mounted ? "mounted" : "not mounted"}</td>
-      <td><button class="share-drop" data-name="${esc(s.name)}">Remove</button></td>
+      <td><span class="badge ${s.mounted ? "ready" : "unavailable"}">${s.mounted ? "mounted" : "not mounted"}</span></td>
+      <td><button class="share-drop ghost" data-name="${esc(s.name)}">Remove</button></td>
     </tr>`).join("");
+
+  const unmounted = (list || []).filter(s => !s.mounted);
+  const trouble = unmounted.length
+    ? `<p class="warn"><strong>${unmounted.length === 1
+         ? `${esc(unmounted[0].name)} is configured but not mounted.`
+         : `${unmounted.length} shares are configured but not mounted.`}</strong>
+        Plex cannot see what is on them, which looks from Plex's side exactly like an empty
+        library. The usual causes are the server being off, the export not permitting this
+        machine, or a path that has moved.</p>`
+    : "";
 
   document.getElementById("shares").innerHTML = `
     <h3>Media shares</h3>
@@ -4075,6 +4114,7 @@ function renderShares(list) {
        <strong>read-only</strong> under /var/media and cannot be executed from — nothing
        on a library should ever run here. Plex is confined by a policy built when it
        starts, so after adding a share it has to be restarted before it can see it.</p>
+    ${trouble}
     ${rows ? `<div class="scroll"><table>
         <thead><tr><th>Name</th><th>Kind</th><th>Source</th><th>State</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table></div>` : `<p class="empty">No shares yet.</p>`}
@@ -4418,6 +4458,7 @@ function renderInstall(report) {
   // The same enumeration, read-only, in Storage. Outside the signature check below, which
   // returns early while somebody is typing into the confirmation field -- and an inventory
   // that stopped updating because of a field in another view would be a puzzle.
+  latestInstall = report;
   renderStorageDisks(report);
 
   const typing = document.activeElement && document.activeElement.id === "install-confirm";
@@ -4666,6 +4707,10 @@ function renderMetrics(m) {
   latestMetrics = m;
   renderSummary();
   renderStorage();
+  // The disk table's read and write columns come from here, and the install poll that draws
+  // the table runs every ten seconds -- so without this the rates would be up to ten seconds
+  // stale beside an activity card showing them live two views away.
+  if (latestInstall) renderStorageDisks(latestInstall);
 
   const cpu = m.cpu || {};
   const memory = m.memory || {};
