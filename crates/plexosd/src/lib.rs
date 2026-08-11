@@ -44,6 +44,7 @@ pub mod addressing;
 pub mod appmount;
 pub mod auth;
 pub mod bootcounter;
+pub mod browserpair;
 pub mod console;
 pub mod dashboard;
 pub mod esp;
