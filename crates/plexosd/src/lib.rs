@@ -55,6 +55,7 @@ pub mod metrics;
 pub mod net;
 pub mod netdiag;
 pub mod plex;
+pub mod plexactivity;
 pub mod power;
 pub mod provision;
 pub mod rollback;

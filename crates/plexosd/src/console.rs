@@ -133,6 +133,29 @@ pub fn respond(request: &Request, env: &impl Environment, services: &Services) -
         ("GET" | "HEAD", "/api/metrics") | ("POST", "/api/metrics/processes") => {
             metrics_route(request, env, metrics)
         }
+
+        // What Plex is playing right now. A `POST` for the same reason the process list is
+        // one, and it is the stronger case of the two: a title, a username, a device name
+        // and a position in a film are what somebody in this house is doing this evening,
+        // and a `GET` would make a household's viewing readable by anything on the LAN for
+        // as long as the appliance runs. The method-based gate in `http::refusal` is what
+        // enforces it — one policy, in front of the whole table, rather than a check in
+        // here that a later route could forget.
+        //
+        // The open-`GET` principle is untouched: it exists so a *broken* machine can still
+        // be diagnosed, and nothing here is needed to diagnose one. `/api/status`,
+        // `/api/gpu` and `/healthz` answer as freely as they ever did.
+        ("POST", "/api/plex/sessions") => {
+            let report =
+                crate::plexactivity::observe(std::path::Path::new(plexos_types::paths::PLEX_MOUNT));
+            match serde_json::to_string(&report) {
+                Ok(body) => Response::json(body),
+                Err(error) => Response::text(
+                    500,
+                    format!("could not serialise the Plex activity: {error}\n"),
+                ),
+            }
+        }
         // Starting an installation. Returns as soon as the work is handed to a thread:
         // the download alone is minutes, and a request held open for it would time out
         // in the browser with the install still running and no way to say so.
