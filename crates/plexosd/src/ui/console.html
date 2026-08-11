@@ -1897,23 +1897,24 @@
        kept in sessionStorage alone, and still sent as an Authorization header. -->
   <section class="card plex" id="token-card" hidden>
     <h3>Administrator access</h3>
-    <p class="hint">The quickest way in is the screen attached to the machine: press
-       <strong>P</strong> on it and scan the QR code with a phone. That signs this browser
-       in without anything being typed.</p>
-    <p class="hint">The recovery device code below is the other way, and the way back if
-       the screen is not to hand — sixteen characters in four groups, printed on that
-       screen the first time this machine started. Case does not matter and the dashes are
-       optional. Reading this page needs nothing; every button that changes something
-       needs one of the two.</p>
+    <!-- The actions first and the prose under them. This card is read on a phone, where
+         two paragraphs before the first control is two paragraphs of scrolling to find
+         out that there is one. -->
     <div class="row">
       <button id="bp-start" class="ghost">Pair using another device</button>
     </div>
+    <p class="hint">Shows a code for a phone or browser that is <strong>already signed
+       in</strong> to approve.</p>
+    <p class="hint">No device signed in yet? Press <strong>P</strong> on the screen
+       attached to the machine and scan the code there.</p>
     <!-- Written into, never replaced by a poll: the request this browser is waiting on is
          state a person started, and the rule this page already lives by is that a region on
          a timer destroys anything somebody opened inside it. -->
     <div id="bp-state"></div>
 
-    <p class="hint">Or enter the recovery device code:</p>
+    <p class="hint">Or type the recovery device code — sixteen characters, printed on the
+       machine's screen when it first started. It takes effect as you type; case and dashes
+       do not matter.</p>
     <div class="row">
       <input type="text" id="token" placeholder="4K7Q-M2XR-9T8B-HVWP"
              autocomplete="off" spellcheck="false" autocapitalize="characters">
