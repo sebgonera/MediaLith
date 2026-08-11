@@ -1027,8 +1027,16 @@
   button.navitem .tail.bad { color: var(--unavailable); }
   button.navitem .tail.warn { color: var(--degraded); }
 
-  /* Same problem, same answer: these two are buttons that must not look like one. */
-  button.linkish, button.linkish:hover { background: none; border: 0; box-shadow: none; }
+  /* Same problem, same answer, and the colour is the half that was missed the first time:
+     `.linkish` is one class and lost `color` to `button:not(.ghost)`, so a cross-reference
+     inside a muted paragraph rendered in white on nearly-white and could not be seen at all.
+     Found by looking at the page, like the sidebar before it. */
+  button.linkish, button.linkish:hover {
+    background: none;
+    border: 0;
+    box-shadow: none;
+    color: var(--accent);
+  }
 
   /* Focus that is visible on both themes, on every control the keyboard can reach. */
   :is(button, input, select, a):focus-visible {
@@ -1079,7 +1087,13 @@
      to report -- through `order`, so the markup keeps one honest reading order for anything
      that does not do layout.
      ------------------------------------------------------------------------------------ */
-  #view-overview { display: flex; flex-direction: column; }
+  /* `:not([hidden])` is load-bearing, not decoration. An id outranks any number of classes,
+     so a bare `#view-overview { display: flex }` beats `.view[hidden] { display: none }` and
+     the Overview stays on the screen underneath every other view -- which is exactly what
+     the first render of the Plex view showed, with the header floating halfway down a page
+     of summary cards. The same trap is already recorded on `#terminal.folded` a few hundred
+     lines up. An id in a layout rule needs the state in the selector. */
+  #view-overview:not([hidden]) { display: flex; flex-direction: column; }
   #view-overview > .summary { order: 1; }
   #view-overview > #metrics { order: 3; }
   #view-overview > #main { order: 4; }
@@ -1269,6 +1283,39 @@
     cursor: pointer;
   }
   .linkish:hover { filter: brightness(1.1); }
+
+  /* The Plex server's state line: a lamp, what it is doing, and the way in. */
+  .server {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    flex-wrap: wrap;
+    padding: .85rem .95rem;
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--muted);
+    border-radius: var(--radius-sm);
+    background: var(--raised);
+  }
+  .server.ready { border-left-color: var(--ready); }
+  .server.degraded { border-left-color: var(--degraded); }
+  .server > div { flex: 1 1 18rem; min-width: 0; }
+  .server .what { font-size: 1.1rem; font-weight: 650; }
+  .server.ready .what { color: var(--ready); }
+  .server.degraded .what { color: var(--degraded); }
+  .server .hint { margin: .15rem 0 0; }
+  .server .visit { margin-top: 0; }
+  .statedot {
+    flex: 0 0 auto;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  .server.ready .statedot { color: var(--ready); box-shadow: 0 0 0 4px var(--ready-soft); }
+  .server.degraded .statedot { color: var(--degraded); box-shadow: 0 0 0 4px var(--degraded-soft); }
+
+  /* A word that has to read as a caution inside an otherwise ordinary line. */
+  .warnink { color: var(--degraded); font-weight: 600; }
 
   /* Everything is fine, said in one line. */
   .allwell {
@@ -2978,6 +3025,7 @@ let latestMetrics = null;
 let latestProvision = null;
 let latestShares = null;
 let latestUpdate = null;
+let latestSetup = null;
 let lastSummaryRendered = null;
 
 const ICONS = {
@@ -3567,6 +3615,11 @@ function renderPlex(report) {
   const signature = JSON.stringify([
     report.phase, report.detail, report.error, report.installed, report.running,
     (report.log || []).length,
+    // Both are drawn by this section and neither changes when anything above does, so a
+    // signature without them would show the version Plex offered, and whether the server is
+    // signed in, only at the next unrelated redraw -- which reads as intermittent.
+    report.installed_version, report.latest_version,
+    (((latestSetup || {}).steps || []).find(s => s.id === "claim-plex") || {}).state,
   ]);
   if (signature === lastRendered) return;
   lastRendered = signature;
@@ -3711,30 +3764,52 @@ function renderPlexInto(report) {
   // installed, so there was no way to move to a newer Plex from the console at all -- the
   // fourth time in this repository that a control was correct in the state it was written
   // in and wrong in the state its own success produces.
-  if (report.running) {
-    section.innerHTML = `
-      <h3>Plex Media Server</h3>
-      <p><strong>Running.</strong>${report.installed_version
-        ? ` Version <span class="mono">${esc(report.installed_version)}</span>.`
-        : ""} Sign in and add your libraries from Plex itself.</p>
-      <a class="visit" target="_blank" rel="noopener noreferrer"
-         href="${plexUrl(report.web)}">Open Plex</a>
-      ${plexVersionsMarkup(report, busy)}
-      ${progressMarkup(report, phase, busy)}`;
-    wirePlexVersionControls(report);
-    return;
-  }
+  // Running and installed-but-not-running are one card with one state line, rather than two
+  // cards that repeat each other. The difference between them is a word, a colour and a
+  // sentence, and writing it twice is how the running branch came to be missing every
+  // version control for a month.
+  if (report.running || report.installed) {
+    // Whether a Plex account owns this server. Not a field on /api/provision -- the setup
+    // flow already computes it, by asking Plex itself, so this reads the answer that exists
+    // rather than adding a second one that could disagree with it.
+    const claim = ((latestSetup || {}).steps || []).find(s => s.id === "claim-plex");
 
-  if (report.installed) {
     section.innerHTML = `
       <h3>Plex Media Server</h3>
-      <p><strong>Installed, but not running.</strong>${report.installed_version
-        ? ` Version <span class="mono">${esc(report.installed_version)}</span>.`
-        : ""} The supervisor restarts it, so this is either a start still in progress or a
-         Plex that will not start — the log below says which.</p>
+      <div class="server ${report.running ? "ready" : "degraded"}">
+        <span class="statedot" aria-hidden="true"></span>
+        <div>
+          <div class="what">${report.running ? "Running" : "Installed, but not running"}</div>
+          <p class="hint">${report.running
+            ? "Plex is answering on its own port. Sign in and add libraries from Plex itself."
+            : "The supervisor restarts it, so this is either a start still in progress or a Plex that will not start — the log below says which."}</p>
+        </div>
+        ${report.running && report.web
+          ? `<a class="visit" target="_blank" rel="noopener noreferrer"
+                href="${plexUrl(report.web)}">Open Plex</a>`
+          : ""}
+      </div>
+      <dl>
+        <dt>Installed</dt>
+        <dd class="mono">${esc(report.installed_version) || "version not recorded"}</dd>
+        ${report.latest_version
+          ? `<dt>Plex offers</dt><dd class="mono">${esc(report.latest_version)}${
+              report.latest_version === report.installed_version ? " — up to date" : ""}</dd>`
+          : ""}
+        ${claim
+          ? `<dt>Account</dt><dd>${claim.state === "done"
+              // The step's own detail already says "Signed in. Plex is owned by a Plex
+              // account", so prefixing it with the state printed the words twice in one
+              // line. When it is *not* signed in the word has to be there, because the
+              // detail is an instruction rather than a state.
+              ? esc(claim.detail)
+              : `<span class="warnink">Not signed in.</span> ${esc(claim.detail)}`}</dd>`
+          : ""}
+      </dl>
       ${plexVersionsMarkup(report, busy)}
       ${progressMarkup(report, phase, busy)}`;
     wirePlexVersionControls(report);
+    renderPlexFuture(report);
     return;
   }
 
@@ -3768,6 +3843,33 @@ function renderPlexInto(report) {
   document.getElementById("plex-install").addEventListener("click", startPlexInstall);
   document.getElementById("plex-upload").addEventListener("click", startPlexUpload);
   document.getElementById("plex-media-scan").addEventListener("click", scanPlexMedia);
+  renderPlexFuture(report);
+}
+
+/// What this view will hold, and does not.
+///
+/// Streams, libraries and live transcodes are the three things anybody would expect here,
+/// and this console cannot answer any of them: all three live behind Plex's own API, which
+/// needs a Plex account token, and ADR-0013's device token is not one. Putting the sections
+/// in with invented numbers would be worse than an empty view -- so the shape is here, the
+/// reason is here, and the figures are not.
+function renderPlexFuture(report) {
+  const host = document.getElementById("plex-future");
+  if (!host) return;
+  const markup = !report.installed ? "" : `
+    <div class="absent">
+      <strong>Active streams, libraries and live transcodes are not here yet.</strong>
+      All three come from Plex's own API, which authenticates with a Plex account token —
+      not this appliance's device token. Reading them would mean the console holding a
+      credential to somebody's Plex account, which is a decision worth taking deliberately
+      rather than as a side effect of wanting a nicer page. Until it is taken, Plex's own
+      interface is the place to see them, and
+      <button class="linkish" data-goto="overview">the Overview</button> reports what the
+      machine underneath is doing while they play.
+    </div>`;
+  if (host.dataset.rendered === markup) return;
+  host.dataset.rendered = markup;
+  host.innerHTML = markup;
 }
 
 /** Looks for packages on removable media, and offers what it found.
@@ -4293,7 +4395,11 @@ async function tickSetup() {
   try {
     const response = await fetch(SETUP_ENDPOINT, { cache: "no-store" });
     if (!response.ok) return;
-    renderSetup(await response.json());
+    const report = await response.json();
+    // The Plex view reads the claim step off this: whether a Plex account owns this server
+    // is computed here, by asking Plex, and a second implementation would be a second answer.
+    latestSetup = report;
+    renderSetup(report);
   } catch (error) {
     // Deliberately silent. This section is guidance, and a machine whose console is
     // struggling has more useful things to say in the sections that are about it.

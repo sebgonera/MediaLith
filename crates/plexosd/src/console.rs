@@ -1910,19 +1910,28 @@ mod tests {
         //
         // Asserting on the source is weaker than driving a browser, and it is what catches
         // a `return` put back above the version controls.
+        //
+        // The two branches became one when the Plex view was built: running and
+        // installed-but-not-running differ by a word, a colour and a sentence, and writing
+        // that twice is how the running branch came to be missing every control in the first
+        // place. So this reads the merged branch, and the property it guards is unchanged.
         let branch = PAGE
-            .split("if (report.running)")
+            .split("if (report.running || report.installed)")
             .nth(1)
-            .expect("the running branch");
-        let branch = &branch[..branch.find("if (report.installed)").unwrap_or(branch.len())];
+            .expect("the branch that draws an installed Plex");
+        let branch = &branch[..branch.find("\n  const progress =").unwrap_or(branch.len())];
 
         assert!(
             branch.contains("plexVersionsMarkup"),
-            "a running Plex must still offer the version controls: {branch}"
+            "an installed Plex must still offer the version controls: {branch}"
         );
         assert!(
             branch.contains("progressMarkup"),
             "an upgrade that fails while Plex runs has to report it somewhere"
+        );
+        assert!(
+            branch.contains("wirePlexVersionControls"),
+            "and the controls it renders have to be wired to something"
         );
     }
 
