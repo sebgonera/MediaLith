@@ -414,6 +414,9 @@
   dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: .4rem .9rem; }
   dt { color: var(--muted); font-size: .9rem; }
   dd { margin: 0; overflow-wrap: anywhere; }
+  /* A note under a value in a definition list -- its own line, and prose rather than a
+     continuation of the value above it. */
+  dd > .hint { display: block; margin-top: .25rem; }
 
   .checks { list-style: none; margin: 0; padding: 0; display: grid; gap: .6rem; }
   .checks li { display: grid; grid-template-columns: 3.2rem 1fr; gap: .6rem; align-items: start; }
@@ -3070,7 +3073,14 @@ function systemCard(status) {
         <dt>Version</dt><dd class="mono">${esc(p.version) || "unknown"}</dd>
         <dt>Root hash</dt><dd class="mono">${esc(p.root_hash) || "unknown"}</dd>
         ${p.tls_fingerprint
-          ? `<dt>Certificate</dt><dd class="mono" style="word-break:break-all">${esc(p.tls_fingerprint)}<br><span class="hint">SHA-256 of this console's key. Compare it with what your browser shows for the certificate — they must match. It does not change when the machine's address does.</span></dd>`
+          // The `mono` and the `break-all` are on the fingerprint alone, not on the cell.
+          // They were on the cell, which put the sentence underneath into monospace and let
+          // it break mid-word -- "what your brow / ser shows". Harmless while this card
+          // started folded and the first thing anybody saw when the System view began
+          // opening it, which is the shape this repository keeps recording: a thing that was
+          // correct in the state it was written in.
+          ? `<dt>Certificate</dt><dd><span class="mono" style="word-break:break-all">${esc(p.tls_fingerprint)}</span>
+             <span class="hint">SHA-256 of this console's key. Compare it with what your browser shows for the certificate — they must match. It does not change when the machine's address does.</span></dd>`
           : ""}
       </dl>
     </div>`;
