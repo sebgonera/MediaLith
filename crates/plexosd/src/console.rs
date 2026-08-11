@@ -3131,6 +3131,153 @@ console.log("OK");
     }
 
     #[test]
+    fn an_approval_request_leaves_the_url_the_same_way_a_pairing_code_does() {
+        // Run rather than asserted about, because this page has shipped correct text over
+        // wrong behaviour before. The case that matters most is the last one: a hash that is
+        // not an approval request must come through untouched, or every `#network` link
+        // somebody sends opens on the Overview instead.
+        let script = page_script();
+        let start = script
+            .find("function takeApprovalRequest(")
+            .expect("taking the request out of the URL is a named function");
+        let end = script[start..]
+            .find("\n}\n")
+            .map(|at| start + at + "\n}".len())
+            .expect("and ends at a brace in the first column");
+        let function = &script[start..end];
+        let prefix = script
+            .lines()
+            .find(|line| line.starts_with("const APPROVE_PREFIX = "))
+            .expect("the fragment prefix is declared on one line");
+
+        let Some(engine) = ["node", "deno", "qjs"].into_iter().find(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        }) else {
+            println!(
+                "skip: the approval bootstrap was not run -- no node, deno or qjs on this \
+                 host. Install one, or a request left in the address bar will only be found \
+                 by scanning a code with a phone."
+            );
+            return;
+        };
+
+        let harness = format!(
+            r##"
+{prefix}
+{function}
+
+const cases = [
+  ["#approve=abc123", "", "abc123"],
+  ["#approve=", "", ""],
+  ["", "", ""],
+  ["#network", "#network", ""],
+  ["#pair=SOMECODE", "#pair=SOMECODE", ""],
+];
+
+for (const [hash, expectedHash, expectedId] of cases) {{
+  let replaced = null;
+  globalThis.window = {{ location: {{ hash, pathname: "/", search: "" }} }};
+  globalThis.history = {{ replaceState: (_s, _t, url) => {{ replaced = url; }} }};
+
+  const got = takeApprovalRequest();
+  if (got !== expectedId) {{
+    console.log("FAIL id " + JSON.stringify(hash) + ": " + JSON.stringify(got));
+    process.exit(1);
+  }}
+  const left = replaced === null ? hash : "";
+  if (left !== expectedHash) {{
+    console.log("FAIL hash " + JSON.stringify(hash) + ": left " + JSON.stringify(left));
+    process.exit(1);
+  }}
+}}
+console.log("OK");
+"##
+        );
+
+        let path = std::env::temp_dir().join("medialith-take-approval-request-test.js");
+        std::fs::write(&path, harness).expect("write the harness");
+        let output = std::process::Command::new(engine)
+            .arg(&path)
+            .output()
+            .expect("run the harness");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("OK"),
+            "the page's own approval bootstrap misbehaved:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn the_desktop_secret_travels_in_a_body_and_is_never_drawn() {
+        // The half of the two-value design that lives in the browser. The id is in a QR on
+        // a monitor; the secret is what makes photographing that monitor useless, so it
+        // must never reach a URL, a QR or the screen.
+        let script = page_script();
+
+        for (function, marker) in [
+            ("async function bpPoll()", "/api/browser-pair/redeem"),
+            ("async function bpCancel()", "/api/browser-pair/cancel"),
+        ] {
+            let body = script
+                .split_once(function)
+                .map_or_else(|| panic!("{function} exists"), |(_, rest)| rest);
+            let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+            assert!(body.contains(marker), "{function} posts to {marker}");
+            assert!(
+                body.contains("body: JSON.stringify(held)"),
+                "{function} sends the request and its secret in the body: {body}"
+            );
+        }
+
+        // The QR the desktop paints comes from the appliance, and what it paints is a
+        // matrix of ones and zeros -- so there is no encoder in this page that could be
+        // handed a secret by mistake.
+        assert!(
+            script.contains("function qrSvg(rows)"),
+            "the page paints a matrix rather than encoding one"
+        );
+        assert!(
+            !script.contains("desktop_secret") || script.contains("opened.desktop_secret"),
+            "the secret is stored, never drawn"
+        );
+        let show = script
+            .split_once("function bpShow(opened)")
+            .map(|(_, rest)| rest)
+            .expect("bpShow exists");
+        let show = &show[..show.find("\n}\n").unwrap_or(show.len())];
+        assert!(
+            !show.contains("secret"),
+            "nothing about the secret is drawn on the desktop: {show}"
+        );
+    }
+
+    #[test]
+    fn approving_sends_a_sentence_about_a_request_and_never_a_session() {
+        // The principle, on the browser's side: the phone tells the appliance which request
+        // it approves. It does not hand anything over, and there is no code here that
+        // could -- the only thing it sends of its own is the Authorization header every
+        // other request on this page carries.
+        let script = page_script();
+        let decide = script
+            .split_once("async function decideApproval(approve)")
+            .map(|(_, rest)| rest)
+            .expect("deciding is a named function");
+        let decide = &decide[..decide.find("\n}\n").unwrap_or(decide.len())];
+
+        assert!(decide.contains("body: JSON.stringify({ request_id: id })"));
+        assert!(
+            !decide.contains("session_token") && !decide.contains("rememberSession"),
+            "the approver must not move a session anywhere: {decide}"
+        );
+    }
+
+    #[test]
     fn the_pairing_code_leaves_the_url_before_anything_can_read_it() {
         // The fragment is not sent to the server, which is why the QR uses one. What the
         // fragment *is* exposed to is the address bar, the history, a screenshot and --
@@ -3225,16 +3372,29 @@ console.log("OK");
         // The property that prevents it is that exactly one place writes the key, and it is
         // the one that has just been handed a session by the appliance.
         let script = page_script();
+
+        // One definition and exactly two callers. Both are functions the appliance has just
+        // handed a session to -- spending a pairing code from the machine's own screen, and
+        // collecting one that another browser approved. Anything else writing this key
+        // would be the redraw fault with a credential in it.
         assert_eq!(
             script.matches("rememberSession(").count(),
-            2,
-            "one definition and one caller, and the caller is the pairing bootstrap"
+            3,
+            "one definition and two callers"
         );
-        let bootstrap = script
-            .split_once("async function bootstrapPairing()")
-            .map(|(_, rest)| rest)
-            .expect("the bootstrap is a named function");
-        assert!(bootstrap.contains("rememberSession("));
+        for (owner, marker) in [
+            ("the pairing bootstrap", "async function bootstrapPairing()"),
+            ("the browser-approval poll", "async function bpPoll()"),
+        ] {
+            let body = script
+                .split_once(marker)
+                .map_or_else(|| panic!("{owner} is a named function"), |(_, rest)| rest);
+            let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+            assert!(
+                body.contains("rememberSession("),
+                "{owner} stores the session"
+            );
+        }
     }
 
     #[test]

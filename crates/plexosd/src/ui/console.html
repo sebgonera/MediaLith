@@ -1374,6 +1374,21 @@
   }
   #token-card[hidden] { display: none; }
 
+  /* A QR code is dark-on-light in both themes, and that is not an oversight. A decoder
+     thresholds the image it is given; an inverted symbol is one many of them refuse. So
+     these two colours are fixed while everything around them follows the theme. */
+  .qr {
+    display: block; width: min(260px, 60vw); height: auto;
+    border-radius: 8px; background: #fff; padding: 8px;
+  }
+  /* The number both screens show. Large, spaced and monospaced, because its whole job is
+     to be compared against another screen across a room. */
+  .verify {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 2rem; letter-spacing: .35em;
+    text-indent: .35em; font-variant-numeric: tabular-nums;
+  }
+
   /* ------------------------------------------------------------------------------------
      The A/B slots, drawn as what they are.
 
@@ -1891,6 +1906,15 @@
        optional. Reading this page needs nothing; every button that changes something
        needs one of the two.</p>
     <div class="row">
+      <button id="bp-start" class="ghost">Pair using another device</button>
+    </div>
+    <!-- Written into, never replaced by a poll: the request this browser is waiting on is
+         state a person started, and the rule this page already lives by is that a region on
+         a timer destroys anything somebody opened inside it. -->
+    <div id="bp-state"></div>
+
+    <p class="hint">Or enter the recovery device code:</p>
+    <div class="row">
       <input type="text" id="token" placeholder="4K7Q-M2XR-9T8B-HVWP"
              autocomplete="off" spellcheck="false" autocapitalize="characters">
     </div>
@@ -1905,6 +1929,15 @@
       because rotating is what you do when a credential has got out. The new code is shown
       once, here and on the attached screen, and cannot be asked for again.</p>
     <div id="token-result"></div>
+  </section>
+
+  <!-- The approval card. A sibling of the token card and hidden by default, shown when this
+       browser arrives carrying #approve=. It is static markup for the same reason the token
+       card is: nothing a person is reading or deciding may live inside a region a poll
+       replaces. -->
+  <section class="card plex" id="approve-card" hidden>
+    <h3>Authorise another browser</h3>
+    <div id="approve-body"></div>
   </section>
 
   <p class="warn" id="power-note" hidden></p>
@@ -3723,6 +3756,159 @@ async function lockAdmin() {
 }
 
 // ------------------------------------------------------------------------------------
+// Browser approval (ADR-0019), the desktop half.
+//
+// This browser is nobody. It asks the appliance to open a request, shows the QR the
+// appliance encoded, and waits for a browser that *is* somebody to approve it.
+//
+// The request has two halves and they are treated differently on purpose. The **id** goes
+// in the QR, where anybody in the room can photograph it. The **secret** stays here, in
+// sessionStorage, and is what turns an approval into this browser's session -- so a
+// photograph of the screen is not enough, and neither is watching the whole exchange.
+// ------------------------------------------------------------------------------------
+const BP_REQUEST_KEY = "medialith-browser-pair";
+const BP_POLL_MS = 2000;
+
+let bpTimer = null;
+let bpDeadline = 0;
+
+function bpRequest() {
+  try { return JSON.parse(sessionStorage.getItem(BP_REQUEST_KEY) || "null"); }
+  catch (e) { return null; }
+}
+function bpRemember(request) { sessionStorage.setItem(BP_REQUEST_KEY, JSON.stringify(request)); }
+function bpForget() { sessionStorage.removeItem(BP_REQUEST_KEY); }
+
+/** The appliance's matrix, painted. One path, so a symbol is one element rather than 841. */
+function qrSvg(rows) {
+  const n = rows.length;
+  let d = "";
+  for (let y = 0; y < n; y++) {
+    const row = rows[y];
+    for (let x = 0; x < n; x++) if (row[x] === "1") d += `M${x} ${y}h1v1h-1z`;
+  }
+  // shape-rendering matters: without it the browser antialiases module edges and a decoder
+  // sees grey where it needs a threshold.
+  return `<svg class="qr" viewBox="0 0 ${n} ${n}" shape-rendering="crispEdges" aria-hidden="true">
+    <rect width="${n}" height="${n}" fill="#ffffff"/><path d="${esc(d)}" fill="#000000"/></svg>`;
+}
+
+function bpSay(html) {
+  const out = document.getElementById("bp-state");
+  if (out) out.innerHTML = html;
+}
+
+function bpStop() {
+  if (bpTimer) { clearInterval(bpTimer); bpTimer = null; }
+}
+
+/** Seconds left, as m:ss, the way the appliance's own screen writes it. */
+function bpCountdown() {
+  const left = Math.max(0, Math.round((bpDeadline - Date.now()) / 1000));
+  return `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+}
+
+async function bpStart() {
+  bpStop();
+  bpSay(`<div class="progress"><span class="now">Asking MediaLith</span></div>`);
+  try {
+    const response = await fetch("/api/browser-pair/start", {
+      method: "POST", cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(text.trim() || response.statusText);
+
+    const opened = JSON.parse(text);
+    bpRemember({ request_id: opened.request_id, desktop_secret: opened.desktop_secret });
+    bpDeadline = Date.now() + (Number(opened.expires_in) || 300) * 1000;
+    bpShow(opened);
+    bpTimer = setInterval(bpPoll, BP_POLL_MS);
+    bpPoll();
+  } catch (e) {
+    bpSay(`<div class="progress failed"><div>Could not ask MediaLith for a pairing
+      request.</div><div>${esc(String(e))}</div></div>`);
+  }
+}
+
+function bpShow(opened) {
+  bpSay(`<div class="progress">
+    ${qrSvg(opened.qr)}
+    <div>Scan this with a phone or browser that is <strong>already signed in</strong> to
+      MediaLith, then approve this browser there.</div>
+    <div class="hint">Verification code — check it matches what the other device shows:</div>
+    <div class="verify">${esc(opened.verification)}</div>
+    <div id="bp-waiting" class="hint">Waiting for approval… expires in ${esc(bpCountdown())}</div>
+    <div class="row"><button id="bp-cancel" class="ghost">Cancel</button></div>
+  </div>`);
+}
+
+async function bpPoll() {
+  const held = bpRequest();
+  if (!held) { bpStop(); return; }
+
+  // The countdown is written into its own element rather than by redrawing the block,
+  // because redrawing would destroy the QR the person is in the middle of scanning.
+  const waiting = document.getElementById("bp-waiting");
+  if (waiting) waiting.textContent = `Waiting for approval… expires in ${bpCountdown()}`;
+
+  let answer;
+  try {
+    const response = await fetch("/api/browser-pair/redeem", {
+      method: "POST", cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(held),
+    });
+    answer = JSON.parse(await response.text());
+  } catch (e) {
+    // A poll that could not reach the appliance says nothing and tries again. The machine
+    // being briefly unreachable is not a reason to throw away a live request.
+    return;
+  }
+
+  if (answer.status === "pending") return;
+  bpStop();
+
+  if (answer.status === "approved") {
+    // This browser's own session, minted by the appliance. The approving device never saw
+    // it and this browser never saw the approving device's.
+    rememberSession(answer.session_token);
+    bpForget();
+    updateLock();
+    bpSay(`<div class="progress"><span class="now">Approved</span>
+      <div>This browser is now administering the appliance.</div></div>`);
+    openAdmin(false);
+    return;
+  }
+
+  bpForget();
+  const why = answer.status === "denied"
+    ? "That request was refused on the other device."
+    : "That request is no longer valid — it expired, or it was already used.";
+  bpSay(`<div class="progress failed"><div>${esc(why)}</div>
+    <div class="row"><button id="bp-start-again" class="ghost">Try again</button></div></div>`);
+}
+
+async function bpCancel() {
+  bpStop();
+  const held = bpRequest();
+  bpForget();
+  if (held) {
+    // Told to the appliance, so the request stops standing rather than lingering for five
+    // minutes -- and possession of the secret is what makes this ours to cancel.
+    try {
+      await fetch("/api/browser-pair/cancel", {
+        method: "POST", cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(held),
+      });
+    } catch (e) { /* it expires on its own soon enough */ }
+  }
+  bpSay("");
+}
+
+// ------------------------------------------------------------------------------------
 // Pairing bootstrap (ADR-0019).
 //
 // The QR code on the appliance's screen carries this machine's own address with
@@ -3761,6 +3947,122 @@ function takePairingCode() {
  * session and nothing has to be re-fetched when it arrives. It never throws: a machine
  * that cannot be reached has to render its page and say so, not blank.
  */
+/**
+ * Takes an approval request out of the URL and returns it, or "".
+ *
+ * The same discipline as takePairingCode and for the same reasons: a fragment is not sent
+ * to the server, and it is removed with replaceState before anything can await, because
+ * this page also reads the hash to decide which view to show.
+ */
+const APPROVE_PREFIX = "#approve=";
+
+function takeApprovalRequest() {
+  const hash = window.location.hash || "";
+  if (!hash.startsWith(APPROVE_PREFIX)) return "";
+  const id = decodeURIComponent(hash.slice(APPROVE_PREFIX.length));
+  history.replaceState(null, "", window.location.pathname + window.location.search);
+  return id;
+}
+
+// The request this browser was asked to decide, kept while it authenticates. Held so that
+// somebody whose session has expired can unlock and then approve, instead of walking back
+// to the other machine to have the QR shown again.
+let pendingApproval = "";
+
+function approveSay(html) {
+  const card = document.getElementById("approve-card");
+  const body = document.getElementById("approve-body");
+  if (body) body.innerHTML = html;
+  if (card) card.hidden = false;
+}
+
+/**
+ * Shows what is asking to be let in, and the two buttons.
+ *
+ * Everything on this screen except the verification code is what the other browser *claims*
+ * to be, and it says so: User-Agent has been a work of fiction for thirty years. The number
+ * is the thing that decides, because it is derived from the request rather than reported by
+ * it, and a person can compare it against the screen in front of them.
+ */
+async function showApproval(id) {
+  pendingApproval = id;
+  const held = credential();
+
+  if (!held) {
+    approveSay(`<p class="warn">Administrator access required.</p>
+      <p class="hint">To authorise another browser, unlock this one first. The request is
+        held for five minutes, so you will not have to scan the code again.</p>`);
+    openAdmin(true);
+    return;
+  }
+
+  let described;
+  try {
+    const response = await fetch("/api/browser-pair/inspect", {
+      method: "POST", cache: "no-store",
+      headers: { "Authorization": "Bearer " + held, "Content-Type": "application/json" },
+      body: JSON.stringify({ request_id: id }),
+    });
+    if (response.status === 401 || response.status === 403) {
+      // The session ended between scanning and arriving. Say so plainly and keep the
+      // request: unlocking here is enough, and the code does not have to be scanned again.
+      approveSay(`<p class="warn">This browser is not currently authorised.</p>
+        <p class="hint">Open this appliance in the browser that is signed in, or unlock
+          administrator access here. The request is held for five minutes.</p>`);
+      openAdmin(true);
+      return;
+    }
+    const text = await response.text();
+    if (!response.ok) throw new Error(text.trim() || response.statusText);
+    described = JSON.parse(text);
+  } catch (e) {
+    pendingApproval = "";
+    approveSay(`<p class="warn">That request is no longer waiting.</p>
+      <p class="hint">${esc(String(e))}</p>`);
+    return;
+  }
+
+  approveSay(`
+    <p>A browser is asking to administer this appliance.</p>
+    <p class="hint">It reports itself as — this is what it says, not something MediaLith
+      can check:</p>
+    <p><strong>${esc(described.browser)}</strong></p>
+    <p class="hint">Confirm this number matches the one on that browser's screen:</p>
+    <div class="verify">${esc(described.verification)}</div>
+    <div class="row">
+      <button id="approve-deny" class="ghost">Deny</button>
+      <button id="approve-yes">Authorise</button>
+    </div>`);
+}
+
+/** Says yes or no, and never sends anything of this browser's beyond its own credential. */
+async function decideApproval(approve) {
+  const id = pendingApproval;
+  const held = credential();
+  if (!id || !held) return;
+
+  try {
+    const response = await fetch(
+      approve ? "/api/browser-pair/approve" : "/api/browser-pair/deny", {
+        method: "POST", cache: "no-store",
+        headers: { "Authorization": "Bearer " + held, "Content-Type": "application/json" },
+        body: JSON.stringify({ request_id: id }),
+      });
+    const text = await response.text();
+    if (!response.ok) throw new Error(text.trim() || response.statusText);
+
+    pendingApproval = "";
+    approveSay(approve
+      ? `<p><strong>Browser authorised.</strong></p>
+         <p class="hint">It has been given a session of its own. This browser is unchanged —
+           signing out there will not sign you out here.</p>`
+      : `<p><strong>Request refused.</strong></p>
+         <p class="hint">That browser has been told, and the request is gone.</p>`);
+  } catch (e) {
+    approveSay(`<p class="warn">That did not work.</p><p class="hint">${esc(String(e))}</p>`);
+  }
+}
+
 async function bootstrapPairing() {
   const code = takePairingCode();
   if (!code) return;
@@ -3797,6 +4099,19 @@ async function bootstrapPairing() {
     openAdmin(true);
   }
   updateLock();
+}
+
+/**
+ * Everything this page does with a fragment it was arrived at by, in the order it must.
+ *
+ * The approval request is taken out of the URL **first and synchronously**, before the
+ * pairing bootstrap can await anything, for the reason both of them exist: this page also
+ * reads the hash to choose a view, so a fragment left in place is looked up as a view name.
+ */
+async function bootstrapFromUrl() {
+  const approval = takeApprovalRequest();
+  await bootstrapPairing();
+  if (approval) await showApproval(approval);
 }
 
 // ------------------------------------------------------------------------------------
@@ -6540,6 +6855,14 @@ document.addEventListener("click", event => {
     return;
   }
   if (id === "token-lock") { lockAdmin(); return; }
+
+  // Browser approval (ADR-0019). Both halves are wired here rather than with listeners on
+  // the elements, because every one of these buttons is written by a template and a
+  // listener bound to an element a redraw replaces is a listener that stops working.
+  if (id === "bp-start" || id === "bp-start-again") { bpStart(); return; }
+  if (id === "bp-cancel") { bpCancel(); return; }
+  if (id === "approve-yes") { decideApproval(true); return; }
+  if (id === "approve-deny") { decideApproval(false); return; }
   if (id === "health-toggle") {
     healthOpen = !healthOpen;
     // Redrawn from the reply already in hand rather than by asking again: the status poll is
@@ -6614,6 +6937,10 @@ document.getElementById("restart").addEventListener("click", () => power("restar
     // only complete for one of those keystrokes, and a request refused before then costs
     // nothing and is what the locked state already handles.
     if (!SOLO) plexActivityTick();
+    // Somebody who scanned an approval request while signed out is typing the recovery
+    // code to be able to answer it. Picking it up here means they do not have to walk back
+    // to the other machine and have the code shown again.
+    if (pendingApproval && credential()) showApproval(pendingApproval);
   });
 }
 
@@ -6635,7 +6962,7 @@ updateLock();
 // It is not awaited. The request takes a round trip, and holding the whole page's start-up
 // behind it would mean a browser that cannot reach the appliance renders nothing at all,
 // which is the opposite of what this console is for.
-bootstrapPairing();
+bootstrapFromUrl();
 
 // The keyboard's way out of the panel and the drawer. Escape is what people press, and a
 // popover that only closes by clicking the thing that opened it is one that traps a keyboard.
