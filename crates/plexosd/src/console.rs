@@ -51,29 +51,88 @@ pub const HTTP_PORT: u16 = 80;
 /// Default port: HTTPS, because that is the only thing this console serves (ADR-0014).
 pub const DEFAULT_PORT: u16 = HTTPS_PORT;
 
+/// The daemon's shared state, as one thing the route table can be handed.
+///
+/// This was seven separate parameters until the activity card needed an eighth, at which
+/// point clippy's argument limit said what the signature had been saying for a while: a
+/// route table needs whatever the daemon holds, that set grows with every feature, and
+/// threading it positionally is how two `Arc<Job>`s of different types eventually get
+/// passed the wrong way round. Named fields cost nothing and the compiler checks them.
+///
+/// Every field is an `Arc` because the work behind these routes outlives the request that
+/// started it: an install is minutes, a provision is longer, and the sampler has to keep
+/// the previous reading or no percentage on the dashboard can exist.
+pub struct Services {
+    /// The state of any Plex provisioning run.
+    ///
+    /// Reached from every request because `GET /api/provision` is how the page follows one,
+    /// and a request that started an installation returns long before it finishes.
+    pub provision: std::sync::Arc<crate::provision::Job>,
+    /// The Plex process itself.
+    pub plex: std::sync::Arc<crate::plex::Handle>,
+    /// The state of any OS update.
+    pub update: std::sync::Arc<crate::update::Job>,
+    /// The state of any install-to-disk.
+    pub install: std::sync::Arc<crate::install::Job>,
+    /// The state of any wireless scan or join.
+    pub wifi: std::sync::Arc<crate::wifi::Job>,
+    /// The previous reading of `/proc`, which is what makes a rate possible.
+    pub metrics: std::sync::Arc<crate::metrics::Sampler>,
+}
+
+impl Services {
+    /// A daemon that has done nothing yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            provision: std::sync::Arc::new(crate::provision::Job::new()),
+            plex: std::sync::Arc::new(crate::plex::Handle::new()),
+            update: std::sync::Arc::new(crate::update::Job::new()),
+            install: std::sync::Arc::new(crate::install::Job::new()),
+            wifi: std::sync::Arc::new(crate::wifi::Job::new()),
+            metrics: std::sync::Arc::new(crate::metrics::Sampler::new()),
+        }
+    }
+}
+
+impl Default for Services {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Answers one request, against the machine described by `env`.
 ///
 /// Separated from the socket so the whole route table can be tested against a recorded
 /// machine, which is the same boundary every other module here draws.
 ///
-/// `job` carries the state of any provisioning run. It is reached from every request
-/// because `GET /api/provision` is how the page follows one, and a request that started
-/// an installation returns before that installation is anywhere near finished.
-///
 /// This function does **not** check the device token. [`http::route`] does, before this
 /// is called, for every method that is not a read — so a route added here is
 /// authenticated by construction rather than by its author remembering to be.
 #[must_use]
-pub fn respond(
-    request: &Request,
-    env: &impl Environment,
-    job: &std::sync::Arc<crate::provision::Job>,
-    plex: &std::sync::Arc<crate::plex::Handle>,
-    update: &std::sync::Arc<crate::update::Job>,
-    install: &std::sync::Arc<crate::install::Job>,
-    wifi: &std::sync::Arc<crate::wifi::Job>,
-) -> Response {
+#[expect(
+    clippy::too_many_lines,
+    reason = "this is a dispatch table, and its length is the number of routes rather than \
+              complexity. Splitting it to satisfy a line count would scatter the one thing \
+              whose value is being in a single place -- every route the console answers, \
+              readable in order, next to the comment saying why each is a GET or a POST. \
+              `expect` rather than `allow` so that a future version short enough not to \
+              need this is told to drop it."
+)]
+pub fn respond(request: &Request, env: &impl Environment, services: &Services) -> Response {
+    let Services {
+        provision: job,
+        plex,
+        update,
+        install,
+        wifi,
+        metrics,
+    } = services;
+
     match (request.method.as_str(), request.path.as_str()) {
+        ("GET" | "HEAD", "/api/metrics") | ("POST", "/api/metrics/processes") => {
+            metrics_route(request, env, metrics)
+        }
         // Starting an installation. Returns as soon as the work is handed to a thread:
         // the download alone is minutes, and a request held open for it would time out
         // in the browser with the install still running and no way to say so.
@@ -511,6 +570,40 @@ fn terminal_route(body: &[u8]) -> Response {
     }
 }
 
+/// What the machine is doing now, and — behind a `POST` — what is running on it.
+///
+/// The sampler comes from the daemon rather than being built here because a rate is the
+/// difference between two readings: one created per request would have nothing to compare
+/// against and would report `null` forever, which looks like an empty dashboard rather than
+/// like a mistake.
+///
+/// The split between the two is not cosmetic. Every `GET` on this console answers without a
+/// credential, deliberately, because somebody diagnosing a machine that will not boot should
+/// not have to find a token first — and a list of every process with its command line is not
+/// that kind of reading. It is closer to what the terminal exposes, and the terminal is all
+/// `POST` for exactly this reason (ADR-0013, ADR-0014). The gate in [`http::route`] is
+/// method-based, so being a `POST` *is* the protection; nothing in this function checks
+/// anything.
+fn metrics_route(
+    request: &Request,
+    env: &impl Environment,
+    metrics: &crate::metrics::Sampler,
+) -> Response {
+    let (what, body) = if request.method == "POST" {
+        (
+            "the processes",
+            serde_json::to_string(&metrics.processes(env)),
+        )
+    } else {
+        ("the metrics", serde_json::to_string(&metrics.sample(env)))
+    };
+
+    match body {
+        Ok(json) => Response::json(json),
+        Err(error) => Response::text(500, format!("could not serialise {what}: {error}\n")),
+    }
+}
+
 /// Serialises a value, turning a failure into the same `String` error the routes use.
 fn json<T: serde::Serialize>(value: &T) -> Result<String, String> {
     serde_json::to_string(value).map_err(|e| format!("could not serialise the reply: {e}"))
@@ -760,25 +853,24 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
         }
     });
 
-    let served_job = std::sync::Arc::clone(&job);
     let uploading_job = std::sync::Arc::clone(&job);
     let uploading_plex = std::sync::Arc::clone(&plex);
-    let installer = std::sync::Arc::new(crate::install::Job::new());
+    // One set for the whole daemon. The sampler in here is the reason it cannot be built
+    // per request: the previous reading of `/proc` is what every percentage on the activity
+    // card is a difference from.
+    let services = Services {
+        provision: std::sync::Arc::clone(&job),
+        plex,
+        update,
+        install: std::sync::Arc::new(crate::install::Job::new()),
+        wifi: served_wifi,
+        metrics: std::sync::Arc::new(crate::metrics::Sampler::new()),
+    };
     http::serve_tls(
         &listener,
         &tls,
         credential,
-        move |request| {
-            respond(
-                request,
-                &System,
-                &served_job,
-                &plex,
-                &update,
-                &installer,
-                &served_wifi,
-            )
-        },
+        move |request| respond(request, &System, &services),
         move |request, reader| upload_route(request, reader, &uploading_job, &uploading_plex),
         log,
     )
@@ -1270,15 +1362,7 @@ mod tests {
 
     /// `respond` against a console that has never provisioned anything.
     fn respond_test(request: &Request, env: &impl Environment) -> Response {
-        respond(
-            request,
-            env,
-            &std::sync::Arc::new(crate::provision::Job::new()),
-            &std::sync::Arc::new(crate::plex::Handle::new()),
-            &std::sync::Arc::new(crate::update::Job::new()),
-            &std::sync::Arc::new(crate::install::Job::new()),
-            &std::sync::Arc::new(crate::wifi::Job::new()),
-        )
+        respond(request, env, &Services::new())
     }
 
     fn get(path: &str) -> Request {
@@ -1391,15 +1475,7 @@ mod tests {
                 headers: Vec::new(),
                 body: body.to_vec(),
             };
-            let response = respond(
-                &request,
-                &Fixture::new(),
-                &std::sync::Arc::new(crate::provision::Job::new()),
-                &std::sync::Arc::new(crate::plex::Handle::new()),
-                &std::sync::Arc::new(crate::update::Job::new()),
-                &std::sync::Arc::new(crate::install::Job::new()),
-                &std::sync::Arc::new(crate::wifi::Job::new()),
-            );
+            let response = respond(&request, &Fixture::new(), &Services::new());
             assert_eq!(response.status, 400, "{body:?}");
         }
     }
@@ -1762,6 +1838,69 @@ mod tests {
     }
 
     #[test]
+    fn every_class_the_script_draws_with_is_a_class_the_stylesheet_defines() {
+        // The third member of the family above, and it was written because the first two
+        // could not see the defect that produced it. Renaming the activity card's helper
+        // functions with a word-boundary search-and-replace also renamed the class names
+        // sitting in their template literals -- `class="meter"` became `class="metricMeter"`
+        // and so on -- and the result was a card that rendered every element, addressed
+        // every id, parsed cleanly, and drew as unstyled text. `getElementById` was
+        // satisfied, `node --check` was satisfied, and nothing here was looking at the one
+        // channel that had broken.
+        //
+        // A class in the script with no rule for it is not always an error: some exist to be
+        // found rather than to be painted. So the rule is "styled, or selected on" rather
+        // than "styled", which is a property of the page instead of a list of exceptions
+        // that goes stale -- and the first run proved the difference by flagging
+        // `media-pick` and `share-drop`, both perfectly legitimate `querySelectorAll` hooks.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+        let style = PAGE
+            .split_once("<style>")
+            .and_then(|(_, rest)| rest.split_once("</style>"))
+            .map(|(body, _)| body)
+            .expect("the page has one style block");
+
+        // `hidden` is the HTML attribute rather than a rule of this sheet's own.
+        let behavioural = ["hidden"];
+
+        let mut unstyled = Vec::new();
+        for (index, _) in script.match_indices("class=\"") {
+            let rest = &script[index + "class=\"".len()..];
+            let Some((value, _)) = rest.split_once('"') else {
+                continue;
+            };
+            // A class list is interpolated as often as it is literal, so only the part
+            // before the first `${` is a name this can ask about. `class="step ${state}"`
+            // yields `step`; the interpolated half is a value, not a name.
+            let literal = value.split("${").next().unwrap_or_default();
+            for name in literal.split_whitespace() {
+                if behavioural.contains(&name) {
+                    continue;
+                }
+                let styled = style.contains(&format!(".{name}"));
+                // A selector hook: `querySelectorAll(".media-pick")` and friends, where the
+                // class is how the script finds the element again rather than how it looks.
+                let selected_on = script.contains(&format!(".{name}\""));
+                if !styled && !selected_on {
+                    unstyled.push(name);
+                }
+            }
+        }
+        unstyled.sort_unstable();
+        unstyled.dedup();
+        assert!(
+            unstyled.is_empty(),
+            "the script draws elements with classes the stylesheet never defines, so they \
+             render as unstyled text on a page where everything else looks right: \
+             {unstyled:?}"
+        );
+    }
+
+    #[test]
     fn a_running_plex_is_still_offered_a_way_to_install_a_newer_one() {
         // The defect this guards: the `report.running` branch of renderPlexInto rendered a
         // heading, a sentence and a link, then returned. Every control disappeared the
@@ -2023,6 +2162,115 @@ mod tests {
         assert_eq!(
             rendered, expected,
             "the terminal does not render what the shell printed"
+        );
+    }
+
+    #[test]
+    fn the_sparkline_spans_the_tile_whatever_it_has_to_draw() {
+        // Same shape as the terminal cleaner above, and for the same reason: the page was
+        // fine and the *drawing* was wrong. `metricSpark` shipped three times before it was
+        // right, and the first two were only found by rendering a picture and looking at it.
+        //
+        //   1. x scaled by the ring's capacity, so four samples drew a line five per cent of
+        //      the tile wide, tucked in the left corner.
+        //   2. "fixed" by anchoring at the right, which moved the same stub to the other
+        //      corner.
+        //   3. spread over the points there are, which is what this asserts.
+        //
+        // No assertion about the page's text could see any of it, and neither could
+        // `node --check`: every version was valid JavaScript that produced valid SVG.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+
+        let start = script
+            .find("const SPARK_POINTS")
+            .expect("the ring size is declared before the functions that use it");
+        let end = script
+            .find("function metricTile(")
+            .expect("and the drawing functions end where the tile begins");
+        let slice = &script[start..end];
+
+        let Some(engine) = ["node", "deno", "qjs"].into_iter().find(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        }) else {
+            println!(
+                "skip: the sparkline was not drawn -- no node, deno or qjs on this host. \
+                 Install one, or a sparkline that draws a stub in the corner will only be \
+                 found by looking at a rendered page."
+            );
+            return;
+        };
+
+        let driver = format!(
+            "{slice}\n\
+             const out = {{}};\n\
+             for (const n of [1, 2, 3, 8, 200]) {{\n\
+             \x20 const ring = [];\n\
+             \x20 for (let i = 0; i < n; i++) pushSample(ring, 10 + (i % 7) * 12);\n\
+             \x20 out[n] = {{ svg: metricSpark(ring, 100), kept: ring.length }};\n\
+             }}\n\
+             process.stdout.write(JSON.stringify(out));\n"
+        );
+
+        // Named for this test, because Rust runs tests as threads in one process and a fixed
+        // path is one test deleting what another is reading.
+        let file = std::env::temp_dir().join("plexos-sparkline-draw-test.js");
+        std::fs::write(&file, driver).expect("scratch is writable");
+        let run = std::process::Command::new(engine)
+            .arg(&file)
+            .output()
+            .expect("the engine runs");
+        let _ = std::fs::remove_file(&file);
+        assert!(
+            run.status.success(),
+            "the sparkline did not draw:\n{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+
+        let drawn: serde_json::Value =
+            serde_json::from_slice(&run.stdout).expect("the driver prints JSON");
+
+        for few in ["1", "2"] {
+            assert_eq!(
+                drawn[few]["svg"].as_str(),
+                Some(""),
+                "a line needs three points to be a line rather than a dash that reads as a \
+                 rendering fault"
+            );
+        }
+
+        for many in ["3", "8", "200"] {
+            let svg = drawn[many]["svg"].as_str().expect("an SVG");
+            assert!(
+                svg.contains("points=\"0.00,"),
+                "{many} points must start at the left edge: {svg}"
+            );
+            assert!(
+                svg.contains(" 100.00,"),
+                "and reach the right one, so the trend fills the tile instead of drawing a \
+                 stub in a corner: {svg}"
+            );
+            assert!(
+                svg.contains("class=\"now\""),
+                "the newest segment is marked, and by a stroke rather than a shape: a circle \
+                 here is squashed by the non-uniform scale and clipped at the edge: {svg}"
+            );
+            assert!(
+                !svg.contains("<circle"),
+                "and specifically not by a circle, which was tried and looked at: {svg}"
+            );
+        }
+
+        assert_eq!(
+            drawn["200"]["kept"].as_u64(),
+            Some(60),
+            "the ring is bounded, or a tab left open all day grows one point per two seconds"
         );
     }
 
@@ -2298,14 +2546,122 @@ mod tests {
             let response = respond(
                 &request,
                 &Fixture::new(),
-                &job,
-                &std::sync::Arc::new(crate::plex::Handle::new()),
-                &std::sync::Arc::new(crate::update::Job::new()),
-                &std::sync::Arc::new(crate::install::Job::new()),
-                &std::sync::Arc::new(crate::wifi::Job::new()),
+                &Services {
+                    provision: std::sync::Arc::clone(&job),
+                    ..Services::new()
+                },
             );
             assert_ne!(response.status, 404, "{method} {path}");
         }
+    }
+
+    #[test]
+    fn the_activity_card_polls_a_route_that_exists() {
+        assert!(
+            PAGE.contains("\"/api/metrics\""),
+            "the page must fetch the route respond() serves"
+        );
+
+        let response = respond_test(&get("/api/metrics"), &Fixture::new());
+        assert_eq!(response.status, 200);
+        let body = String::from_utf8(response.body).expect("utf-8");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+
+        // The fields the page reads by name. A rename here is a card full of "—" on a
+        // machine whose route answers perfectly, which is the failure mode that has cost
+        // this project the most time to spot.
+        for field in [
+            "cpu",
+            "memory",
+            "plex",
+            "storage",
+            "network",
+            "disks",
+            "temperatures",
+            "notes",
+            "window_ms",
+            "uptime_seconds",
+            "load",
+        ] {
+            assert!(
+                parsed.get(field).is_some(),
+                "the page reads `{field}` off this reply: {body}"
+            );
+        }
+        assert!(
+            parsed["cpu"].get("busy_percent").is_some(),
+            "including the nested ones"
+        );
+    }
+
+    #[test]
+    fn the_process_list_cannot_be_read_without_a_credential() {
+        // The whole reason this is a second route. A GET on this console needs nothing, by
+        // design -- somebody diagnosing a machine that will not boot should not have to find
+        // a token first. A list of what is running with its command lines is not that: it is
+        // closer to what the terminal exposes, and the terminal is all POST for exactly this
+        // reason. The gate in http::route is method-based, so being a POST *is* the
+        // protection, and a GET arriving here must find nothing.
+        assert_eq!(
+            respond_test(&get("/api/metrics/processes"), &Fixture::new()).status,
+            404,
+            "a GET must not answer with the process list, or the token gate is bypassed by \
+             asking politely"
+        );
+
+        let post = Request {
+            method: "POST".to_owned(),
+            path: "/api/metrics/processes".to_owned(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        assert_eq!(
+            respond_test(&post, &Fixture::new()).status,
+            200,
+            "and the POST is the route that does exist"
+        );
+    }
+
+    #[test]
+    fn the_page_asks_for_the_process_list_with_the_token() {
+        // The companion to the test above, from the page's side: a POST route reached
+        // without the header is a 403 and a section that silently does nothing.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("one script block");
+        let request = script
+            .split_once("PROCESSES_ENDPOINT, {")
+            .map(|(_, rest)| rest)
+            .expect("the page posts to the processes route");
+        let call = &request[..request.find("})").unwrap_or(request.len())];
+
+        assert!(call.contains("method: \"POST\""), "as a POST: {call}");
+        assert!(
+            call.contains("Authorization"),
+            "and carrying the device token: {call}"
+        );
+    }
+
+    #[test]
+    fn the_activity_card_does_not_poll_while_it_is_shut() {
+        // A card nobody is looking at is a request nobody needs, twice a second, on a
+        // machine whose job is to transcode video.
+        let script = PAGE
+            .split_once("async function metricsTick()")
+            .map(|(_, rest)| rest)
+            .expect("the activity card has a poll");
+        let body = &script[..script.find("\n}").unwrap_or(script.len())];
+
+        assert!(
+            body.contains("folded.has(\"metrics\")"),
+            "it checks whether the card is shut: {body}"
+        );
+        assert!(
+            body.contains("document.hidden"),
+            "and whether the tab is in the background: {body}"
+        );
     }
 
     #[test]
@@ -2452,11 +2808,10 @@ mod tests {
         let response = respond(
             &request,
             &Fixture::new(),
-            &job,
-            &std::sync::Arc::new(crate::plex::Handle::new()),
-            &std::sync::Arc::new(crate::update::Job::new()),
-            &std::sync::Arc::new(crate::install::Job::new()),
-            &std::sync::Arc::new(crate::wifi::Job::new()),
+            &Services {
+                provision: std::sync::Arc::clone(&job),
+                ..Services::new()
+            },
         );
         assert_eq!(response.status, 409);
         assert!(

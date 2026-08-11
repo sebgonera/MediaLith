@@ -41,11 +41,20 @@ Not about PlexOS. About mistakes made *while building* it, every one of which ha
 more than once, and none of which the "Known traps" list could have prevented because that
 list is about the system. Check against this before committing; it is short on purpose.
 
-1. **After a scripted edit, prove the edit landed.** Every `str.replace` that silently
-   matched nothing has cost something: the first-boot section shipped with its markup never
-   inserted, because the anchor `<main class="grid" id="cards">` did not exist and nothing
-   said so. `grep` for the new text, or diff, before moving on. A replacement that matched
-   nothing is not an error in any tool that will tell you.
+1. **After a scripted edit, prove the edit landed — and prove it landed nowhere else.**
+   Every `str.replace` that silently matched nothing has cost something: the first-boot
+   section shipped with its markup never inserted, because the anchor
+   `<main class="grid" id="cards">` did not exist and nothing said so. `grep` for the new
+   text, or diff, before moving on. A replacement that matched nothing is not an error in any
+   tool that will tell you.
+   The other half cost an evening too, and is worse because it *looks* like it worked. A
+   word-boundary rename over the activity card's helpers — `tile` → `metricTile` and six
+   others — also rewrote `ring.push(value)` into `ring.pushSample(value)`, five CSS class
+   names inside template literals, and five doc comments. Every one was a silent break: the
+   page still parsed, still addressed every id, and would have rendered as unstyled text.
+   **A rename is over identifiers, so a rename that also hits strings, class attributes and
+   prose was applied with the wrong tool.** Diff the whole hunk and read it, or bound the
+   replacement to declarations and call sites.
 2. **A change to `ui/console.html` is not done until the *served* page has been checked.**
    Twice in one day a page change reached the appliance broken — a duplicate `const`, which
    is a parse error that blanks every section, and a section whose markup was missing, whose
@@ -75,9 +84,9 @@ list is about the system. Check against this before committing; it is short on p
 | `crates/plexos-types` | Done. Formats and the layout emitter and the GPT writer, 65 tests. The ADR-0006 manifest schema was reconciled with the artefacts PlexOS actually builds — one UKI per slot, and a `release` string `OsVersion` cannot express — which was the last moment that was an edit rather than a migration. |
 | `crates/plexos-update` | Which slot an update goes to, writing a partition and reading it back, the ADR-0006 trust chain, the anti-rollback sequence, root-signed revocation, boot-entry/slot agreement, and `plexos-sign` as the publisher's half. 65 tests. **Has updated the reference laptop four times, alternating slots — and one of those updates was deliberately unbootable and was rolled back.** All four were unsigned, through an improvised `update.json` this crate no longer parses. **Nothing signed has yet reached a machine.** |
 | `crates/plexos-gpu` | 46 tests, and it has now answered the question it was written for — on four machines, three of which it was wrong about until they were tried. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
-| `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, `reboot(2)`, `sethostname(2)`, PTY allocation for the console terminal, reaping children for PID 1, and resolving partitions on a *named disk* rather than by label alone. 89 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
+| `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, `reboot(2)`, `sethostname(2)`, PTY allocation for the console terminal, reaping children for PID 1, resolving partitions on a *named disk* rather than by label alone, and `statvfs(3)` — free space is the one thing this appliance reports about itself that is not readable as a file. 100 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
 | `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role mounts the Plex app image, then keeps the console and a shell running: it reaps orphans, restarts what dies with a widening delay, and never exits. It also asks the boot loader which disk the firmware started, so a two-disk machine mounts the right `/usr` and `/var`. 63 tests. **PID 1 stays alive on the appliance and has restarted both of its services after they were killed.** |
-| `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates, the configuration model actually applied (ADR-0008), and the terminal session (ADR-0014), the updater on the signed manifest, a supervisor that restarts Plex and swaps a newly-installed version in without a reboot, the console's own TLS identity (ADR-0014), the installer and the first-boot flow (ADR-0016). 301 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
+| `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates, the configuration model actually applied (ADR-0008), and the terminal session (ADR-0014), the updater on the signed manifest, a supervisor that restarts Plex and swaps a newly-installed version in without a reboot, the console's own TLS identity (ADR-0014), the installer and the first-boot flow (ADR-0016), and the activity card — what the machine is doing *now*, which is the only view here about a moment rather than a state. 407 tests, of which two fail on any development host running Plex; see the trap list. **The activity card has never run on the appliance**: its numbers were produced by replaying the appliance's own captured `/proc` and `/sys` through the real code, which is one step short of the machine. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
 | `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 104 tests. Provisioning now runs end to end **on the appliance**, driven from a browser: download, signature, manifest, build, publish, mount, confine, start. |
 | `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. |
 | `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 47 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree. |
@@ -157,9 +166,13 @@ list that goes stale in one of them.
    handed to a person who did not build it, with a revision note recording what has closed
    since it was written. Nothing in it is architectural. The items with no owner: a
    development root key with no ceremony and no way to revoke *itself*, no update channel
-   or discovery, no clock synchronisation of any kind, nothing ever writing `/var/log`, no
-   free-space check anywhere on a `/var` whose largest writer is never pruned, and no
-   ceiling on connections.
+   or discovery, no clock synchronisation of any kind, nothing ever writing `/var/log`,
+   nothing pruning `/var`'s largest writer, and no ceiling on connections.
+   Free space is half closed: `plexos_sys::fs::space` reads it and the activity card shows it
+   against a severity threshold, so a filling `/var` is now visible. **Nothing refuses on
+   it** — the update and provisioning paths still stage an ~85 MB download without asking
+   whether it fits, which is the half that turns a full partition into a failure rather than
+   a warning.
 
 3. **Run the hardware that has never been run.** `xe` has its firmware in the initrd, the
    `xe` debugfs layout is now read the way `xe` actually creates it, and no Arc card has
@@ -356,6 +369,8 @@ shell's output cannot be read without one.
 | Route | What it is |
 | --- | --- |
 | `/api/status` | Image identity, slot, root hash, whole kernel command line, health checks, TLS fingerprint |
+| `/api/metrics` | What the machine is doing now: processor per core, memory, Plex's own cgroup, GPU clock, temperatures, free space, throughput. Rates, not since-boot totals |
+| `/api/metrics/processes` | What is running. **A `POST`**, so the method-based gate applies: a process list with command lines is not something every reader on the LAN should have |
 | `/api/setup` | The first-boot flow: ordered steps, computed not stored (ADR-0016) |
 | `/api/install` | Disks, refusals, and installing PlexOS onto one (ADR-0016) |
 | `/api/update` | Check and install a signed update; gate verdict; rollback record (ADR-0005/0006) |
@@ -936,6 +951,46 @@ and its certificate — sign with the second one.
   experiment that skipped it would be testing the signature check -- which has its own
   tests -- and would prove nothing about ADR-0005, while looking like a rollback that
   worked.
+- **A class name in the page's script is a channel nothing was watching.** Three tests guard
+  the console page — its script parses, every id it addresses exists, no id names two things
+  — and a rename that mangled `class="meter"` into `class="metricMeter"` passed all three.
+  The page would have rendered every element, addressed every id, parsed cleanly, and drawn
+  as unstyled text. `every_class_the_script_draws_with_is_a_class_the_stylesheet_defines` asks
+  the fourth question, and its rule is "styled, **or** selected on" rather than "styled",
+  because some classes exist to be found rather than painted — it flagged `media-pick` and
+  `share-drop` on its first run, both legitimate `querySelectorAll` hooks. A list of
+  exceptions would have gone stale; a property of the page does not.
+- **`preserveAspectRatio="none"` scales shapes, and `vector-effect` only exempts the
+  stroke.** A sparkline stretched to a tile's width has an x scale about twice its y scale, so
+  the `r="3"` end marker came out a six-pixel-wide, three-pixel-tall smear — and at `cx="100"`
+  half of it fell outside the viewBox and was clipped by the tile edge. Marking the current
+  value with the last *segment* in the accent is immune, because a stroke is all it is. Found
+  by rendering the card and looking at it; both the function's output and `node --check` were
+  perfectly happy.
+- **A sparkline's x axis must span the points there are, not the ring's capacity.** Divided by
+  a sixty-sample ring, four samples drew a line five per cent of the tile wide tucked in a
+  corner — which reads as a rendering fault rather than as "not much history yet". It shipped
+  twice: once anchored left, then "fixed" by anchoring right, which moved the same stub to the
+  other corner. `the_sparkline_spans_the_tile_whatever_it_has_to_draw` runs the page's own
+  function under `node`, the way the terminal cleaner's test does, and both versions fail it.
+- **A thermal zone's `type` is not unique.** A development host answered with two zones both
+  typed `acpitz`, at 27.8 °C and 29.8 °C, so a table keyed on the type showed one label twice
+  and no way to attribute either reading. The `thermal_zoneN` directory is what separates
+  them. Same question as the duplicated `id` on the console page: not whether a name resolves,
+  but whether it resolves to *one* thing.
+- **`coretemp` is the hwmon driver; `x86_pkg_temp` is the thermal zone.** Anything reading
+  `/sys/class/thermal` and reporting "no processor temperature, enable
+  `CONFIG_SENSORS_CORETEMP`" has named the wrong symbol —
+  `CONFIG_X86_PKG_TEMP_THERMAL` is what publishes the zone, and it has to be `=y` here
+  because `CONFIG_MODULES` is off. Both spellings were checked against a real
+  `/boot/config-*` rather than recalled.
+- **Two tests in the suite fail on any development host running Plex.**
+  `plex::tests::a_handle_that_has_started_nothing_reports_nothing_running` and
+  `an_unprovisioned_machine_is_told_where_plex_would_be_rather_than_failing` both go through
+  `Handle::is_running`, which probes `127.0.0.1:32400` — correctly, since ADR-0005's gate has
+  to ask the port rather than only its own child. On a machine that has its own Plex the probe
+  succeeds, so a clean `cargo test --workspace` is impossible there and CI's green run says
+  nothing about it. Not a defect in the code under test; a suite that is not hermetic.
 - **Break the image, not the manifest, when testing rollback.** Overwriting a data block
   and recomputing only the manifest digest leaves the hash tree and root hash intact, so
   the updater accepts the bundle — correctly, because every check it makes asks whether the

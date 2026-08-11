@@ -57,6 +57,53 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    def canned_for(self, path):
+        """The canned reply for a route, if one was recorded."""
+        if not CANNED or not path.startswith("/api/"):
+            return None
+        import os.path
+        name = path.strip("/").replace("/", "-") + ".json"
+        candidate = os.path.join(CANNED, name)
+        return candidate if os.path.exists(candidate) else None
+
+    def do_POST(self):
+        """Answers the POST routes from the canned directory only.
+
+        Added when the activity card arrived, whose one control is a POST: the process list
+        is not a GET on purpose, because every GET on this console answers without a
+        credential and a list of what is running with its command lines should not. Without
+        this the preview could render the button and never show what pressing it does, which
+        is the same hole this whole tool exists to close.
+
+        Deliberately *not* proxied upstream. A POST on this console changes the machine --
+        it installs Plex, erases disks, restarts -- and a preview that forwarded one would
+        do it to a real appliance because somebody was looking at a page.
+        """
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
+
+        canned = self.canned_for(self.path)
+        if not canned:
+            body = (
+                f"the preview answers POST {self.path} only from a canned file; it does not "
+                "forward a POST to the appliance, because a POST here changes the machine\n"
+            ).encode()
+            self.send_response(501)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        with open(canned, "rb") as handle:
+            body = handle.read()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         if self.path == DELAY_PATH:
             time.sleep(SETTLE_SECONDS)
