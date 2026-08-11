@@ -47,6 +47,7 @@
 pub mod clock;
 pub mod device;
 pub mod dm;
+pub mod fs;
 pub mod hostname;
 pub mod landlock;
 pub mod module;

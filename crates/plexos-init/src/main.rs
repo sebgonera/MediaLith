@@ -21,7 +21,7 @@ use std::process::ExitCode;
 use plexos_init::cmdline::BootArgs;
 use plexos_init::execute::Log as _;
 use plexos_init::supervise::{self, Service};
-use plexos_init::{execute, plan, state};
+use plexos_init::{execute, plan, screen, state};
 use plexos_types::paths;
 use plexos_types::version::STATE_LAYOUT_VERSION;
 
@@ -197,6 +197,12 @@ fn supervise_system() -> ExitCode {
     // Its failure is not this function's business. A machine with no cable still
     // boots, and still has a console on the screen saying so.
     log.line("supervising: the status console, then a shell on this screen");
+
+    // And then let that screen go dark. Last, because everything above may have had
+    // something to say on it and the timer is reset by output anyway; and here rather than
+    // inside the supervisor because it is one write that persists for the life of the
+    // terminal, not something to keep doing. Never fatal — see `screen::arrange`.
+    screen::arrange(&mut |line| log.line(line));
 
     // Never returns. PID 1 exiting is a kernel panic, so the only two acceptable ends for
     // this function are looping forever and `fail`.

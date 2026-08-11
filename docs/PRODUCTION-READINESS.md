@@ -68,6 +68,28 @@ about what it measures, not about where it is red; and every part of §3.1 throu
 One number in §6 is stale in the direction that matters least: 331 passing tests have
 become 835.
 
+## Revision — 2026-08-11
+
+**§3.1, the "nothing checks free space" half — read, not enforced.** `plexos_sys::fs::space`
+wraps `statvfs(3)`, and the console's activity card reports `/var` and `/` against a severity
+threshold, so a partition at 92% is now visible from a browser instead of from a shell. The
+rest of §3.1 stands and the sharper half of it is untouched: **nothing refuses on the
+number.** There is still no check before staging an ~85 MB download and no `ENOSPC`-specific
+remedy in the update or provisioning paths, so a full `/var` remains a failure rather than a
+warning. Seeing a full disk and being unable to fill one are different problems, and only the
+first is done. Nothing in §3.1 about `/var/cache/plex-transcode` never being pruned has
+changed.
+
+**§2.2's neighbourhood gained a second instance, worth recording where the first one is.**
+Two tests in `plexosd` now fail on any development host that runs its own Plex —
+`plex::tests::a_handle_that_has_started_nothing_reports_nothing_running` and
+`an_unprovisioned_machine_is_told_where_plex_would_be_rather_than_failing`, both through
+`Handle::is_running`, which probes `127.0.0.1:32400`. The probe is right; ADR-0005's gate has
+to ask the port rather than only its own child. The suite is what is wrong: it is not
+hermetic, so a clean `cargo test --workspace` is impossible on such a host and CI being green
+says nothing about it. Same shape as the terminal test already in §2.2 — a test that
+describes the machine it was written on.
+
 ---
 
 ## 1. Release blockers

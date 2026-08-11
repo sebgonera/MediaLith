@@ -111,16 +111,34 @@
      a specificity conflict is visible at all. */
   #terminal.folded > :not(.bar) { display: none; }
 
+  /* Sticky, because this page is long — the activity card, the terminal and the installer
+     each take a screen — and the two things worth having always to hand are what the machine
+     is and how to stop it. `z-index` is above the cards but below nothing else on the page;
+     the background must be opaque or content scrolls through it. */
   header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
     display: flex;
     flex-wrap: wrap;
-    align-items: baseline;
-    gap: .75rem;
-    padding: 1.75rem 0 1.25rem;
+    align-items: center;
+    gap: .5rem .75rem;
+    padding: .8rem 0 .7rem;
+    background: var(--bg);
     border-bottom: 1px solid var(--line);
   }
-  header h1 { margin: 0; font-size: 1.4rem; letter-spacing: -.01em; }
-  header .version { color: var(--muted); font-size: .9rem; }
+  header h1 { margin: 0; font-size: 1.25rem; letter-spacing: -.01em; }
+  header .version { color: var(--muted); font-size: .85rem; }
+  /* The right-hand group: pushed over, and kept together when the header wraps on a narrow
+     screen so the controls never end up split across two lines. */
+  header .aside {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: .5rem;
+  }
+  header .aside button { padding: .4rem .7rem; font-size: .85rem; }
 
   .badge {
     font-size: .75rem;
@@ -276,17 +294,8 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: .9rem;
   }
-  .plex button {
-    padding: .55rem 1.1rem;
-    border: 1px solid var(--accent);
-    border-radius: 8px;
-    background: var(--accent);
-    color: #fff;
-    font: inherit;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .plex button[disabled] { opacity: .55; cursor: default; }
+  /* Buttons are styled once, further down, on the element itself. See the comment on that
+     rule for what naming a container cost, twice. */
   .plex .hint { color: var(--muted); font-size: .9rem; margin: .4rem 0 0; }
   .plex .visit {
     display: inline-block;
@@ -352,23 +361,6 @@
     outline: 2px solid var(--accent);
     outline-offset: -1px;
     border-color: var(--accent);
-  }
-  .form button {
-    padding: .55rem 1.1rem;
-    border: 1px solid var(--accent);
-    border-radius: 8px;
-    background: var(--accent);
-    color: #fff;
-    font: inherit;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .form button[disabled] { opacity: .55; cursor: default; }
-  .form button.ghost {
-    background: transparent;
-    color: var(--ink);
-    border-color: var(--line);
-    font-weight: 500;
   }
 
   /* ------------------------------------------------------------------
@@ -454,6 +446,222 @@
   #terminal .state.live { color: var(--ready); }
   #terminal .state.gone { color: var(--unavailable); }
 
+  /* ---- The activity card -------------------------------------------------------------
+     Every figure here is a magnitude or a state, so nothing in this block invents a
+     categorical palette: the fills are the page's own reserved status colours, used for
+     actual status, and the tracks are their existing lighter steps. That is deliberate.
+     A dashboard that gave CPU its own hue and memory another would be spending the one
+     channel this page keeps for "is something wrong" on telling apart two things whose
+     labels already do.
+
+     There is also no second hero number. The health verdict at the top of the page is
+     this console's one large figure, and a 48px CPU percentage beside it would compete
+     with the sentence a person actually opened the page to read. */
+  #metrics .bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .6rem;
+    align-items: center;
+  }
+  #metrics .bar .state {
+    margin-left: auto;
+    font-size: .82rem;
+    color: var(--muted);
+  }
+
+  /* Stale rather than blank while a poll is in flight or has just failed. A dashboard
+     that empties itself between samples reads as a machine that has stopped, which is
+     the one thing it must never say by accident. */
+  #metrics.stale .tiles,
+  #metrics.stale .panel { opacity: .55; transition: opacity .2s ease; }
+
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+    gap: .65rem;
+    margin: .3rem 0 0;
+  }
+
+  .tile {
+    padding: .65rem .75rem .7rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--raised);
+    box-shadow: var(--shadow-sm);
+    min-width: 0;
+  }
+  .tile .k {
+    font-size: .76rem;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Proportional figures on purpose: tabular-nums gives every digit the width of a zero,
+     which makes a value like 121 look loose at this size. The tables further down are
+     where digits have to line up, and that is where tabular-nums is set. */
+  .tile .v {
+    font-size: 1.45rem;
+    font-weight: 600;
+    line-height: 1.15;
+    margin-top: .1rem;
+  }
+  .tile .v .u {
+    font-size: .8rem;
+    font-weight: 500;
+    color: var(--muted);
+    margin-left: .12rem;
+  }
+  /* Wraps rather than truncates. The first rendered version had `nowrap` with an ellipsis
+     and cut "8 cores · 5.8% waiting on disk" to "…waiting on…", which is a subtitle that has
+     thrown away the word carrying the meaning. A tile growing a line is cheaper than that,
+     and the grid equalises the row anyway. */
+  .tile .sub {
+    font-size: .74rem;
+    line-height: 1.35;
+    color: var(--muted);
+  }
+
+  /* For a value that is words rather than a figure -- the uptime -- which at the tile's
+     display size wrapped mid-phrase. */
+  .tile .v.words { font-size: 1.1rem; }
+
+  /* A meter, not a bar chart: one ratio against a limit. The fill carries severity and
+     the track is a lighter step of the same colour, so the state reads across the whole
+     width rather than only where the fill reaches. Square at the baseline and rounded at
+     the data end -- the end that moves is the one that gets the radius. */
+  .meter {
+    height: 8px;
+    margin-top: .4rem;
+    border-radius: 4px;
+    background: var(--accent-soft);
+    overflow: hidden;
+  }
+  .meter > i {
+    display: block;
+    height: 100%;
+    border-radius: 0 4px 4px 0;
+    background: var(--accent);
+    transition: width .3s ease;
+  }
+  .meter.warn-level { background: var(--degraded-soft); }
+  .meter.warn-level > i { background: var(--degraded); }
+  .meter.bad-level { background: var(--unavailable-soft); }
+  .meter.bad-level > i { background: var(--unavailable); }
+
+  /* The trend inside a tile. No axes and no gridlines, because a sparkline's job is the
+     shape rather than the values -- which are printed above it as text, so nothing here
+     is reachable only by reading a picture. */
+  .spark { display: block; width: 100%; height: 26px; margin-top: .35rem; }
+  .spark polyline {
+    fill: none;
+    stroke: var(--muted);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  /* The newest segment, in the accent, so "where it is now" is visible without a marker
+     whose geometry the non-uniform scale would distort. Drawn after the full line, so it
+     sits on top of it. */
+  .spark polyline.now {
+    stroke: var(--accent);
+    stroke-width: 2.5;
+  }
+
+  .panel {
+    margin-top: .9rem;
+    padding-top: .8rem;
+    border-top: 1px solid var(--line);
+  }
+  .panel > h4 {
+    margin: 0 0 .5rem;
+    font-size: .82rem;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+
+  /* The cores. Eight rows would be tall and eight bare bars would put every value behind
+     a hover, so each one carries its own number: label, meter, figure. */
+  /* Wider than it first was: at 8.5rem the label and the figure left the meter about two
+     centimetres, so the one part carrying the reading was the smallest thing in the row. */
+  .cores {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+    gap: .4rem 1.2rem;
+  }
+  .cores .core {
+    display: grid;
+    grid-template-columns: 3rem 1fr 2.6rem;
+    align-items: center;
+    gap: .55rem;
+    font-size: .78rem;
+    color: var(--muted);
+  }
+  .cores .core .meter { margin-top: 0; }
+  .cores .core .n {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+
+  /* Columns of numbers, so here tabular-nums is right. */
+  table.mtable {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .84rem;
+  }
+  table.mtable th {
+    text-align: left;
+    font-weight: 600;
+    font-size: .76rem;
+    color: var(--muted);
+    padding: 0 .5rem .35rem 0;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  table.mtable td {
+    padding: .32rem .5rem .32rem 0;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  table.mtable tr:last-child td { border-bottom: 0; }
+  table.mtable .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  table.mtable .name {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .8rem;
+    word-break: break-all;
+  }
+  table.mtable .dim { color: var(--muted); }
+  .procs-scroll { max-height: 22rem; overflow-y: auto; }
+
+  /* A tag, not a colour: "this process is Plex" has to survive being read by somebody who
+     cannot tell the tag's colour from the surface. */
+  .tag {
+    display: inline-block;
+    padding: 0 .35rem;
+    border-radius: 5px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: .7rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  #metrics details {
+    margin-top: .9rem;
+    font-size: .82rem;
+    color: var(--muted);
+  }
+  #metrics details summary { cursor: pointer; }
+  #metrics details ul { margin: .5rem 0 0; padding-left: 1.1rem; }
+  #metrics details li { margin-bottom: .35rem; }
+
   .warn {
     margin: 0 0 .2rem;
     padding: .55rem .7rem;
@@ -484,19 +692,6 @@
   .failed { border-color: var(--unavailable); color: var(--unavailable); }
 
   /* Power. Deliberately quiet: it is needed rarely and its mistake is expensive. */
-  .power { margin: 1.5rem 0; }
-  .power .row { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .6rem; }
-  .power button {
-    padding: .5rem 1rem;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--card);
-    color: var(--ink);
-    font: inherit;
-    cursor: pointer;
-  }
-  .power button:hover { border-color: var(--unavailable); color: var(--unavailable); }
-  .power button[disabled] { opacity: .55; cursor: default; }
 
   /* --------------------------------------------------------------------------------
      Style refresh.
@@ -533,36 +728,53 @@
   .hero.unavailable { background: linear-gradient(var(--unavailable-soft), var(--card) 60%); }
   .hero h2 { font-size: 1.65rem; letter-spacing: -.02em; }
 
-  /* One button treatment for the page. It was written three times -- in .plex, in .form
-     and in .power -- which is why the same control looked slightly different depending on
-     the card it was in. Those rules still apply; this restates what they had in common.
-     .power keeps its own hover, because stopping the machine should not look like every
-     other button on the page. */
-  .plex button, .form button, .power button {
+  /* One button treatment for the page, on the **element**, with no container named at all.
+     This has now been narrowed twice by the same mistake. It began as three rules — `.plex
+     button`, `.form button`, `.power button` — so the network card, a plain
+     `<div class="card">`, matched none of them and its button had *no styling*: a raw
+     operating-system control in the middle of a designed page, which shipped and was
+     reported from a machine. That was fixed to `.card button`, which then left out the next
+     button added outside a card — the power controls in the header.
+     A rule about how buttons look should not know where buttons are. `.danger` carries the
+     one distinction worth keeping: stopping the machine must not look like every other
+     control on the page. */
+  button {
+    border: 1px solid var(--accent);
     border-radius: var(--radius-sm);
     padding: .58rem .95rem;
+    font: inherit;
     font-weight: 600;
+    cursor: pointer;
     box-shadow: var(--shadow-sm);
     transition: background-color .12s ease, border-color .12s ease,
                 box-shadow .12s ease, transform .06s ease;
   }
-  .plex button:not(.ghost), .form button:not(.ghost) {
+  button:not(.ghost) {
     background: var(--accent);
     border-color: var(--accent);
     color: var(--accent-ink);
   }
-  .plex button:not(.ghost):hover, .form button:not(.ghost):hover { filter: brightness(1.07); }
-  .plex button.ghost, .form button.ghost, .power button {
+  button:not(.ghost):hover { filter: brightness(1.07); }
+  button.ghost {
     background: var(--card);
     color: var(--ink);
     border: 1px solid var(--line);
+    font-weight: 500;
   }
-  .plex button.ghost:hover, .form button.ghost:hover {
+  button.ghost:hover {
     border-color: var(--accent);
     color: var(--accent);
   }
-  .plex button:active, .form button:active, .power button:active { transform: translateY(1px); }
-  .plex button[disabled], .form button[disabled], .power button[disabled] {
+  /* Shutting down and restarting. Quiet until pointed at, then unmistakably not the accent:
+     these two are the only controls on the page that end the session they are pressed in. */
+  button.danger:hover {
+    border-color: var(--unavailable);
+    color: var(--unavailable);
+  }
+  button:active { transform: translateY(1px); }
+  button[disabled] {
+    opacity: .55;
+    cursor: default;
     box-shadow: none;
     transform: none;
     filter: none;
@@ -620,7 +832,19 @@
     <span class="version" id="version"></span>
     <span class="badge" id="slot" hidden></span>
     <span class="badge" id="gate" hidden></span>
+    <span class="aside">
+      <span class="badge" id="uptime"></span>
+      <button id="restart" class="ghost danger">Restart</button>
+      <button id="shutdown" class="ghost danger">Shut down</button>
+    </span>
   </header>
+
+  <!-- The power card's one paragraph used to carry both the warning and any failure. The
+       warning has moved into the confirmation, which is where somebody actually reads it, and
+       this is what is left: a place for the answer when stopping the machine does not work.
+       Hidden until there is something to say, because an empty banner under a sticky header
+       is a permanent bite out of the page. -->
+  <p class="warn" id="power-note" hidden></p>
 
   <section class="card plex" id="token-card">
     <h3>Device token</h3>
@@ -640,6 +864,60 @@
   </section>
 
   <section class="card setup" id="setup" hidden></section>
+
+  <!-- Above <main> rather than after it, which is where this was first put. `main` is
+       regenerated on every status poll and the terminal is generated *into* it, so a card
+       placed after it sits below a tall black box — and this is the one card somebody opens
+       the page repeatedly to read. It cannot go inside `main` either: that would put a
+       section redrawn twice a second inside one rebuilt from scratch on every status poll,
+       and the outer rebuild would throw this one's DOM away mid-render.
+
+       Deliberately no aria-live. Every other card here announces itself because it changes
+       when the machine changes; this one changes twice a second by design, and a live region
+       reading eight percentages aloud on a loop would make the page unusable with a screen
+       reader rather than more accessible. Every figure is plain text in the document. -->
+  <section class="card plex" id="metrics" data-fold="metrics">
+    <div class="bar">
+      <h3 style="margin:0">Activity</h3>
+      <span class="state" id="metrics-window">measuring…</span>
+    </div>
+    <!-- Only this div is redrawn, twice a second. Everything below it is written once and
+         then left alone, and that division is the whole point rather than a tidiness: the
+         first version put the process table and the notes *inside* here, so opening either
+         one worked for up to two seconds and then the next poll replaced the element holding
+         it. It looked like a control that would not stay open. Reported from a machine, which
+         is the second time this card has needed somebody to look at the served page.
+
+         The rule the card now follows: anything with state a person set — an open
+         `<details>`, a table they asked for — cannot live inside a region on a timer. -->
+    <div id="metrics-body">
+      <p class="empty">Measuring… a rate is the difference between two readings, so the
+         first figures arrive a couple of seconds after this page opens.</p>
+    </div>
+
+    <!-- The paragraph that used to explain why this needs a token is gone from the page. The
+         reason has not changed and is still written down where it belongs — on
+         `metrics_route` in console.rs — but a standing explanation of a thing that has not
+         gone wrong yet is clutter, and the one moment it matters is covered: pressing this
+         without a token says so, and says where to put one. -->
+    <div class="panel" id="procs-panel">
+      <h4>Processes</h4>
+      <div class="row">
+        <button id="procs-load" class="ghost">Show Processes</button>
+        <button id="procs-refresh" class="ghost" hidden>Refresh</button>
+      </div>
+      <!-- `hidden` from the start, so "is the list showing" is one fact from the first paint
+           rather than "empty now, hidden later". -->
+      <div id="procs" hidden></div>
+    </div>
+
+    <!-- Written once; the poll replaces the contents of the list and never the details
+         element, so whether it is open belongs to whoever opened it. -->
+    <details id="metrics-notes" hidden>
+      <summary>What these numbers do not say</summary>
+      <ul id="metrics-notes-list"></ul>
+    </details>
+  </section>
 
   <main id="main" aria-live="polite">
     <p class="empty">Loading…</p>
@@ -665,18 +943,7 @@
     <p class="empty">Loading…</p>
   </section>
 
-  <section class="card power" id="power">
-    <h3>Power</h3>
-    <p class="hint" id="power-note">Stopping this way closes Plex's database and flushes
-       the disk first. Holding the power button does neither.</p>
-    <div class="row">
-      <button id="shutdown">Shut down</button>
-      <button id="restart">Restart</button>
-    </div>
-  </section>
-
   <footer>
-    <span id="uptime"></span>
     <span id="refreshed"></span>
   </footer>
 </div>
@@ -839,6 +1106,10 @@ function toggleFold(card) {
   // A terminal measured while it was folded measured nothing. Tell the shell what it has
   // now that the box has a width again.
   if (key === "terminal" && !folded.has(key)) termResize();
+  // The activity card does not poll while it is shut, so opening it would otherwise sit on
+  // "measuring" until the next interval came round. Ask immediately instead; the reading
+  // after this one is the first that can carry a rate.
+  if (key === "metrics" && !folded.has(key)) metricsTick();
 }
 
 const VERDICT = {
@@ -857,7 +1128,15 @@ function esc(value) {
     .replaceAll('"', "&quot;");
 }
 
-/** "3 days, 4 h 12 min" — a duration a person reads, not a second count. */
+/**
+ * "3 days 4 h" — a duration a person reads, not a second count.
+ *
+ * The duration and nothing else. It used to return "Up " in front of it while its own comment
+ * described only the duration, and both callers then added a label of their own: the header
+ * badge read "UP UP 18 MIN" and the activity tile was labelled "Up" above a value of "Up 1 h
+ * 21 min". A function that names itself in its own output cannot be composed, which is what
+ * both of those were trying to do.
+ */
 function humanUptime(seconds) {
   if (seconds === null || seconds === undefined) return "";
   const d = Math.floor(seconds / 86400);
@@ -867,7 +1146,7 @@ function humanUptime(seconds) {
   if (d) parts.push(d + (d === 1 ? " day" : " days"));
   if (h) parts.push(h + " h");
   if (!d) parts.push(m + " min");
-  return "Up " + parts.join(" ");
+  return parts.join(" ");
 }
 
 function gpuSection(gpu) {
@@ -925,6 +1204,10 @@ function healthCard(status) {
 // would vanish a second later. Held here and re-inserted, which is cheaper than making
 // the poll aware of a card that answers to a button rather than to the poll.
 let lastNetdiag = "";
+// And whether it is on show. Every part of this page that can be opened can be shut again;
+// the diagnosis was the second exception after the process list, and it was worse, because
+// its output is long and sat under the network card for the rest of the session.
+let netdiagShown = false;
 
 function networkCard(net) {
   const rows = (net.interfaces || [])
@@ -947,9 +1230,18 @@ function networkCard(net) {
            </table></div>`
         : `<p class="empty">No interface besides loopback. On this hardware Ethernet arrives over USB — check the adapter is plugged in.</p>`}
       <div class="row">
-        <button id="netdiag-run">Diagnose the network</button>
+        <!-- Ghost, because it reads and changes nothing. The accent is for the controls that
+             do something to the machine, and a diagnostic wearing it competed with them. -->
+        <button id="netdiag-run" class="ghost">Diagnose the network</button>
+        ${netdiagShown && lastNetdiag ? `<button id="netdiag-hide" class="ghost">Hide</button>` : ""}
       </div>
-      <div id="netdiag">${lastNetdiag}</div>
+      <!-- Whether the diagnosis is on show is a variable rather than this element's state,
+           because the whole card is rebuilt from its template on every status poll: ten
+           seconds later the DOM is a different DOM. Same reason lastNetdiag exists at all.
+           (No backticks in this comment. It sits inside a template literal, so one would end
+           the literal and take the entire page's script with it — which is exactly what
+           happened when this comment was first written.) -->
+      <div id="netdiag">${netdiagShown ? lastNetdiag : ""}</div>
     </div>`;
 }
 
@@ -961,6 +1253,7 @@ async function runNetworkDiagnosis() {
   if (!out) return;
 
   if (button) { button.disabled = true; button.textContent = "Diagnosing…"; }
+  netdiagShown = true;
   lastNetdiag = `<div class="progress"><span class="now">Looking up a name…</span>
     <div>A resolver that is not answering takes a few seconds to give up.</div></div>`;
   out.innerHTML = lastNetdiag;
@@ -1813,9 +2106,15 @@ function render(status) {
     document.getElementById("net-trial").before(host);
   }
 
-  document.getElementById("uptime").textContent = humanUptime(status.uptime_seconds);
+  // In the sticky header now, as a badge, so "how long has this been up" is answerable
+  // without scrolling to the bottom of a page that is several screens long. The footer keeps
+  // the refresh time, which is about this page rather than about the machine.
+  const uptime = document.getElementById("uptime");
+  const since = humanUptime(status.uptime_seconds);
+  uptime.textContent = since ? "up " + since : "";
+  uptime.hidden = !since;
   document.getElementById("refreshed").textContent =
-    " · refreshed " + new Date().toLocaleTimeString();
+    "refreshed " + new Date().toLocaleTimeString();
 }
 
 function renderError(error) {
@@ -2674,16 +2973,428 @@ async function tickInstall() {
   }
 }
 
+// ---- The activity card ---------------------------------------------------------------
+//
+// The server hands over rates already divided, so nothing here computes a percentage from
+// a since-boot counter -- the one arithmetic mistake this feature could make and the
+// reason `/api/metrics` returns differences rather than totals.
+//
+// History, on the other hand, lives here and only here. Nothing on the appliance records
+// what the load was a minute ago: /var/log has never been written to, which is a real gap
+// in this system and one a sparkline in a browser does not close. So these rings are
+// honestly what they look like -- what this tab has watched since it was opened, gone when
+// it is closed. Anyone wanting to know what happened last Tuesday still has no answer.
+
+const METRICS_ENDPOINT = "/api/metrics";
+const PROCESSES_ENDPOINT = "/api/metrics/processes";
+
+// Two seconds. Fast enough that a transcode starting is visible, slow enough that the card
+// is not the busiest thing on a machine whose job is to encode video. The server refuses
+// to divide over windows shorter than 250 ms, so this has a wide margin.
+const METRICS_MS = 2000;
+
+// Sixty samples, so a full ring is about two minutes of history.
+const SPARK_POINTS = 60;
+
+const metricsHistory = { cpu: [], memory: [], plex: [] };
+
+function pushSample(ring, value) {
+  if (value === null || value === undefined || Number.isNaN(value)) return;
+  ring.push(value);
+  if (ring.length > SPARK_POINTS) ring.shift();
+}
+
+/** "1.2 GB" — bytes as a person reads them, at three significant figures. */
+function metricBytes(bytes) {
+  if (bytes === null || bytes === undefined) return "—";
+  const units = ["B", "kB", "MB", "GB", "TB"];
+  let value = Number(bytes);
+  let unit = 0;
+  while (value >= 1000 && unit < units.length - 1) { value /= 1000; unit += 1; }
+  const decimals = value >= 100 || unit === 0 ? 0 : value >= 10 ? 1 : 2;
+  return value.toFixed(decimals) + " " + units[unit];
+}
+
+/** "3.4 MB/s" — a throughput, and a dash rather than a zero when it is not known. */
+function metricRate(bytesPerSecond) {
+  if (bytesPerSecond === null || bytesPerSecond === undefined) return "—";
+  return metricBytes(bytesPerSecond) + "/s";
+}
+
+/** A number to one decimal, or an em dash — never a zero standing in for "not measured". */
+function metricNum(value, decimals) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  return Number(value).toFixed(decimals === undefined ? 1 : decimals);
+}
+
+/**
+ * Which severity a ratio has earned.
+ *
+ * The three levels are this page's existing status colours, and they are used here for
+ * actual status: a filesystem at 95% is a problem whatever else is true. Anything below
+ * the first threshold is the accent rather than the "ready" green, because a processor at
+ * 40% is not *good*, it is simply unremarkable, and painting every ordinary reading green
+ * would leave nothing for green to mean.
+ */
+function metricLevel(percent, warn, bad) {
+  if (percent === null || percent === undefined) return "";
+  if (percent >= bad) return " bad-metricLevel";
+  if (percent >= warn) return " warn-metricLevel";
+  return "";
+}
+
+/** A meter: a track in the lighter step, a fill in the severity colour. */
+function metricMeter(percent, warn, bad) {
+  const width = percent === null || percent === undefined
+    ? 0
+    : Math.max(0, Math.min(100, percent));
+  return `<div class="meter${metricLevel(percent, warn === undefined ? 70 : warn, bad === undefined ? 90 : bad)}"`
+    + `><i style="width:${width.toFixed(1)}%"></i></div>`;
+}
+
+/**
+ * A sparkline over a ring of values.
+ *
+ * `vector-effect="non-scaling-stroke"` is the reason this can stretch to the tile's width
+ * without the 2 px line becoming a 6 px wedge: the viewBox is scaled non-uniformly and the
+ * stroke deliberately is not.
+ *
+ * The current value is marked by drawing the **last segment** in the accent rather than by a
+ * dot, and that is not a stylistic choice. A `<circle>` here was rendered and looked at: the
+ * horizontal scale is about twice the vertical, so `r="3"` came out as a six-pixel-wide,
+ * three-pixel-tall smear, and at `cx="100"` half of it fell outside the viewBox and was
+ * clipped by the tile edge. `vector-effect` exempts the stroke from that scaling and does
+ * nothing for a shape's geometry. A stroked segment is immune because it is only a stroke.
+ */
+function metricSpark(ring, ceiling) {
+  // Three, not two. A two-point line is a dash, and a dash sitting under a meter reads as a
+  // rendering fault rather than as "there is not much history yet" -- which is what the first
+  // rendered screenshot of this card showed, and the reason this number is not 2.
+  if (ring.length < 3) return "";
+  const top = ceiling || Math.max(100, ...ring);
+  // Spread over the points there *are*, not over the ring's capacity. Dividing by
+  // SPARK_POINTS drew a line occupying four samples' worth of a sixty-sample axis -- a stub
+  // five percent of the tile wide, which is what the first two rendered attempts showed
+  // (once in the left corner, once in the right after "fixing" it by moving the anchor).
+  // The cost is a horizontal scale that stretches for the first two minutes, which for a
+  // trend with no axis and its value printed above it is the right trade.
+  const step = 100 / (ring.length - 1);
+  const y = v => (28 - 3 - (Math.max(0, Math.min(top, v)) / top) * (28 - 6)).toFixed(2);
+  const at = i => `${(i * step).toFixed(2)},${y(ring[i])}`;
+  const points = ring.map((_, i) => at(i)).join(" ");
+  const last = `${at(ring.length - 2)} ${at(ring.length - 1)}`;
+  return `<svg class="spark" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">`
+    + `<polyline vector-effect="non-scaling-stroke" points="${points}"></polyline>`
+    + `<polyline class="now" vector-effect="non-scaling-stroke" points="${last}"></polyline>`
+    + `</svg>`;
+}
+
+/** One stat tile. */
+function metricTile(label, value, unit, sub, extra) {
+  // A value made of words gets a smaller size. "1 h 21 min" at the figure size wrapped
+  // mid-phrase and read as a layout fault; a figure keeps the size, because the figure is
+  // what the tile is for.
+  const words = /[a-z]/.test(String(value)) ? " words" : "";
+  return `<div class="tile">
+      <div class="k">${esc(label)}</div>
+      <div class="v${words}">${esc(value)}${unit ? `<span class="u">${esc(unit)}</span>` : ""}</div>
+      ${extra || ""}
+      ${sub ? `<div class="sub">${esc(sub)}</div>` : ""}
+    </div>`;
+}
+
+/** Draws the activity card from one sample. */
+function renderMetrics(m) {
+  const card = document.getElementById("metrics");
+  card.classList.remove("stale");
+
+  const cpu = m.cpu || {};
+  const memory = m.memory || {};
+  const plex = m.plex || {};
+  const cores = cpu.cores_online || (cpu.cores || []).length;
+
+  pushSample(metricsHistory.cpu, cpu.busy_percent);
+  const memoryPercent = memory.total
+    ? ((memory.total - memory.available) / memory.total) * 100
+    : null;
+  pushSample(metricsHistory.memory, memoryPercent);
+  pushSample(metricsHistory.plex, plex.cpu_percent);
+
+  document.getElementById("metrics-window").textContent =
+    m.window_ms ? `over the last ${(m.window_ms / 1000).toFixed(1)} s` : "measuring…";
+
+  const varFs = (m.storage || []).find(f => f.path === "/var");
+  const rootFs = (m.storage || []).find(f => f.path === "/");
+  // The warmest zone, whatever it is called. Naming one in the page would tie it to this
+  // laptop, and the machines this has already been moved between expose different sets.
+  const hottest = (m.temperatures || []).reduce(
+    (worst, t) => (worst === null || t.celsius > worst.celsius ? t : worst), null);
+
+  const tiles = [
+    metricTile("Processor", metricNum(cpu.busy_percent), "%",
+      cores ? `${cores} cores` + (cpu.iowait_percent > 1 ? ` · ${metricNum(cpu.iowait_percent)}% waiting on disk` : "") : "",
+      metricMeter(cpu.busy_percent) + metricSpark(metricsHistory.cpu, 100)),
+
+    metricTile("Memory", metricNum(memoryPercent), "%",
+      `${metricBytes(memory.total - memory.available)} of ${metricBytes(memory.total)}`,
+      metricMeter(memoryPercent) + metricSpark(metricsHistory.memory, 100)),
+
+    // Plex's own figure, which is the one this appliance exists to be asked about: "the
+    // machine is at 60%" does not say whether that is a transcode or this page polling
+    // itself. Drawn against the core count rather than against 100, because one saturated
+    // core out of eight is 100% of a core and an eighth of the machine.
+    metricTile("Plex processor", plex.present ? metricNum(plex.cpu_percent) : "—", plex.present ? "%" : "",
+      plex.present ? `of one core · ${cores} available` : "Plex is not installed",
+      plex.present
+        ? metricMeter(cores ? plex.cpu_percent / cores : plex.cpu_percent) + metricSpark(metricsHistory.plex, 100 * (cores || 1))
+        : ""),
+
+    metricTile("Plex memory", plex.present ? metricBytes(plex.memory) : "—", "",
+      plex.present && plex.memory_max
+        ? `limit ${metricBytes(plex.memory_max)}` + (plex.pids ? ` · ${plex.pids} processes` : "")
+        : plex.present ? "no limit set" : "",
+      plex.present && plex.memory_max
+        ? metricMeter((plex.memory / plex.memory_max) * 100)
+        : ""),
+
+    m.gpu
+      ? metricTile("Graphics clock", m.gpu.frequency_mhz === null ? "—" : String(m.gpu.frequency_mhz), "MHz",
+          `of ${m.gpu.max_frequency_mhz || "?"} MHz · ${esc(m.gpu.card)}`,
+          // Explicitly not a load figure, and the label says "clock" for that reason. A
+          // part can sit at its ceiling doing very little.
+          metricMeter(m.gpu.max_frequency_mhz ? (m.gpu.frequency_mhz / m.gpu.max_frequency_mhz) * 100 : null, 101, 102))
+      : metricTile("Graphics clock", "—", "", "not reported by this driver", ""),
+
+    varFs
+      ? metricTile("Free on /var", metricBytes(varFs.available), "",
+          `${metricNum(varFs.percent_used, 0)}% of ${metricBytes(varFs.total)} used`,
+          metricMeter(varFs.percent_used, 80, 92))
+      : metricTile("Free on /var", "—", "", "could not be read", ""),
+
+    rootFs
+      ? metricTile("Free on /", metricBytes(rootFs.available), "",
+          `tmpfs · ${metricNum(rootFs.percent_used, 0)}% of ${metricBytes(rootFs.total)} used`,
+          metricMeter(rootFs.percent_used, 80, 92))
+      : metricTile("Free on /", "—", "", "could not be read", ""),
+
+    hottest
+      ? metricTile("Warmest sensor", metricNum(hottest.celsius), "°C", esc(hottest.zone),
+          metricMeter(hottest.celsius, 75, 90))
+      : metricTile("Warmest sensor", "—", "", "no thermal zone readable", ""),
+
+    metricTile("Load average", metricNum(m.load && m.load.one, 2), "",
+      m.load ? `${metricNum(m.load.five, 2)} at 5 min · ${metricNum(m.load.fifteen, 2)} at 15 · ${m.load.total} processes` : ""),
+
+    metricTile("Up", humanUptime(m.uptime_seconds) || "—", "",
+      m.context_switches_per_second !== null && m.context_switches_per_second !== undefined
+        ? `${Math.round(m.context_switches_per_second).toLocaleString()} context switches/s`
+        : ""),
+  ].join("");
+
+  const coreRows = (cpu.cores || []).map((value, index) => `
+      <div class="core">
+        <span>core ${index}</span>
+        ${metricMeter(value)}
+        <span class="n">${value === null ? "—" : metricNum(value, 0) + "%"}</span>
+      </div>`).join("");
+
+  const interfaces = (m.network || []);
+  const netRows = interfaces.map(n => `
+      <tr>
+        <td class="name">${esc(n.name)}</td>
+        <td class="dim">${esc(n.operstate || "")}</td>
+        <td class="num">${esc(metricRate(n.rx_per_second))}</td>
+        <td class="num">${esc(metricRate(n.tx_per_second))}</td>
+        <td class="num dim">${esc(metricBytes(n.rx_total))}</td>
+        <td class="num dim">${esc(metricBytes(n.tx_total))}</td>
+      </tr>`).join("");
+
+  const diskRows = (m.disks || []).map(d => `
+      <tr>
+        <td class="name">${esc(d.name)}</td>
+        <td class="num">${esc(metricRate(d.read_per_second))}</td>
+        <td class="num">${esc(metricRate(d.write_per_second))}</td>
+      </tr>`).join("");
+
+  // The sensor is shown beside the type, always, because the type is not unique: a real
+  // machine answered with two zones both called `acpitz` at different temperatures, and a
+  // row labelled only by type is a reading nobody can attribute.
+  const temps = (m.temperatures || []).map(t =>
+    `<tr><td class="name">${esc(t.zone)}</td><td class="dim">${esc(t.sensor || "")}</td>`
+    + `<td class="num">${metricNum(t.celsius)} °C</td></tr>`).join("");
+
+  const notes = (m.notes || []).map(n => `<li>${esc(n)}</li>`).join("");
+
+  document.getElementById("metrics-body").innerHTML = `
+    <div class="tiles">${tiles}</div>
+
+    ${coreRows ? `<div class="panel"><h4>Per core</h4><div class="cores">${coreRows}</div></div>` : ""}
+
+    ${netRows ? `<div class="panel"><h4>Network</h4>
+      <table class="mtable">
+        <thead><tr><th>Interface</th><th>State</th><th class="num">In</th><th class="num">Out</th>
+          <th class="num">In total</th><th class="num">Out total</th></tr></thead>
+        <tbody>${netRows}</tbody>
+      </table></div>` : ""}
+
+    ${diskRows ? `<div class="panel"><h4>Disk</h4>
+      <table class="mtable">
+        <thead><tr><th>Device</th><th class="num">Read</th><th class="num">Write</th></tr></thead>
+        <tbody>${diskRows}</tbody>
+      </table></div>` : ""}
+
+    ${temps ? `<div class="panel"><h4>Temperatures</h4>
+      <table class="mtable"><tbody>${temps}</tbody></table></div>` : ""}`;
+
+  // The notes live outside the redrawn region, so only their contents are replaced — and
+  // only when they have actually changed. Rewriting the list on every poll would be
+  // harmless for a `<details>`, but it would move the caret and the selection of anybody
+  // reading it, which is the same class of rudeness as redrawing a field being typed into.
+  const notesHost = document.getElementById("metrics-notes");
+  const notesList = document.getElementById("metrics-notes-list");
+  if (notesList.dataset.rendered !== notes) {
+    notesList.dataset.rendered = notes;
+    notesList.innerHTML = notes;
+  }
+  notesHost.hidden = !notes;
+}
+
+/** Draws the process table. */
+function renderProcesses(report) {
+  const rows = (report.processes || []).map(p => `
+      <tr>
+        <td class="num dim">${p.pid}</td>
+        <td class="name">${esc(p.command || p.name)}${p.plex ? ' <span class="tag">Plex</span>' : ""}</td>
+        <td class="dim">${esc(p.state || "")}</td>
+        <td class="num">${p.cpu_percent === null ? "—" : metricNum(p.cpu_percent) + "%"}</td>
+        <td class="num">${esc(metricBytes(p.memory))}</td>
+        <td class="num dim">${p.threads === null ? "—" : p.threads}</td>
+      </tr>`).join("");
+
+  // Says what it left out. A list quietly cut short reads as a complete one, and the
+  // machine somebody opens this on is the one where the count matters.
+  const omitted = report.omitted
+    ? `<p class="hint">${report.omitted} more not shown, of ${report.total} running.</p>`
+    : `<p class="hint">${report.total} processes.${report.window_ms ? "" : " Percentages appear on the next reading."}</p>`;
+
+  document.getElementById("procs").innerHTML = `
+    <div class="procs-scroll">
+      <table class="mtable">
+        <thead><tr><th class="num">PID</th><th>Command</th><th>State</th>
+          <th class="num">CPU</th><th class="num">Memory</th><th class="num">Threads</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>${omitted}`;
+
+  // Refreshing is a second control rather than a relabelled first one, because the first one
+  // now has a job of its own: putting the list away. Percentages need two readings, so the
+  // first list has none and pressing Refresh is what fills them in.
+  showProcesses(true);
+}
+
+/**
+ * Shows or hides the process list.
+ *
+ * Anything on this page that can be opened can be shut again — this list was the one
+ * exception, and once it was up there was no way back to a page without it. The state is the
+ * element's own `hidden`, not a variable: this panel is outside the region the poll redraws,
+ * so its DOM is the only thing that has to agree with itself.
+ */
+function showProcesses(shown) {
+  document.getElementById("procs").hidden = !shown;
+  document.getElementById("procs-refresh").hidden = !shown;
+  document.getElementById("procs-load").textContent =
+    shown ? "Hide Processes" : "Show Processes";
+}
+
+/** The one control: fetch it the first time, then put it away and bring it back. */
+function toggleProcesses() {
+  const host = document.getElementById("procs");
+  if (host.hidden || !host.innerHTML.trim()) {
+    if (host.innerHTML.trim()) {
+      showProcesses(true);
+    } else {
+      loadProcesses();
+    }
+  } else {
+    showProcesses(false);
+  }
+}
+
+/** Asks for the process list, which needs the token. */
+async function loadProcesses() {
+  const value = token();
+  const host = document.getElementById("procs");
+  if (!value) {
+    host.innerHTML = `<p class="hint">The device token is needed for this. Enter it in the
+      Device token box at the top of this page.</p>`;
+    showProcesses(true);
+    return;
+  }
+  try {
+    const response = await fetch(PROCESSES_ENDPOINT, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (!response.ok) throw new Error((await response.text()).trim() || ("HTTP " + response.status));
+    renderProcesses(await response.json());
+  } catch (error) {
+    host.innerHTML = `<p class="hint">${esc(error.message || error)}</p>`;
+    showProcesses(true);
+  }
+}
+
+let metricsTimer = null;
+
+/** Polls the activity card. */
+async function metricsTick() {
+  clearTimeout(metricsTimer);
+  // Nothing to draw into while the card is folded, and nothing to look at while the tab is
+  // in the background -- so the appliance is not asked. It still keeps the *previous*
+  // reading, so the first sample after the card is opened again has no baseline and
+  // reports "measuring" for one interval rather than a figure covering the whole time the
+  // card was shut.
+  const asleep = folded.has("metrics") || document.hidden;
+  if (!asleep) {
+    try {
+      const response = await fetch(METRICS_ENDPOINT, { cache: "no-store" });
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      renderMetrics(await response.json());
+    } catch (error) {
+      // Dimmed rather than emptied: the last real reading is more useful than an error
+      // where a dashboard used to be, and a card that blanks itself between samples reads
+      // as a machine that has stopped.
+      document.getElementById("metrics").classList.add("stale");
+      document.getElementById("metrics-window").textContent = "not answering";
+    }
+  }
+  metricsTimer = setTimeout(metricsTick, METRICS_MS);
+}
+
+/** Says something in the banner under the header, and makes it visible. */
+function powerNote(message) {
+  const note = document.getElementById("power-note");
+  note.textContent = message;
+  note.hidden = !message;
+}
+
 /** Stops or restarts the appliance, once. */
 async function power(action, label) {
   const value = token();
-  const note = document.getElementById("power-note");
   if (!value) {
-    note.textContent = "The device token is needed to " + label.toLowerCase() +
-      ". Enter it in the Device token box at the top of this page.";
+    powerNote("The device token is needed to " + label.toLowerCase() +
+      ". Enter it in the Device token box at the top of this page.");
     return;
   }
-  if (!confirm(label + " this machine now?")) return;
+  // The warning that used to sit in the power card, now in the confirmation — which is the
+  // moment somebody is deciding, rather than a paragraph they scrolled past earlier. These
+  // two controls live in a sticky header now, always a centimetre from the pointer, so the
+  // question they ask should be worth reading.
+  if (!confirm(label + " this machine now?\n\n" +
+      "This closes Plex's database and flushes the disk first. Holding the power button " +
+      "does neither.")) return;
 
   // Both are disabled for good: whatever happens next, this page is about to stop being
   // connected to anything, and a second press would go nowhere.
@@ -2698,7 +3409,7 @@ async function power(action, label) {
       body: JSON.stringify({ action }),
     });
     if (!response.ok) {
-      note.textContent = await response.text();
+      powerNote(await response.text());
       document.getElementById("shutdown").disabled = false;
       document.getElementById("restart").disabled = false;
       return;
@@ -2707,12 +3418,12 @@ async function power(action, label) {
     // The machine going away mid-request looks exactly like this, so it is not reported
     // as a failure -- saying "could not shut down" to somebody watching the fans stop
     // would be worse than saying nothing.
-    note.textContent = label + " requested. This page will stop responding.";
+    powerNote(label + " requested. This page will stop responding.");
     return;
   }
-  note.textContent = action === "off"
+  powerNote(action === "off"
     ? "Shutting down. Wait for the machine to go quiet before cutting power."
-    : "Restarting. This page will come back on its own once the console is up.";
+    : "Restarting. This page will come back on its own once the console is up.");
 }
 
 // Delegated rather than bound to the button: render() replaces the button element on
@@ -2729,7 +3440,15 @@ document.addEventListener("click", event => {
     toggleFold(head.parentElement);
     return;
   }
+  if (event.target && event.target.id === "procs-load") toggleProcesses();
+  if (event.target && event.target.id === "procs-refresh") loadProcesses();
   if (event.target && event.target.id === "netdiag-run") runNetworkDiagnosis();
+  if (event.target && event.target.id === "netdiag-hide") {
+    netdiagShown = false;
+    const out = document.getElementById("netdiag");
+    if (out) out.innerHTML = "";
+    event.target.remove();
+  }
   if (event.target && event.target.id === "settings-save") saveSettings();
   if (event.target && event.target.id === "token-rotate") rotateToken();
   if (event.target && event.target.id === "net-confirm") confirmNetwork();
@@ -2818,6 +3537,7 @@ if (!SOLO) {
   updateTick();
   sharesTick();
   wifiTick();
+  metricsTick();
 }
 </script>
 </body>

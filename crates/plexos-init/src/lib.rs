@@ -42,6 +42,7 @@ pub mod cmdline;
 pub mod execute;
 pub mod nvidia;
 pub mod plan;
+pub mod screen;
 pub mod state;
 pub mod supervise;
 
