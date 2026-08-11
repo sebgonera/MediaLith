@@ -54,6 +54,7 @@ pub mod media;
 pub mod metrics;
 pub mod net;
 pub mod netdiag;
+pub mod pairing;
 pub mod plex;
 pub mod plexactivity;
 pub mod power;

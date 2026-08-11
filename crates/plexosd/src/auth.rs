@@ -205,15 +205,32 @@ pub fn generate() -> std::io::Result<String> {
 /// digest is not a secret.
 #[must_use]
 pub fn matches(presented: &str, stored_fingerprint: &str) -> bool {
-    let candidate = fingerprint(presented);
-    let expected = stored_fingerprint.trim();
-    if candidate.len() != expected.len() {
+    constant_time_eq(&fingerprint(presented), stored_fingerprint.trim())
+}
+
+/// Compares two strings without leaking where they first differ.
+///
+/// The obvious `==` returns as soon as two bytes differ, and the time it takes is
+/// therefore a measurement of how much of the secret the caller already has. Over a LAN
+/// that is a slow attack and a real one. This looks at every byte whatever happens.
+///
+/// Lengths are compared first and short-circuit, which is safe for every caller here: the
+/// length of a SHA-256 digest, of a session token and of a pairing code are all fixed by
+/// the format and none of them is a secret.
+///
+/// Shared rather than written once per credential. Three modules now compare a presented
+/// string against a held one — [`matches`] for the device token, [`crate::session`] for an
+/// administrator session, [`crate::pairing`] for a pairing code — and three hand-rolled
+/// loops is three chances for one of them to be an `==` that nobody noticed.
+#[must_use]
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
         return false;
     }
-    let differences = candidate
+    let differences = a
         .bytes()
-        .zip(expected.bytes())
-        .fold(0_u8, |acc, (a, b)| acc | (a ^ b));
+        .zip(b.bytes())
+        .fold(0_u8, |acc, (x, y)| acc | (x ^ y));
     differences == 0
 }
 
