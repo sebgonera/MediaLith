@@ -45,6 +45,7 @@ pub mod appmount;
 pub mod auth;
 pub mod bootcounter;
 pub mod console;
+pub mod dashboard;
 pub mod esp;
 pub mod gate;
 pub mod health;

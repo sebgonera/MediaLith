@@ -28,6 +28,19 @@ use plexos_types::version::STATE_LAYOUT_VERSION;
 /// The health gate. Nothing else may declare a boot good (ADR-0005).
 const PLEXOSD: &str = "/usr/bin/plexosd";
 
+/// The terminal the log and the shell share.
+///
+/// The second one, and the first is left to the dashboard (ADR-0019). Before that existed,
+/// both of these inherited PID 1's `/dev/console` — the foreground virtual terminal — which
+/// was right while everything this machine put on a screen was a line of text.
+///
+/// A dashboard is not a line of text, and the two cannot share: a daemon's log written over
+/// a drawing wins, and the result is a designed screen with sentences through it. So they
+/// move one terminal along, where **Alt+F2** finds them and **Alt+F1** comes back. Nothing
+/// is hidden by this and nothing is harder to reach; the shell that was on the screen is
+/// still there, still with no password, exactly as it has always been.
+const LOG_AND_SHELL: &str = "/dev/tty2";
+
 /// What PID 1 keeps running, in the order it starts them.
 ///
 /// The console first, because it is what somebody reaches for when the shell below is not
@@ -48,12 +61,16 @@ static SERVICES: &[Service] = &[
         // the shell works. plexosd resolves those two by absolute path and no longer
         // depends on this; anything added later would walk into it again.
         env: &[("PATH", "/sbin:/usr/sbin:/bin:/usr/bin")],
+        // Its log goes here; the dashboard it runs draws on tty1 by opening that terminal
+        // itself. One process, two screens, and the one somebody is looking at stays clean.
+        tty: Some(LOG_AND_SHELL),
     },
     Service {
         name: "the console shell",
         program: "/bin/sh",
         args: &[],
         env: &[("PATH", "/sbin:/usr/sbin:/bin:/usr/bin"), ("HOME", "/root")],
+        tty: Some(LOG_AND_SHELL),
     },
 ];
 

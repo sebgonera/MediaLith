@@ -34,6 +34,15 @@ rustls = { version = "0.23", default-features = false, features = ["std", "ring"
 # while planning this -- no `openssl` binary in the image either, only the libraries curl
 # links. So the certificate has to be made in process.
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+# QR encoding for the appliance dashboard's pairing screen (ADR-0019). A dependency for
+# the same reason sha2 is one: ISO/IEC 18004 is Reed-Solomon over GF(256), eight mask
+# patterns scored against four penalty rules, and a version table -- and a subtle mistake
+# in any of it produces a symbol that looks perfectly plausible and does not scan.
+#
+# `default-features = false` is the whole of the audit: the defaults pull `image` for PNG
+# output, and without them this crate has **no dependencies at all**. Rendering is ours
+# anyway -- the terminal wants cells, not pixels.
+qrcode = { version = "0.14", default-features = false }
 
 [workspace.lints.rust]
 missing_docs = "warn"

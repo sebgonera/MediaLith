@@ -384,12 +384,19 @@ fn respond_read_only(request: &Request, env: &impl Environment, path: &str) -> R
 /// after a reboot, which is worse than one that plainly cannot be claimed yet.
 ///
 /// [`Credential::Unset`]: crate::auth::Credential::Unset
-pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::Credential {
+pub fn claim(
+    path: &std::path::Path,
+    log: &mut dyn FnMut(&str),
+) -> (crate::auth::Credential, Option<String>) {
     use crate::auth::Credential;
 
     if let Credential::Set(fingerprint) = crate::auth::read(path) {
         log("device claimed; changes need its token");
-        return Credential::Set(fingerprint);
+        // No plaintext, and there is nowhere to get one. Every boot after the first takes
+        // this path, which is why the second return value is an Option rather than a
+        // String: "the code, if it exists right now" is the honest type, and a machine
+        // that could produce it on demand would be one an attacker could ask.
+        return (Credential::Set(fingerprint), None);
     }
 
     let token = match crate::auth::generate() {
@@ -400,7 +407,7 @@ pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::
                  machine until one exists. /dev/urandom is unreadable, which means /dev \
                  is not mounted -- a larger fault than the missing token."
             ));
-            return Credential::Unset;
+            return (Credential::Unset, None);
         }
     };
 
@@ -415,7 +422,7 @@ pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::
              /var is mounted and writable.",
             path.display()
         ));
-        return Credential::Unset;
+        return (Credential::Unset, None);
     }
 
     // Banner rather than a log line. This is the one secret the machine will ever show,
@@ -446,7 +453,11 @@ pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::
     log("================================================================");
     log("");
 
-    Credential::Set(fingerprint)
+    // The plaintext goes back to the caller as well as to the log, so the dashboard can
+    // put it on the attached screen in a form somebody can read without scrolling through
+    // boot messages. It is handed over, not stored: nothing writes it, and the dashboard
+    // drops it the moment a key is pressed.
+    (Credential::Set(fingerprint), Some(token))
 }
 
 /// Issues a new device token and puts it in force at once.
@@ -951,7 +962,8 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     // The credential is read once, here, and what it is decides how the console
     // behaves rather than merely what it logs: an unclaimed device refuses every
     // mutating route outright (ADR-0013).
-    let credential = claim(std::path::Path::new(crate::auth::CREDENTIAL_FILE), log);
+    let (credential, first_boot_code) =
+        claim(std::path::Path::new(crate::auth::CREDENTIAL_FILE), log);
 
     // One job and one Plex for the life of the daemon, shared by every connection thread.
     // Both are properties of the machine rather than of whoever asked: a second browser
@@ -1025,6 +1037,10 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
         }
     });
 
+    // After the network, so the first frame already carries the address a browser should
+    // be pointed at; before `serve_tls`, which never returns.
+    spawn_dashboard(first_boot_code);
+
     let uploading_job = std::sync::Arc::clone(&job);
     let uploading_plex = std::sync::Arc::clone(&plex);
     // One set for the whole daemon. The sampler in here is the reason it cannot be built
@@ -1046,6 +1062,23 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
         move |request, reader| upload_route(request, reader, &uploading_job, &uploading_plex),
         log,
     )
+}
+
+/// Starts the screen attached to the machine (ADR-0019).
+///
+/// On a thread inside this process rather than as a service of its own, and that is the
+/// security design rather than an economy: the pairing offer and the sessions it produces
+/// live in this process's memory, so nothing has to be written to `/run`, nothing has to be
+/// kept in step across a process boundary, and there is no window in which two things could
+/// spend one code.
+///
+/// Its failure is a machine with no monitor, which is most of them. It is logged and the
+/// appliance carries on, because it always has.
+fn spawn_dashboard(first_boot_code: Option<String>) {
+    std::thread::spawn(move || {
+        let mut log = |line: &str| println!("plexosd: dashboard: {line}");
+        crate::dashboard::run(first_boot_code, &mut log);
+    });
 }
 
 /// Everything `GET /api/provision` answers: the job, and the machine around it.
@@ -1572,7 +1605,7 @@ mod tests {
     fn an_appliance_nobody_has_touched_pairs_with_nothing() {
         // The state every machine on the LAN sees for all but five minutes of its life,
         // and the reason this route can be unauthenticated: there is nothing to spend.
-        crate::pairing::cancel();
+        let _serialised = crate::pairing::test_lock();
         let (status, body) = pair_with("ANYTHINGATALL");
         assert_eq!(status, 403);
         assert!(body.contains("Remedy:"), "{body}");
@@ -1588,6 +1621,7 @@ mod tests {
         // The end-to-end shape of ADR-0019 through the route table: a code that only the
         // attached screen could have produced becomes a session, and the second browser to
         // present the same code gets nothing.
+        let _serialised = crate::pairing::test_lock();
         let code = crate::pairing::start().expect("/dev/urandom");
 
         let (status, body) = pair_with(&code);
@@ -1623,6 +1657,7 @@ mod tests {
         // code because the route is about credentials, the Plex token because it is the
         // other secret this daemon holds, and the fingerprints because they are what the
         // server actually compares.
+        let _serialised = crate::pairing::test_lock();
         let code = crate::pairing::start().expect("/dev/urandom");
         let (_, body) = pair_with(&code);
 
@@ -1643,6 +1678,7 @@ mod tests {
         // And in particular a very long one is refused as wrong rather than as too long:
         // telling a caller which of their inputs had the wrong *shape* is a way to learn
         // the shape.
+        let _serialised = crate::pairing::test_lock();
         let _ = crate::pairing::start().expect("/dev/urandom");
 
         assert_eq!(
@@ -1669,6 +1705,7 @@ mod tests {
         // The rule that keeps a wrong code out of a log and out of a browser's history. It
         // holds by construction -- Refusal carries no input -- and this is what stops that
         // becoming untrue later.
+        let _serialised = crate::pairing::test_lock();
         let _ = crate::pairing::start().expect("/dev/urandom");
         let guess = "WRONGCODE7T8BHVWPQ2M4X6Z";
         let (status, body) = pair_with(guess);
@@ -1693,6 +1730,7 @@ mod tests {
 
     #[test]
     fn signing_out_ends_the_session_the_request_arrived_with() {
+        let _serialised = crate::pairing::test_lock();
         let code = crate::pairing::start().expect("/dev/urandom");
         let (_, body) = pair_with(&code);
         let session = serde_json::from_str::<serde_json::Value>(&body).unwrap()["session_token"]
@@ -4292,7 +4330,7 @@ console.log("OK");
         let path = std::env::temp_dir().join(name);
         let _ = std::fs::remove_file(&path);
         let mut lines = Vec::new();
-        let credential = claim(&path, &mut |line| lines.push(line.to_owned()));
+        let (credential, _shown) = claim(&path, &mut |line| lines.push(line.to_owned()));
         (credential, lines, path)
     }
 
@@ -4404,7 +4442,7 @@ console.log("OK");
         // down, and would do it silently at the next power cut.
         let (first, _, path) = claim_into("plexos-claim-twice");
         let mut lines = Vec::new();
-        let second = claim(&path, &mut |line| lines.push(line.to_owned()));
+        let (second, _shown) = claim(&path, &mut |line| lines.push(line.to_owned()));
 
         assert_eq!(first, second, "the same credential");
         assert_eq!(
@@ -4422,7 +4460,7 @@ console.log("OK");
         // harder to diagnose than one that plainly cannot be claimed.
         let unwritable = std::path::Path::new("/proc/plexos-claim-cannot-exist/token");
         let mut lines = Vec::new();
-        let credential = claim(unwritable, &mut |line| lines.push(line.to_owned()));
+        let (credential, _shown) = claim(unwritable, &mut |line| lines.push(line.to_owned()));
 
         assert_eq!(credential, crate::auth::Credential::Unset);
         let logged = lines.join("\n");

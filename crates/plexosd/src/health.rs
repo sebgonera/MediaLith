@@ -201,6 +201,15 @@ pub fn check_usr_verified(mounts: &str) -> Check {
     }
 }
 
+/// The name of the check that asks whether Plex is answering.
+///
+/// A constant because three places write it and a fourth now reads it: the appliance
+/// dashboard picks this check out of the list to decide what to say about Plex. Two
+/// spellings of one name is the shape of defect this repository has recorded twice --
+/// once as a duplicate `id` on the console page, once as a route the gate and the router
+/// disagreed about -- and it fails silently in both directions.
+pub const PLEX_HTTP: &str = "plex-http";
+
 /// Is Plex answering on loopback?
 ///
 /// `plex_root` is where the app image would be. When it is absent Plex is not part of
@@ -210,7 +219,7 @@ pub fn check_usr_verified(mounts: &str) -> Check {
 pub fn check_plex(plex_root: &Path, probe: &dyn Fn() -> bool) -> Check {
     if !plex_root.exists() {
         return Check {
-            name: "plex-http",
+            name: PLEX_HTTP,
             status: Status::NotApplicable,
             detail: format!(
                 "no Plex app image at {} — not provisioned yet (ADR-0010)",
@@ -221,13 +230,13 @@ pub fn check_plex(plex_root: &Path, probe: &dyn Fn() -> bool) -> Check {
 
     if probe() {
         Check {
-            name: "plex-http",
+            name: PLEX_HTTP,
             status: Status::Pass,
             detail: "answering on loopback".to_owned(),
         }
     } else {
         Check {
-            name: "plex-http",
+            name: PLEX_HTTP,
             status: Status::Fail,
             detail: "installed but not answering on loopback; the slot will roll back".to_owned(),
         }

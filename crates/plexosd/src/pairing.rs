@@ -292,6 +292,35 @@ pub fn consume(presented: &str) -> Result<(), Refusal> {
     offers().consume(presented, Instant::now())
 }
 
+/// Serialises the tests that drive the appliance's one set of offers.
+///
+/// Rust runs tests as threads in one process, so every test that touches [`CURRENT`] is
+/// sharing one appliance's worth of state with every other — and this project has already
+/// lost an evening to that shape twice, once in the TLS tests and once in `plexos-plex`'s
+/// `mkfs` stub. The failures it produces are the worst kind: they depend on the scheduler,
+/// so they appear in one run in twenty and pass on the rerun that is supposed to confirm
+/// them.
+///
+/// Tests that only need pairing *logic* take [`Offers`] directly and need none of this.
+/// This is for the ones whose subject is the daemon's own state — the HTTP route, the
+/// dashboard's key handling — where the global is the thing under test.
+#[cfg(test)]
+pub static PAIRING_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Takes [`PAIRING_TESTS`] and clears any offer left by whoever held it last.
+///
+/// Clearing on entry rather than on exit, because a test that panics does not run its own
+/// cleanup — and the lock is poisoned rather than lost, so the next test still gets it and
+/// would otherwise inherit an offer from a failure.
+#[cfg(test)]
+pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    let guard = PAIRING_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cancel();
+    guard
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
