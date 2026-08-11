@@ -48,6 +48,12 @@ PORT = int(sys.argv[3])
 # something is failing is a card nobody ever looks at before shipping it.
 CANNED = sys.argv[4] if len(sys.argv) > 4 else None
 
+# The two POST routes that only read. Both are POSTs so that the console's method-based gate
+# applies to them -- a process list with command lines, and what somebody is watching, are
+# private in a way a root hash is not -- and neither changes anything on the appliance, so a
+# preview may forward them. Every other POST here installs, erases or restarts.
+READ_ONLY_POSTS = ("/api/metrics/processes", "/api/plex/sessions")
+
 INSECURE = ssl.create_default_context()
 INSECURE.check_hostname = False
 INSECURE.verify_mode = ssl.CERT_NONE
@@ -67,7 +73,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return candidate if os.path.exists(candidate) else None
 
     def do_POST(self):
-        """Answers the POST routes from the canned directory only.
+        """Answers the POST routes from the canned directory, or proxies the two that read.
 
         Added when the activity card arrived, whose one control is a POST: the process list
         is not a GET on purpose, because every GET on this console answers without a
@@ -75,15 +81,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
         this the preview could render the button and never show what pressing it does, which
         is the same hole this whole tool exists to close.
 
-        Deliberately *not* proxied upstream. A POST on this console changes the machine --
-        it installs Plex, erases disks, restarts -- and a preview that forwarded one would
-        do it to a real appliance because somebody was looking at a page.
+        A POST on this console usually changes the machine -- it installs Plex, erases
+        disks, restarts -- and a preview that forwarded one would do it to a real appliance
+        because somebody was looking at a page. So nothing is proxied except the routes in
+        READ_ONLY_POSTS, which are POSTs for *privacy* rather than because they change
+        anything: a process list with command lines, and what somebody is watching. Those
+        two are the ones a preview most needs to show real, because canned data proves the
+        card renders and not that it renders what the appliance actually says.
+
+        The `Authorization` header is passed through, so the page has to have a real device
+        token in it -- see the note at the top about seeding sessionStorage.
         """
         length = int(self.headers.get("Content-Length") or 0)
-        if length:
-            self.rfile.read(length)
+        body = self.rfile.read(length) if length else b""
 
         canned = self.canned_for(self.path)
+        if not canned and self.path in READ_ONLY_POSTS:
+            request = urllib.request.Request(
+                f"https://{APPLIANCE}{self.path}",
+                data=body or b"{}",
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": self.headers.get("Authorization", ""),
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, context=INSECURE, timeout=10) as up:
+                    payload = up.read()
+                self.send_response(200)
+            except Exception as error:  # noqa: BLE001 - a preview, not a server
+                payload = str(error).encode()
+                self.send_response(502)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
         if not canned:
             body = (
                 f"the preview answers POST {self.path} only from a canned file; it does not "

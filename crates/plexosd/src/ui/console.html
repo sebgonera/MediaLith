@@ -5996,8 +5996,11 @@ function npDetail(session) {
     // the word Speed says the opposite of what is happening, so the throttled case is
     // described rather than measured. Observed on the appliance: `throttled: true` beside
     // `speed: 0.0` on a stream that was playing without a stutter.
+    // And a speed of 0.0 with nothing throttled is Plex not having measured one yet, seen on
+    // a real stream playing perfectly. Printed as "0.0× real time" it reads as a stall, so
+    // the row is left out: a fact this console does not have is a line it does not draw.
     transcode && transcode.throttled === true ? ["Transcoder", "Ahead of the player, paused"]
-      : transcode && transcode.speed !== null && transcode.speed !== undefined
+      : transcode && transcode.speed > 0
         ? ["Speed", `${transcode.speed.toFixed(1)}× real time`]
         : null,
   ].filter(Boolean);
