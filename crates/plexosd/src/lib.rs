@@ -60,6 +60,7 @@ pub mod plexactivity;
 pub mod power;
 pub mod provision;
 pub mod rollback;
+pub mod session;
 pub mod settings;
 pub mod setup;
 pub mod shares;

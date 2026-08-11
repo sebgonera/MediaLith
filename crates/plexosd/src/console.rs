@@ -452,12 +452,34 @@ pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::
 fn rotate_token() -> Response {
     match crate::auth::rotate(std::path::Path::new(crate::auth::CREDENTIAL_FILE)) {
         Ok(token) => {
+            // Everything the old credential admitted goes with it. Rotation is what
+            // somebody does when a credential has leaked, and a browser that was paired
+            // under the old one is a browser somebody may have paired with it -- leaving
+            // those sessions standing would make this a password change that logs nobody
+            // out. The pairing offer goes for the same reason: a QR on the screen is a
+            // credential in the room, and this is somebody asking for a clean slate.
+            //
+            // The browser that asked for the rotation is signed out by this too, which is
+            // deliberate and is what the page warns about before it asks. Anything else
+            // would mean deciding that one session is special, and the only way to know
+            // which is to trust the request that arrived.
+            let sessions = crate::session::revoke_all();
+            crate::pairing::cancel();
+
             // Also to the attached screen, which is where ADR-0013 says a device
             // announces itself — and the only place left if the browser that asked for
             // it loses the reply.
             let shown = crate::auth::grouped(&token);
-            println!("plexosd: the device token is now {shown}");
-            Response::json(format!("{{\"token\":\"{shown}\"}}"))
+            println!("plexosd: the recovery device code is now {shown}");
+            if sessions > 0 {
+                println!(
+                    "plexosd: {sessions} administrator browser session(s) revoked by the \
+                     rotation"
+                );
+            }
+            Response::json(format!(
+                "{{\"token\":\"{shown}\",\"sessions_revoked\":{sessions}}}"
+            ))
         }
         Err(error) => Response::text(
             500,
