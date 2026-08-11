@@ -176,6 +176,8 @@ struct State {
     notice_until: Option<Instant>,
     /// The recovery device code, while it is still on screen.
     first_boot_code: Option<String>,
+    /// Whether the first-boot screen has already made its one unasked-for offer.
+    first_boot_offered: bool,
 }
 
 /// The loop: read keys, re-read the machine, paint when it changed.
@@ -212,14 +214,8 @@ fn draw(
         },
         notice_until: None,
         first_boot_code,
+        first_boot_offered: false,
     };
-
-    // On first boot the QR is offered without anybody asking for it, which is the one
-    // exception to "pairing needs a physical action" and is sound for the same reason the
-    // rule is: the person who just turned this machine on is standing at it.
-    if state.first_boot_code.is_some() && facts.address().is_some() {
-        let _ = start_pairing(log);
-    }
 
     let mut painted: Option<String> = None;
     let mut last_key = Instant::now();
@@ -352,6 +348,26 @@ fn advance(state: &mut State, facts: &Facts) {
 
     match &state.screen {
         Screen::FirstBoot { .. } => {
+            // The one offer nobody asked for, made when there is finally somewhere to point
+            // it. A machine's first boot and its first DHCP lease are seconds apart and in
+            // no fixed order — Ethernet arrives over USB and enumerates after PCI, which is
+            // the fact ADR-0005's gate is built around — so an offer made only at start-up
+            // would leave a new owner looking at "waiting for a network address" on a
+            // machine that had an address by the time they read it.
+            //
+            // Once, and the `offered` flag is what makes it once. Renewing on every expiry
+            // would leave a live credential standing on a screen nobody is in front of,
+            // indefinitely; after this one runs out the screen says so and asks for P,
+            // like every other pairing on this appliance.
+            if !state.first_boot_offered
+                && facts.address().is_some()
+                && crate::pairing::secret().is_none()
+            {
+                state.first_boot_offered = true;
+                let mut quiet = |_: &str| {};
+                let _ = start_pairing(&mut quiet);
+            }
+
             let code = state.first_boot_code.clone().unwrap_or_default();
             state.screen = Screen::FirstBoot {
                 url: crate::pairing::secret().map(|secret| pairing_url(facts, &secret)),
@@ -452,6 +468,7 @@ mod tests {
             screen: Screen::Dashboard,
             notice_until: None,
             first_boot_code: None,
+            first_boot_offered: true,
         };
 
         handle(b'P', &mut state, &facts_at(None), &mut silent());
@@ -471,6 +488,7 @@ mod tests {
             screen: Screen::Dashboard,
             notice_until: None,
             first_boot_code: None,
+            first_boot_offered: true,
         };
 
         handle(b'p', &mut state, &facts, &mut silent());
@@ -505,6 +523,7 @@ mod tests {
             },
             notice_until: None,
             first_boot_code: None,
+            first_boot_offered: true,
         };
         crate::pairing::consume(&secret).expect("the browser spends it");
         advance(&mut state, &facts);
@@ -534,6 +553,7 @@ mod tests {
             },
             notice_until: None,
             first_boot_code: Some("4K7QM2XR9T8BHVWP".to_owned()),
+            first_boot_offered: false,
         };
 
         handle(b'x', &mut state, &facts, &mut silent());
@@ -544,6 +564,51 @@ mod tests {
             crate::pairing::secret().is_none(),
             "and the code offered alongside it goes too, rather than standing on a screen \
              nobody is looking at"
+        );
+    }
+
+    #[test]
+    fn first_boot_offers_its_qr_when_the_address_arrives_and_only_once() {
+        // A machine's first boot and its first DHCP lease are seconds apart in no fixed
+        // order: Ethernet arrives over USB and enumerates after PCI, which is the fact
+        // ADR-0005's gate is built around. An offer made only at start-up would leave a new
+        // owner reading "waiting for a network address" on a machine that had one.
+        let _serialised = crate::pairing::test_lock();
+        let mut state = State {
+            screen: Screen::FirstBoot {
+                url: None,
+                recovery_code: String::new(),
+            },
+            notice_until: None,
+            first_boot_code: Some("4K7QM2XR9T8BHVWP".to_owned()),
+            first_boot_offered: false,
+        };
+
+        // No cable yet: nothing is offered, and the screen says what it is waiting for.
+        advance(&mut state, &facts_at(None));
+        assert!(crate::pairing::secret().is_none());
+        let Screen::FirstBoot { url, .. } = &state.screen else {
+            panic!("expected the first-boot screen");
+        };
+        assert!(url.is_none());
+
+        // The lease arrives.
+        advance(&mut state, &facts_at(Some("192.168.2.102")));
+        let Screen::FirstBoot { url, .. } = &state.screen else {
+            panic!("expected the first-boot screen");
+        };
+        assert!(
+            url.as_deref().is_some_and(|url| url.contains("#pair=")),
+            "the QR appears without anybody pressing anything: {url:?}"
+        );
+
+        // And exactly once. Renewing on every expiry would leave a live credential standing
+        // on a screen nobody is in front of, for as long as the machine is on.
+        crate::pairing::cancel();
+        advance(&mut state, &facts_at(Some("192.168.2.102")));
+        assert!(
+            crate::pairing::secret().is_none(),
+            "after the first one runs out the screen asks for P, like every other pairing"
         );
     }
 
@@ -559,6 +624,7 @@ mod tests {
             },
             notice_until: None,
             first_boot_code: Some("4K7QM2XR9T8BHVWP".to_owned()),
+            first_boot_offered: false,
         };
 
         advance(&mut state, &facts);
@@ -575,6 +641,7 @@ mod tests {
             screen: Screen::Dashboard,
             notice_until: None,
             first_boot_code: None,
+            first_boot_offered: true,
         };
 
         handle(b'd', &mut state, &facts, &mut silent());
@@ -599,6 +666,7 @@ mod tests {
             screen: Screen::Dashboard,
             notice_until: None,
             first_boot_code: None,
+            first_boot_offered: true,
         };
 
         for key in b"sSfF0123456789\t\r\n" {

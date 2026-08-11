@@ -39,6 +39,7 @@ kind of decision that is embarrassing to get wrong quietly.
 | [0016](0016-installer.md) | The installer, and the first boot after it | Accepted |
 | [0017](0017-secure-boot-keys.md) | Secure Boot key custody, and who enrols them | Accepted |
 | [0018](0018-live-plex-activity.md) | Live Plex activity, and the credential that makes it possible | Accepted |
+| [0019](0019-physical-pairing.md) | Pairing a browser from the machine's own screen | Accepted |
 
 ## Template
 

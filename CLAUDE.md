@@ -362,6 +362,14 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
 
 An index, so nothing here has to be rediscovered by reading the tree.
 
+**The attached screen** — `crates/plexosd/src/dashboard/`, a thread inside `plexosd` that
+owns `/dev/tty1`. What the machine is, whether it works, and the address to point a browser
+at; **P** puts a QR code on it that signs a browser in for twelve hours. The model, the
+rendering and the QR are three modules so that every state — recovered, on trial, no
+network, pairing, expired — is a test rather than a photograph. `plexos-init` moved the log
+and the console shell to `/dev/tty2`, one **Alt+F2** away, because a log written over a
+drawing wins.
+
 **The console page** — one file, `crates/plexosd/src/ui/console.html`, embedded with
 `include_str!`. No framework, no build step, no external anything. Since the redesign it is
 an application shell rather than a long page: a sticky header (what the machine is, the
@@ -389,8 +397,11 @@ whose button caused it, and must open that section if it is folded; and a `GET` 
 readable without a credential so a broken machine can still be diagnosed.
 
 **Console API** — HTTPS only, port 443; port 80 answers a 308. `GET` needs no credential,
-every `POST` needs the device token (ADR-0013), and the terminal is *all* `POST` so a root
-shell's output cannot be read without one.
+every `POST` needs an administrator credential, and the terminal is *all* `POST` so a root
+shell's output cannot be read without one. **Two credentials are accepted and no route knows
+which arrived**: the recovery device code (ADR-0013) and an administrator session issued by
+pairing at the machine's own screen (ADR-0019). `auth::authenticate` is the only thing that
+decides, and `http::refusal` is the only thing that calls it.
 
 | Route | What it is |
 | --- | --- |
@@ -406,7 +417,9 @@ shell's output cannot be read without one.
 | `/api/shares` | Network shares the library lives on |
 | `/api/terminal` | Root shell, long-polled (ADR-0014) |
 | `/api/power` | Shut down, restart |
-| `/api/token` | Rotate the device token |
+| `/api/pair` | Spend a pairing code for an administrator session (ADR-0019). **The one mutating route with no credential**, because it issues one — and it has nothing to spend unless somebody pressed P at the machine |
+| `/api/session` | Is this browser still an administrator, and sign it out |
+| `/api/token` | Rotate the recovery device code. Revokes every session and any pairing offer |
 
 **Publisher tooling**, all on the build host:
 

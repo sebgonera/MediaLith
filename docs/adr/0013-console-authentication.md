@@ -3,6 +3,23 @@
 **Status:** Accepted
 **Date:** 2026-07-27
 
+> **Two things below were true when this was written and are not true now.** The record is
+> left as it was rather than edited, because what it decided still stands and rewriting a
+> decision to match what happened afterwards is how a tree of ADRs becomes a tree of
+> descriptions.
+>
+> - **"There is no TLS. The console is plain HTTP on port 80."** ADR-0014 reversed this
+>   once update signing closed the larger opening. The console serves TLS only, on 443,
+>   under a certificate it issues itself; port 80 answers a 308 and nothing else.
+> - **"256 bits from `/dev/urandom`."** The token is 80 bits, in sixteen Crockford base32
+>   characters. It was shortened for the reason this ADR argues elsewhere: entropy nobody
+>   can transcribe is not security, and this one is read off a panel and typed by hand.
+>   `crates/plexosd/src/auth.rs` gives the arithmetic.
+>
+> **ADR-0019 adds two credentials beside this one and supersedes none of it.** The token,
+> its file, its format and its reasoning are unchanged; it is now the *recovery* credential
+> rather than the only one, and that is what a person reads it called.
+
 ## Context
 
 ADR-0012 accepted an unauthenticated status console on the grounds that it could not
