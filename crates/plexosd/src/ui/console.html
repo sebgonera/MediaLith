@@ -4146,7 +4146,12 @@ function renderEvents() {
          <p><span class="mono">${esc(update.gate)}</span></p>
          <p class="hint">What the health gate did with the entry this machine booted. A name
             losing its <span class="mono">+n-m</span> counter is the gate marking the slot
-            permanent — the success half of ADR-0005.</p>
+            permanent — the success half of ADR-0005. The <span class="mono">plexos-</span>
+            prefix is the filename as it actually is on the EFI partition: an internal name
+            kept from before this appliance was called MediaLith, because the release that
+            <em>installs</em> an update names the entry and the release that <em>boots</em>
+            it has to recognise the name. Shown as it is so that mounting the partition
+            finds it.</p>
        </section>`
     : "";
 
