@@ -951,6 +951,25 @@ and its certificate — sign with the second one.
   experiment that skipped it would be testing the signature check -- which has its own
   tests -- and would prove nothing about ADR-0005, while looking like a rollback that
   worked.
+- **A region on a timer destroys anything a person opened inside it.** The activity card
+  redraws twice a second, and the process table and the "what these numbers do not say"
+  section were rendered into that same element — so both worked for up to two seconds and then
+  shut themselves, which reads as a control that refuses to stay open. Reported from the
+  machine within minutes of the card being installed. The fix is not a saved-and-restored
+  flag: the stateful parts are written once in the markup as **siblings** of the redrawn
+  region, and only their contents are updated. This is the "correct in the state it was
+  written in" trap again, and the new detail worth keeping is *when* it appears — the card had
+  no state at all until it grew a table and a `<details>`, so the polling loop was harmless
+  right up to the commit that made it not.
+- **A style rule that enumerates the kinds of a thing will miss one.** Buttons were styled by
+  `.plex button`, `.form button` and `.power button`. The network card is a plain
+  `<div class="card">`, so its "Diagnose the network" button matched none of them and had **no
+  styling at all** — a raw operating-system button in the middle of a designed page, shipped
+  and reported by somebody looking at it. The stylesheet already carried a comment saying the
+  rule had been written three times and that the common half had been factored out; the
+  selectors stayed enumerated, so the gap survived the tidy-up that was about it. `.card
+  button` cannot leave a card out. Ask what the rule does about a kind that does not exist
+  yet.
 - **A class name in the page's script is a channel nothing was watching.** Three tests guard
   the console page — its script parses, every id it addresses exists, no id names two things
   — and a rename that mangled `class="meter"` into `class="metricMeter"` passed all three.
