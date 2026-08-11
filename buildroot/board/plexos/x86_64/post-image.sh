@@ -723,8 +723,23 @@ build_uki() {
     # QEMU could never have shown it -- there ttyS0 is the port being captured.
     #
     # tty0 last. The screen is the console an appliance actually has.
-    # fbcon=font:TER16x32 -- see linux.fragment. Overridable at the boot menu by
-    # pressing 'e', which is why the smaller fonts are compiled in too.
+    # No fbcon=font: here, and its absence is the decision.
+    #
+    # It used to say TER16x32, and for months that did nothing at all: CONFIG_FONTS was
+    # unset, so the font had never been compiled in and find_font returned NULL. Turning
+    # CONFIG_FONTS on made the line start working -- from the first second of boot, on every
+    # machine -- and the reference laptop's 2880x1620 panel is the only one it flatters. On
+    # a smaller monitor the boot messages came out, in the owner's word, colossal.
+    #
+    # A command line cannot know what it is plugged into. It is inside a signed UKI, it is
+    # the same on every appliance, and it applies before anything has measured anything.
+    # The dashboard measures: it asks for the largest font whose grid still fits what it
+    # draws, and drops a size when it does not. So the choice belongs there, and boot runs
+    # at the kernel's own default -- which is small, and small is the right way round for
+    # text that scrolls and for a boot that fails.
+    #
+    # The fonts stay compiled in, so `fbcon=font:TER10x18` can still be typed at the boot
+    # menu by pressing 'e'.
     # i915.enable_guc=2 -- HuC load, without GuC submission. Not a tuning knob: on this
     # hardware it is the difference between HuC running and not, and nothing else turns
     # it on.
@@ -769,7 +784,7 @@ build_uki() {
     # machine the only way to capture a panic is to photograph it. Three failed boots
     # then cost about four minutes end to end, which is the right side of the trade for
     # a path that runs when an update was already broken.
-    printf 'plexos.slot=%s plexos.roothash=%s i915.enable_guc=2 panic=20 earlycon=efifb console=ttyS0,115200 console=tty0 video=1280x720 fbcon=font:TER16x32\n' \
+    printf 'plexos.slot=%s plexos.roothash=%s i915.enable_guc=2 panic=20 earlycon=efifb console=ttyS0,115200 console=tty0 video=1280x720\n' \
         "${slot}" "${ROOT_HASH}" > "${WORK}/cmdline"
 
     # Written by stage_os_release, before the /usr image was built. See there for why
