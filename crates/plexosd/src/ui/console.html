@@ -6843,7 +6843,25 @@ document.addEventListener("click", event => {
     return;
   }
 
-  const id = event.target ? event.target.id : "";
+  // The id of the *button*, not of whatever inside it was clicked.
+  //
+  // This was `event.target.id`, and it was wrong in a way that reads as flakiness rather
+  // than as a bug: a click landing on the padding of a button has the button as its target
+  // and works, and a click landing on the label or the icon inside it has the child as its
+  // target and does nothing. Reported from a phone and from Edge as "sometimes it works" —
+  // and both broken buttons are exactly the ones with an element inside them, `admin-lock`
+  // around its `<span>` and `nav-toggle` around its `<svg>`.
+  //
+  // The top of this very handler already does it this way, three times over, for the
+  // navigation items — "a nav item contains an icon and a label, and a click landing on
+  // either of those has a target that is not the button". The same sentence was true here
+  // and nobody had joined it up.
+  //
+  // `closest` and not a list of the buttons that happen to have children: the next button
+  // somebody gives an icon to must not silently stop working.
+  const clicked =
+    event.target && event.target.closest ? event.target.closest("button") : null;
+  const id = clicked ? clicked.id : event.target ? event.target.id : "";
   if (id === "nav-toggle") {
     openDrawer(!document.getElementById("nav").classList.contains("open"));
     return;
@@ -6872,21 +6890,21 @@ document.addEventListener("click", event => {
     if (button) button.focus();
     return;
   }
-  if (event.target && event.target.id === "procs-load") toggleProcesses();
-  if (event.target && event.target.id === "procs-refresh") loadProcesses();
-  if (event.target && event.target.id === "netdiag-run") runNetworkDiagnosis();
-  if (event.target && event.target.id === "netdiag-hide") {
+  if (id === "procs-load") toggleProcesses();
+  if (id === "procs-refresh") loadProcesses();
+  if (id === "netdiag-run") runNetworkDiagnosis();
+  if (id === "netdiag-hide") {
     netdiagShown = false;
     const out = document.getElementById("netdiag");
     if (out) out.innerHTML = "";
     event.target.remove();
   }
-  if (event.target && event.target.id === "settings-save") saveSettings("identity");
-  if (event.target && event.target.id === "net-save") saveSettings("network");
-  if (event.target && event.target.id === "token-rotate") rotateToken();
-  if (event.target && event.target.id === "net-confirm") confirmNetwork();
-  if (event.target && (event.target.id === "mode-dhcp" || event.target.id === "mode-static")) {
-    pendingMode = event.target.id === "mode-static" ? "static" : "dhcp";
+  if (id === "settings-save") saveSettings("identity");
+  if (id === "net-save") saveSettings("network");
+  if (id === "token-rotate") rotateToken();
+  if (id === "net-confirm") confirmNetwork();
+  if ((id === "mode-dhcp" || id === "mode-static")) {
+    pendingMode = id === "mode-static" ? "static" : "dhcp";
     settingsView.config = settingsView.config || {};
     settingsView.config.network = Object.assign({}, settingsView.config.network, { mode: pendingMode });
     // Only the addressing card. Redrawing the identity form as well would throw away a
@@ -6895,22 +6913,22 @@ document.addEventListener("click", event => {
     const host = document.getElementById("net-config");
     if (host) host.outerHTML = addressingCard();
   }
-  if (event.target && event.target.id === "wifi-scan") wifiPost({ action: "scan" });
-  if (event.target && event.target.id === "wifi-join") wifiJoin();
-  if (event.target && event.target.id === "wifi-forget") {
+  if (id === "wifi-scan") wifiPost({ action: "scan" });
+  if (id === "wifi-join") wifiJoin();
+  if (id === "wifi-forget") {
     if (confirm("Forget the stored wireless network? The machine will not rejoin it after a restart.")) {
       wifiPost({ action: "forget" });
     }
   }
-  if (event.target && event.target.id === "term-window") {
+  if (id === "term-window") {
     // Named, so a second click focuses the window that is already open rather than
     // opening another one onto a shell that only allows a single session.
     window.open(location.pathname + "?view=terminal", "plexos-terminal",
                 "width=1100,height=760,resizable=yes");
   }
-  if (event.target && event.target.id === "term-open") termOpen(false);
-  if (event.target && event.target.id === "term-takeover") termOpen(true);
-  if (event.target && event.target.id === "term-close") {
+  if (id === "term-open") termOpen(false);
+  if (id === "term-takeover") termOpen(true);
+  if (id === "term-close") {
     const id = termId; termId = null;
     if (id) termPost({ action: "close", id }).catch(() => {});
     termStatus("closed");

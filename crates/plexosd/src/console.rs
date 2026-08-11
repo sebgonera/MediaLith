@@ -3398,6 +3398,71 @@ console.log("OK");
     }
 
     #[test]
+    fn a_click_is_attributed_to_the_button_and_not_to_whatever_is_inside_it() {
+        // Reported from a phone and from Edge as "sometimes it works". A click landing on
+        // the padding of a button has the button as its target; one landing on the label or
+        // the icon inside it has the child as its target. The dispatcher read
+        // `event.target.id`, so `admin-lock` — whose whole visible surface is a `<span>` —
+        // did nothing when you clicked the word, and `nav-toggle` did nothing when you
+        // clicked the icon.
+        //
+        // Nothing in this suite could see it. The page parsed, every id it addressed
+        // existed, no id named two elements, every class was defined. The *text* was right
+        // and the behaviour was wrong, which is the third time this file has produced that
+        // combination.
+        //
+        // So the property is asserted where it lives: the dispatcher resolves a click to
+        // the enclosing button before it looks at an id. Asserting instead that no
+        // dispatched button contains a child element would be a list that goes stale the
+        // next time somebody adds an icon.
+        let script = page_script();
+        let handler = script
+            .split_once("document.addEventListener(\"click\"")
+            .map(|(_, rest)| rest)
+            .expect("the page dispatches clicks in one place");
+        let handler = &handler[..handler.find("\n});").unwrap_or(handler.len())];
+
+        assert!(
+            handler.contains("closest(\"button\")"),
+            "the dispatcher must resolve a click to its button: {handler}"
+        );
+
+        let reads_target_directly = handler
+            .lines()
+            .filter(|line| line.contains("event.target.id"))
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .count();
+        assert!(
+            reads_target_directly <= 1,
+            "only the fallback may read event.target.id, and it is reached when the click \
+             was not on a button at all"
+        );
+
+        // And every button the dispatcher names is one the page can actually produce --
+        // either written in the markup or written by a template. A typo here is a control
+        // that silently does nothing, which is the same symptom by a different route.
+        let mut dispatched = Vec::new();
+        for (index, _) in handler.match_indices("id === \"") {
+            let rest = &handler[index + "id === \"".len()..];
+            if let Some(end) = rest.find('"') {
+                dispatched.push(&rest[..end]);
+            }
+        }
+        assert!(dispatched.len() >= 6, "found {dispatched:?}");
+        for name in dispatched {
+            // Written in the markup, or written by a template, or given an id in script --
+            // the same three ways `every_element_the_script_reaches_for_exists_in_the_markup`
+            // already accepts, because the terminal's take-over button is built that way.
+            let exists = PAGE.contains(&format!("id=\"{name}\""))
+                || script.contains(&format!(".id = \"{name}\""));
+            assert!(
+                exists,
+                "the dispatcher answers to {name:?}, which nothing on the page creates"
+            );
+        }
+    }
+
+    #[test]
     fn the_theme_is_this_browsers_business_and_has_three_states() {
         // Three, not two: light, dark, and the default -- no choice made, so the operating
         // system decides. The third is the one that gets dropped, and dropping it means a
