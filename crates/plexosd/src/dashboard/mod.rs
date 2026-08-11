@@ -95,6 +95,20 @@ const QUIET_AFTER: Duration = Duration::from_secs(60);
 /// returns.
 const NOTICE: Duration = Duration::from_secs(8);
 
+/// How long an unchanged screen goes before being painted again anyway.
+///
+/// Thirty seconds, and it exists because this dashboard does not own the terminal quite as
+/// completely as it would like. PID 1's own service lines still go to `/dev/console`, which
+/// is the foreground virtual terminal, which is this one — deliberately, because they are
+/// what somebody needs if the dashboard is *not* on the screen. They are rare, and without
+/// this they would sit in the middle of the drawing until something else happened to change
+/// a frame, which on a healthy machine can be a minute.
+///
+/// It does not undo the silence: nothing is painted at all once [`QUIET_AFTER`] has passed,
+/// so the kernel's blank timer still runs out and the panel still powers down. This only
+/// bounds how long a stray line can sit on a screen somebody is standing at.
+const REPAINT_EVERY: Duration = Duration::from_secs(30);
+
 /// The size to draw at when the terminal will not say.
 ///
 /// The smallest thing anybody has: at this size the pairing screen reports that it has no
@@ -218,6 +232,7 @@ fn draw(
     };
 
     let mut painted: Option<String> = None;
+    let mut last_painted: Option<Instant> = None;
     let mut last_key = Instant::now();
 
     loop {
@@ -251,10 +266,12 @@ fn draw(
         // replaced immediately by the truth.
         if last_key.elapsed() < QUIET_AFTER {
             let next = render::frame(&state.screen, &facts, rows, columns);
-            if painted.as_deref() != Some(next.as_str()) {
+            let overdue = last_painted.is_none_or(|at| at.elapsed() >= REPAINT_EVERY);
+            if overdue || painted.as_deref() != Some(next.as_str()) {
                 let _ = writer.write_all(next.as_bytes());
                 let _ = writer.flush();
                 painted = Some(next);
+                last_painted = Some(Instant::now());
             }
         }
 
