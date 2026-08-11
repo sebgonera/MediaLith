@@ -55,6 +55,20 @@
     --shell: #eef1f5;
     --header-h: 3.5rem;
     --nav-w: 14rem;
+
+    /* How wide a view is allowed to get.
+       At 74rem the console used about a third of a 2560 px screen and left the rest empty,
+       which is what this number is for. It is a cap rather than a target: past about 1600 px
+       a row of text stops being one thing the eye takes in, and the cards inside would become
+       large empty rectangles rather than denser ones. The view is centred in what is left
+       beside the sidebar, so the space above the cap reads as margin rather than as a void on
+       the right. */
+    --view-max: 90rem;
+  }
+
+  /* Roughly a 1900 px window and up: the extra room is worth spending, but only to 1600. */
+  @media (min-width: 118rem) {
+    :root { --view-max: 100rem; }
   }
   /* ------------------------------------------------------------------------------------
      The dark palette, written twice, and deliberately.
@@ -288,7 +302,7 @@
     min-width: 0;
     padding: 1.25rem 1.25rem 4rem;
   }
-  .content > .view { max-width: 74rem; }
+  .content > .view { max-width: var(--view-max); margin-inline: auto; }
 
   /* Only the current one is in the document's flow. `hidden` rather than a class, because
      an element that is `hidden` is out of the accessibility tree as well as off the screen
@@ -685,6 +699,64 @@
     grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
     gap: .65rem;
     margin: .3rem 0 0;
+  }
+
+  /* ------------------------------------------------------------------------------------
+     The six primary readings.
+
+     No box, no border, no shadow: a rule between them and air around them. Six framed tiles
+     read as six objects to be looked at one at a time; six rows of the same shape read as one
+     surface, and the meters line up down the column, which is what makes the panel scannable
+     from a distance.
+
+     Two columns from about 62rem of *card* width, three from about 92rem. The card is 2fr of
+     the Overview grid, so three columns only appear on a genuinely wide screen -- which is
+     the point: the extra width buys density rather than stretch.
+     ------------------------------------------------------------------------------------ */
+  .gauges {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    gap: .5rem 1.6rem;
+    margin: .3rem 0 0;
+  }
+  .gauge { min-width: 0; padding: .5rem 0 .6rem; }
+  .gauge .line {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: .6rem;
+  }
+  .gauge .k {
+    font-size: .84rem;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Tabular figures here, unlike the tiles: these sit in a column and the decimal points
+     lining up is the whole reason the column reads as one thing. */
+  .gauge .v {
+    font-size: 1.4rem;
+    font-weight: 650;
+    line-height: 1.1;
+    letter-spacing: -.01em;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .gauge .v.words { font-size: 1.05rem; letter-spacing: 0; }
+  .gauge .v .u {
+    font-size: .78rem;
+    font-weight: 500;
+    color: var(--muted);
+    margin-left: .12rem;
+  }
+  .gauge .meter { margin-top: .35rem; }
+  .gauge .spark { height: 18px; margin-top: .2rem; opacity: .75; }
+  .gauge .sub {
+    margin-top: .3rem;
+    font-size: .74rem;
+    line-height: 1.35;
+    color: var(--muted);
   }
 
   .tile {
@@ -1112,11 +1184,53 @@
      the first render of the Plex view showed, with the header floating halfway down a page
      of summary cards. The same trap is already recorded on `#terminal.folded` a few hundred
      lines up. An id in a layout rule needs the state in the selector. */
-  #view-overview:not([hidden]) { display: flex; flex-direction: column; }
-  #view-overview > .summary { order: 1; }
-  #view-overview > #metrics { order: 3; }
-  #view-overview > #main { order: 4; }
-  #view-overview > #main.problems { order: 2; }
+  /* ------------------------------------------------------------------------------------
+     The Overview's composition below the summary row.
+
+     Two columns on a desk: what the machine is doing on the left, and a rail on the right
+     for what state it is in. The rail is where Now Playing and Recent Events will go when
+     there is something real to put in them; it is sized for that now so their arrival is a
+     card rather than a re-layout.
+
+     Explicit columns rather than auto-placement, because the health panel changes shape:
+     normally it is a rail card, and when something is wrong it takes the full width and goes
+     first. `.alert` on the grid drives that rather than `:has()`, which would work here but
+     puts the condition in the stylesheet where nothing can test it -- the class is set from
+     the same data the panel was built from.
+     ------------------------------------------------------------------------------------ */
+  .ovgrid {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    /* The second row takes the slack, and that is what keeps the rail tight. The activity
+       card spans both rows and is much the tallest thing here, so with two `auto` rows the
+       browser shares its height between them and the snapshot was pushed a hundred pixels
+       clear of the health card above it -- a gap that looked like a missing card. `auto 1fr`
+       sizes row one to the health card and lets row two absorb the rest. */
+    grid-template-rows: auto 1fr;
+    gap: 1rem;
+    align-items: start;
+  }
+  .ovgrid > #metrics  { grid-column: 1; grid-row: 1 / span 2; margin-bottom: 0; }
+  .ovgrid > #main     { grid-column: 2; grid-row: 1; }
+  .ovgrid > #snapshot { grid-column: 2; grid-row: 2; margin-bottom: 0; }
+
+  .ovgrid.alert > #main     { grid-column: 1 / -1; grid-row: 1; }
+  .ovgrid.alert > #metrics  { grid-row: 2 / span 2; }
+  .ovgrid.alert > #snapshot { grid-row: 2; }
+
+  /* One column below roughly 1250 px, where a 1fr rail stops being wide enough for a meter
+     and a label on one line. Everything reverts to document order: health, activity,
+     snapshot -- status first, which is the right order on a phone as well. */
+  @media (max-width: 78rem) {
+    .ovgrid { grid-template-columns: minmax(0, 1fr); }
+    .ovgrid > #metrics,
+    .ovgrid > #main,
+    .ovgrid > #snapshot,
+    .ovgrid.alert > #metrics,
+    .ovgrid.alert > #main,
+    .ovgrid.alert > #snapshot { grid-column: 1; grid-row: auto; }
+    .ovgrid > #metrics { margin-bottom: 0; }
+  }
 
   /* ------------------------------------------------------------------------------------
      The four cards at the top of the Overview.
@@ -1125,11 +1239,23 @@
      number: the strip down the left edge carries it, so the four read as a row of
      indicators from across a room and as four cards from a desk.
      ------------------------------------------------------------------------------------ */
+  /* Four, then two by two, then one. Stated rather than left to `auto-fit`, which fits as
+     many as will go and at 1024 put three across with the fourth alone underneath -- a
+     ragged row that reads as a layout accident. Three widths, three deliberate shapes. */
   .summary {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: .9rem;
     margin-bottom: 1.25rem;
+  }
+  /* Immediately after the rule it overrides, and that placement is the whole of it: a media
+     query adds no specificity, so the first version of this sat further up the sheet and lost
+     to the four-column rule below it. A 1024 px screen kept four cards, each one narrow
+     enough that "Open Plex" and "Manage" stacked and the Plex version broke across two lines
+     mid-hash -- which looks like a card that does not fit rather than a layout that has a
+     step at the wrong width. */
+  @media (max-width: 78rem) {
+    .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
   .sum {
     display: flex;
@@ -1336,27 +1462,51 @@
   /* A word that has to read as a caution inside an otherwise ordinary line. */
   .warnink { color: var(--degraded); font-weight: 600; }
 
-  /* Everything is fine, said in one line. */
-  .allwell {
+  /* ------------------------------------------------------------------------------------
+     The health card: a lamp, a word, a count, a sentence.
+
+     The strip down the left edge is the same device the summary cards use, so the four at the
+     top and this one in the rail read as one family rather than as two ideas about how to show
+     a state.
+     ------------------------------------------------------------------------------------ */
+  .health { border-left: 4px solid var(--muted); }
+  .health.ready       { border-left-color: var(--ready); }
+  .health.degraded    { border-left-color: var(--degraded); }
+  .health.unavailable { border-left-color: var(--unavailable); }
+
+  .health-head {
     display: flex;
-    align-items: center;
-    gap: .75rem;
+    align-items: baseline;
     flex-wrap: wrap;
-    border-left: 4px solid var(--ready);
+    gap: .5rem;
   }
-  .allwell .dot {
-    flex: 0 0 auto;
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    background: var(--ready);
-    box-shadow: 0 0 0 4px var(--ready-soft);
+  /* The lamp is not on the baseline with the words -- it is a dot, and a dot sitting on a
+     text baseline looks dropped. */
+  .health-head .statedot { align-self: center; }
+  .health.ready .statedot       { color: var(--ready);       box-shadow: 0 0 0 4px var(--ready-soft); }
+  .health.degraded .statedot    { color: var(--degraded);    box-shadow: 0 0 0 4px var(--degraded-soft); }
+  .health.unavailable .statedot { color: var(--unavailable); box-shadow: 0 0 0 4px var(--unavailable-soft); }
+  .health-head .word { font-size: 1.15rem; font-weight: 650; letter-spacing: -.01em; }
+  .health.ready .word       { color: var(--ready); }
+  .health.degraded .word    { color: var(--degraded); }
+  .health.unavailable .word { color: var(--unavailable); }
+  .health-head .count { color: var(--muted); font-size: .86rem; }
+  .health > .hint { margin: .35rem 0 .8rem; }
+  .health .findings { margin-bottom: .8rem; }
+  .health .row { margin-top: 0; }
+  .health #health-toggle { padding: .4rem .7rem; font-size: .84rem; }
+  .health .checks { margin-top: .8rem; }
+
+  /* ------------------------------------------------------------------------------------
+     The snapshot: what this appliance *is*, in five lines, deliberately compact.
+     ------------------------------------------------------------------------------------ */
+  #snapshot dl {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: .45rem .8rem;
+    font-size: .88rem;
   }
-  .allwell > div { flex: 1 1 20rem; min-width: 0; }
-  .allwell .hint { display: block; color: var(--muted); font-size: .88rem; }
-  .allwell #health-toggle { margin-left: auto; }
-  /* The list, when it is asked for, goes under the row rather than beside it. */
-  .allwell .checks, .allwell .findings { flex: 1 0 100%; margin-top: .4rem; }
+  #snapshot dd { text-align: right; overflow-wrap: anywhere; }
+  #snapshot .mono { font-size: .82rem; }
 
   /* A statement the page makes about itself rather than about the machine: "there is no
      source for this yet". Quiet, and never dressed as a failure. */
@@ -1389,10 +1539,13 @@
     .navfoot .group { display: none; }
     #theme { font-size: .68rem; padding: .3rem .1rem; }
     .content { padding: 1rem .9rem 3rem; }
-    /* The first badge to go when the bar runs out of room, because the activity card says
-       the same thing and says more. A badge clipped halfway through its own text reads as a
-       rendering fault rather than as a bar that is full. */
+    /* The first things to go when the bar runs out of room. Uptime because the activity card
+       says the same thing and says more; the version because the Overview's snapshot card
+       carries it in full. A badge clipped halfway through its own text reads as a rendering
+       fault rather than as a bar that is full -- which is what "SLOT A" did here, sliced down
+       the middle by the lock button. */
     #uptime { display: none; }
+    header .version { display: none; }
   }
 
   @media (max-width: 40rem) {
@@ -1451,6 +1604,7 @@
 
     .content { padding: .9rem .7rem 3rem; }
     .summary { grid-template-columns: minmax(0, 1fr); gap: .7rem; }
+    .ovgrid { gap: .7rem; }
     .card { padding: .95rem 1rem; }
     /* One column, and the arrow turns a quarter. */
     .slots { grid-template-columns: minmax(0, 1fr); }
@@ -1626,8 +1780,11 @@
            itself. -->
       <div class="navfoot">
         <label class="group" for="theme">Appearance</label>
+        <!-- One word each. "Match the system" is clearer prose and does not fit the
+             icon-width rail, where the control renders as "Mat…" and says nothing at all.
+             The label above it carries the subject. -->
         <select id="theme">
-          <option value="system">Match the system</option>
+          <option value="system">System</option>
           <option value="light">Light</option>
           <option value="dark">Dark</option>
         </select>
@@ -1657,6 +1814,12 @@
           <div class="sum" id="sum-network"><div class="head">Network</div>
             <div class="state">…</div></div>
         </div>
+
+        <!-- Everything below the summary row sits in one grid so the composition is decided
+             in one place: activity on the left, and a rail on the right holding the health
+             panel and a compact snapshot. The rail is deliberately the home for Now Playing
+             and Recent Events when those exist; nothing stands in for them meanwhile. -->
+        <div class="ovgrid" id="ovgrid">
 
         <!-- The activity card, unchanged in behaviour and moved whole. Deliberately no
              aria-live: it changes twice a second by design, and a live region reading eight
@@ -1722,6 +1885,16 @@
         <main id="main" aria-live="polite">
           <p class="empty">Loading…</p>
         </main>
+
+        <!-- The appliance in five lines. Written once here so the poll only ever replaces its
+             body, and deliberately not a copy of the header: the bar answers "is this thing
+             all right, right now" in chips, and this answers "what is this thing" in full. -->
+        <section class="card" id="snapshot">
+          <h3>System snapshot</h3>
+          <div id="snapshot-body"><p class="empty">Loading…</p></div>
+        </section>
+
+        </div>
       </section>
 
       <!-- -------------------------------------------------------------------- PLEX -->
@@ -2477,6 +2650,9 @@ async function loadSettings() {
   // own fields by id without caring which view is showing.
   const host = document.getElementById("settings");
   if (host) host.outerHTML = hostedSettingsCard();
+  // The snapshot reads the hostname and the timezone off this reply, and this is the only
+  // thing that fetches it -- so a snapshot drawn before the settings arrived has to be told.
+  renderSnapshot();
   const addressing = document.getElementById("net-config");
   if (addressing) {
     addressing.outerHTML = addressingCard();
@@ -3480,17 +3656,22 @@ function healthSection(status) {
     ? "unavailable"
     : problems.length ? "degraded" : "ready";
 
+  // Beside the state word, so it reads "Healthy · 3 checks pass" rather than repeating the
+  // word. The sentence under it carries the detail.
   const headline = failed.length
-    ? `${failed.length} health ${failed.length === 1 ? "check has" : "checks have"} failed`
+    ? `${failed.length} of ${checks.length} checks failed`
     : problems.length
       ? `${problems.length} ${problems.length === 1 ? "thing needs" : "things need"} attention`
-      : "Nothing is wrong";
+      : `${checks.length} ${checks.length === 1 ? "check passes" : "checks pass"}`;
 
   const lead = failed.length
     ? "The boot health gate is what decides whether this slot becomes permanent. A gate that keeps failing hands the machine back to the previous system."
     : problems.length
       ? "The machine works. These would make it slower, or worse, than the hardware allows."
-      : `Hardware transcoding is ${esc(gpu.health || "unknown")}, ${checks.length} boot ${checks.length === 1 ? "check passes" : "checks pass"}, and nothing has reported a fault.`;
+      // No longer repeats the check count -- that is beside the word above now -- and no
+      // longer repeats the transcoding verdict, which is the whole subject of a summary card
+      // four inches up the same page.
+      : "Every boot check passed and nothing has reported a fault.";
 
   const failures = failed.map(c => `
     <li>
@@ -3526,31 +3707,73 @@ function healthSection(status) {
       ${healthOpen ? "Hide" : "Show"} all ${checks.length} checks${quiet.length ? ` and ${quiet.length} ${quiet.length === 1 ? "note" : "notes"}` : ""}
     </button>`;
 
-  // A working machine gets one line. The hero -- a coloured panel with a heading in it -- is
-  // for a machine with something to say, and spending it on "Nothing is wrong" made the
-  // largest, loudest thing on the Overview the thing that carries the least information.
-  // The colour still says it, in a strip and a word.
-  if (level === "ready") {
-    return `
-      <section class="card allwell">
-        <span class="dot" aria-hidden="true"></span>
-        <div>
-          <strong>${esc(headline)}.</strong>
-          <span class="hint">${lead}</span>
-        </div>
-        ${toggle}
-        ${detail}
-      </section>`;
-  }
+  // One component in three states rather than two different cards. It was a full-width
+  // banner across the bottom of the page, which is where a footer goes and not where a
+  // status light goes; it is a card in the rail now, and it reads the same way whatever it
+  // has to say -- a lamp, a word, a sentence, and the checks behind a control.
+  //
+  // What changes with the state is weight, not shape: the word takes the colour, and a
+  // machine with something wrong also gets the findings and their remedies, which is what
+  // makes the card dominate. The grid does the rest -- see `.ovgrid.alert`.
+  const word = { ready: "Healthy", degraded: "Warning", unavailable: "Failed" }[level];
 
   return `
-    <section class="hero ${esc(level)}">
-      <h2>${esc(headline)}</h2>
-      <p class="lead">${lead}</p>
+    <section class="card health ${esc(level)}">
+      <h3>System health</h3>
+      <div class="health-head">
+        <span class="statedot" aria-hidden="true"></span>
+        <span class="word">${esc(word)}</span>
+        <span class="count">${esc(headline)}</span>
+      </div>
+      <p class="hint">${lead}</p>
       ${failures || wrong ? `<ul class="findings">${failures}${wrong}</ul>` : ""}
       <div class="row">${toggle}</div>
       ${detail}
     </section>`;
+}
+
+// ------------------------------------------------------------------------------------
+// The snapshot.
+//
+// Five lines, and choosing them was the whole of the work: every fact this appliance knows
+// is already somewhere on the Overview, so a card that took the "most useful" ones would be
+// a second copy of the header and the summary row. These five are the ones that are *not*
+// anywhere else on this page -- what image this is, which half of the disk it came from,
+// what the machine calls itself, what it thinks the time is, and the hash that identifies
+// the /usr it verified.
+//
+// Deliberately not here: uptime and the address, which the header carries; the transcoding
+// verdict and the share count, which are summary cards; temperature, which is a live figure
+// and belongs in Activity. Duplication is fine when the two say different things, and none
+// of those would have.
+// ------------------------------------------------------------------------------------
+let lastSnapshotRendered = null;
+
+function renderSnapshot() {
+  const host = document.getElementById("snapshot-body");
+  if (!host || !latestStatus) return;
+  const p = latestStatus.product || {};
+  const sys = ((settingsView || {}).config || {}).system || {};
+  const hostname = (settingsView || {}).hostname_now || sys.hostname;
+
+  // Twelve characters is enough to tell two images apart by eye and short enough to sit on
+  // one line in a rail. The whole hash is in the System view.
+  const hash = p.root_hash
+    ? `<span class="mono" title="${esc(p.root_hash)}">${esc(p.root_hash.slice(0, 12))}…</span>`
+    : `<span class="empty">not reported</span>`;
+
+  const rows = [
+    ["Version", p.version ? `<span class="mono">${esc(p.version)}</span>` : `<span class="empty">unknown</span>`],
+    ["Slot", p.slot ? `<span class="mono">${esc(p.slot)}</span>` : `<span class="empty">unknown</span>`],
+    ["Hostname", hostname ? `<span class="mono">${esc(hostname)}</span>` : `<span class="empty">not set</span>`],
+    ["Timezone", sys.timezone ? esc(sys.timezone) : `<span class="empty">not set</span>`],
+    ["Root hash", hash],
+  ];
+
+  const markup = `<dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>`;
+  if (markup === lastSnapshotRendered) return;
+  lastSnapshotRendered = markup;
+  host.innerHTML = markup;
 }
 
 /// System: what this image is, and what it is running on.
@@ -3803,9 +4026,13 @@ function render(status) {
   // before and not a new hazard, because none of the three holds anything anybody types.
   const overview = document.getElementById("main");
   overview.innerHTML = healthSection(status);
-  // Moves this region above the activity card when it has something to report. The class is
-  // set from the same data the section was just built from, so the two cannot disagree.
-  overview.classList.toggle("problems", healthHasProblems(status));
+  // Takes the panel out of the rail and across the full width when it has something to
+  // report -- a list of findings and their remedies in a 1fr column is a column of hyphens.
+  // Both classes are set from the same data the section was just built from, so neither can
+  // disagree with what is in it.
+  const wrong = healthHasProblems(status);
+  overview.classList.toggle("problems", wrong);
+  document.getElementById("ovgrid").classList.toggle("alert", wrong);
   document.getElementById("sys-body").innerHTML = systemSection(status);
   document.getElementById("net-body").innerHTML = networkCard(status.network || {});
 
@@ -3821,6 +4048,7 @@ function render(status) {
 
   latestStatus = status;
   renderSummary();
+  renderSnapshot();
   // The card it writes into has just been built, which may be the thing it was waiting for.
   maybeDiagnose();
 }
@@ -4960,6 +5188,13 @@ function metricSpark(ring, ceiling) {
   // rendering fault rather than as "there is not much history yet" -- which is what the first
   // rendered screenshot of this card showed, and the reason this number is not 2.
   if (ring.length < 3) return "";
+
+  // Nothing to draw when nothing has moved. An appliance is idle almost all of the time, so
+  // the common case was a dead-flat line sitting directly under an almost-empty meter, and
+  // the two together read as two bars rather than as a bar and a trend. A trend of a
+  // quantity that has not changed is not information; it is a second horizontal rule.
+  const span = Math.max(...ring) - Math.min(...ring);
+  if (span < 2) return "";
   const top = ceiling || Math.max(100, ...ring);
   // Spread over the points there *are*, not over the ring's capacity. Dividing by
   // SPARK_POINTS drew a line occupying four samples' worth of a sixty-sample axis -- a stub
@@ -4976,6 +5211,47 @@ function metricSpark(ring, ceiling) {
     + `<polyline vector-effect="non-scaling-stroke" points="${points}"></polyline>`
     + `<polyline class="now" vector-effect="non-scaling-stroke" points="${last}"></polyline>`
     + `</svg>`;
+}
+
+/**
+ * Whether a graphics clock of zero should be read as "Idle" rather than printed.
+ *
+ * A named function with one job, so the rule can be run and checked rather than read. The
+ * rule has a safety condition and the condition is the whole point: a part with nothing to
+ * do parks its clock, so `0 MHz` is the *normal* state of a working appliance and looked
+ * like a broken one -- but `0 MHz` on a machine whose transcoding stack is degraded or
+ * unavailable is exactly the reading somebody should be staring at, and calling that "Idle"
+ * would hide the failure this project exists to make loud.
+ *
+ * So: only when the GPU report says `ready`, and only for an exact zero. Anything else --
+ * no report yet, a driver that reports no frequency at all -- keeps the figure.
+ */
+function gpuIsIdle(health, clock) {
+  return health === "ready" && clock === 0;
+}
+
+/**
+ * One primary reading: a name, a figure, a meter, and a line of context.
+ *
+ * The six of these are what the activity card is for, and they are a different shape from
+ * the tiles below them on purpose. A tile is a box with a number in it and reads at desk
+ * distance; this reads across a room, because the name and the figure share a line and the
+ * meter under them is the same width every time, so six of them make one column of bars the
+ * eye can run down rather than six separate objects to look at in turn.
+ */
+function metricGauge(label, value, unit, sub, percent, warn, bad, spark) {
+  // A figure made of words -- "Idle" -- steps down a size, for the reason the tiles do it:
+  // at the figure size it competes with the numbers beside it and wraps.
+  const words = /[a-z]/.test(String(value)) ? " words" : "";
+  return `<div class="gauge">
+      <div class="line">
+        <span class="k">${esc(label)}</span>
+        <span class="v${words}">${esc(value)}${unit ? `<span class="u">${esc(unit)}</span>` : ""}</span>
+      </div>
+      ${percent === undefined ? "" : metricMeter(percent, warn, bad)}
+      ${spark || ""}
+      ${sub ? `<div class="sub">${esc(sub)}</div>` : ""}
+    </div>`;
 }
 
 /** One stat tile. */
@@ -5035,40 +5311,65 @@ function renderMetrics(m) {
   // slowly and are read differently. They were one undifferentiated grid of eleven, in which
   // "context switches per second" sat at the same weight as "is Plex transcoding", and the
   // eye had no reason to land anywhere.
-  const primary = [
-    metricTile("Processor", metricNum(cpu.busy_percent), "%",
-      cores ? `${cores} cores` + (cpu.iowait_percent > 1 ? ` · ${metricNum(cpu.iowait_percent)}% waiting on disk` : "") : "",
-      metricMeter(cpu.busy_percent) + metricSpark(metricsHistory.cpu, 100)),
+  // ----------------------------------------------------------------------------------
+  // The graphics reading, and the one place this card says a word instead of a number.
+  //
+  // `0 MHz` on an idle part reads as a broken one. It is not: an Intel GPU with nothing to
+  // do parks its clock, and this appliance is idle almost all of the time, so the most
+  // common state of a working machine looked like a fault.
+  //
+  // Converted only when the GPU report says `ready`. That is the point of the condition
+  // rather than a formality: `degraded` and `unavailable` are exactly the states where a
+  // zero is worth staring at, and calling those "Idle" would hide the failure this project
+  // exists to make loud. Anything else -- no report yet, a driver that reports no
+  // frequency -- keeps the figure.
+  const gpuHealth = ((latestStatus || {}).gpu || {}).health;
+  const clock = m.gpu ? m.gpu.frequency_mhz : null;
+  const ceiling = m.gpu && m.gpu.max_frequency_mhz;
+  const gpuIdle = gpuIsIdle(gpuHealth, clock);
+  const gpuGauge = !m.gpu
+    ? metricGauge("Graphics", "—", "", "not reported by this driver")
+    : gpuIdle
+      ? metricGauge("Graphics", "Idle", "",
+          `0 MHz of ${ceiling || "?"} MHz · ${m.gpu.card}`, 0, 101, 102)
+      : metricGauge("Graphics", clock === null ? "—" : String(clock), "MHz",
+          `of ${ceiling || "?"} MHz · ${m.gpu.card}`,
+          // Explicitly not a load figure, and the sub-line says "clock" for that reason. A
+          // part can sit at its ceiling doing very little.
+          ceiling ? (clock / ceiling) * 100 : null, 101, 102);
 
-    metricTile("Memory", metricNum(memoryPercent), "%",
+  const primary = [
+    metricGauge("CPU", metricNum(cpu.busy_percent), "%",
+      cores ? `${cores} cores` + (cpu.iowait_percent > 1 ? ` · ${metricNum(cpu.iowait_percent)}% waiting on disk` : "") : "",
+      cpu.busy_percent, undefined, undefined, metricSpark(metricsHistory.cpu, 100)),
+
+    metricGauge("Memory", metricNum(memoryPercent), "%",
       `${metricBytes(memory.total - memory.available)} of ${metricBytes(memory.total)}`,
-      metricMeter(memoryPercent) + metricSpark(metricsHistory.memory, 100)),
+      memoryPercent, undefined, undefined, metricSpark(metricsHistory.memory, 100)),
 
     // Plex's own figure, which is the one this appliance exists to be asked about: "the
     // machine is at 60%" does not say whether that is a transcode or this page polling
     // itself. Drawn against the core count rather than against 100, because one saturated
     // core out of eight is 100% of a core and an eighth of the machine.
-    metricTile("Plex processor", plex.present ? metricNum(plex.cpu_percent) : "—", plex.present ? "%" : "",
+    metricGauge("Plex CPU", plex.present ? metricNum(plex.cpu_percent) : "—", plex.present ? "%" : "",
       plex.present ? `of one core · ${cores} available` : "Plex is not installed",
-      plex.present
-        ? metricMeter(cores ? plex.cpu_percent / cores : plex.cpu_percent) + metricSpark(metricsHistory.plex, 100 * (cores || 1))
-        : ""),
+      plex.present ? (cores ? plex.cpu_percent / cores : plex.cpu_percent) : undefined,
+      undefined, undefined,
+      plex.present ? metricSpark(metricsHistory.plex, 100 * (cores || 1)) : ""),
 
-    metricTile("Plex memory", plex.present ? metricBytes(plex.memory) : "—", "",
+    metricGauge("Plex memory", plex.present ? metricBytes(plex.memory) : "—", "",
       plex.present && plex.memory_max
         ? `limit ${metricBytes(plex.memory_max)}` + (plex.pids ? ` · ${plex.pids} processes` : "")
         : plex.present ? "no limit set" : "",
-      plex.present && plex.memory_max
-        ? metricMeter((plex.memory / plex.memory_max) * 100)
-        : ""),
+      plex.present && plex.memory_max ? (plex.memory / plex.memory_max) * 100 : undefined),
 
-    m.gpu
-      ? metricTile("Graphics clock", m.gpu.frequency_mhz === null ? "—" : String(m.gpu.frequency_mhz), "MHz",
-          `of ${m.gpu.max_frequency_mhz || "?"} MHz · ${esc(m.gpu.card)}`,
-          // Explicitly not a load figure, and the label says "clock" for that reason. A
-          // part can sit at its ceiling doing very little.
-          metricMeter(m.gpu.max_frequency_mhz ? (m.gpu.frequency_mhz / m.gpu.max_frequency_mhz) * 100 : null, 101, 102))
-      : metricTile("Graphics clock", "—", "", "not reported by this driver", ""),
+    gpuGauge,
+
+    hottest
+      ? metricGauge("Temperature", metricNum(hottest.celsius), "°C",
+          `warmest of ${(m.temperatures || []).length} · ${hottest.zone}`,
+          hottest.celsius, 75, 90)
+      : metricGauge("Temperature", "—", "", "no thermal zone readable"),
   ].join("");
 
   const secondary = [
@@ -5084,19 +5385,15 @@ function renderMetrics(m) {
           metricMeter(rootFs.percent_used, 80, 92))
       : metricTile("Free on /", "—", "", "could not be read", ""),
 
-    hottest
-      ? metricTile("Warmest sensor", metricNum(hottest.celsius), "°C", esc(hottest.zone),
-          metricMeter(hottest.celsius, 75, 90))
-      : metricTile("Warmest sensor", "—", "", "no thermal zone readable", ""),
-
+    // Temperature was here and is a primary gauge now: it is a reading that goes wrong, and
+    // the four above it are readings that go up.
     metricTile("Load average", metricNum(m.load && m.load.one, 2), "",
-      m.load ? `${metricNum(m.load.five, 2)} at 5 min · ${metricNum(m.load.fifteen, 2)} at 15 · ${m.load.total} processes` : ""),
+      m.load ? `${metricNum(m.load.five, 2)} at 5 min · ${metricNum(m.load.fifteen, 2)} at 15` : ""),
 
-    // The context-switch rate used to be this tile's subtitle. It is a number for somebody
-    // who already suspects something, not a number anybody reads to find out whether their
-    // appliance is well, so it is in the detail below with the rest of its kind.
-    metricTile("Up", humanUptime(m.uptime_seconds) || "—", "",
-      m.load ? `${m.load.running} of ${m.load.total} runnable` : ""),
+    // Uptime is in the header, on every view, at every width. It was here as well and said
+    // exactly the same thing; what is left is the part the header does not carry.
+    metricTile("Processes", m.load ? String(m.load.total) : "—", "",
+      m.load ? `${m.load.running} runnable` : ""),
   ].join("");
 
   const coreRows = (cpu.cores || []).map((value, index) => `
@@ -5134,7 +5431,7 @@ function renderMetrics(m) {
   const notes = (m.notes || []).map(n => `<li>${esc(n)}</li>`).join("");
 
   document.getElementById("metrics-body").innerHTML = `
-    <div class="tiles">${primary}</div>
+    <div class="gauges">${primary}</div>
     <div class="tiles secondary">${secondary}</div>`;
 
   // Everything below, into the disclosure outside the redrawn region. Written only when it

@@ -2805,6 +2805,119 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_graphics_clock_is_only_called_idle_when_the_gpu_is_well() {
+        // `0 MHz` is the normal state of this appliance -- a part with nothing to do parks
+        // its clock -- and printed plainly it reads as a broken GPU. Saying "Idle" instead
+        // fixes that and introduces a way to hide the one failure this whole project exists
+        // to make loud, because `0 MHz` on a machine whose transcoding stack is degraded or
+        // unavailable is exactly the reading somebody should be staring at.
+        //
+        // So the condition is the feature, and it is checked by running it rather than by
+        // reading it: the interesting cases are the ones where the answer must be *no*.
+        let script = page_script();
+        let start = script
+            .find("function gpuIsIdle(")
+            .expect("the rule is a named function so that it can be run");
+        let end = script[start..]
+            .find("\n}\n")
+            .map(|at| start + at + "\n}".len())
+            .expect("and ends at a brace in the first column");
+
+        let Some(engine) = ["node", "deno", "qjs"].into_iter().find(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        }) else {
+            println!(
+                "skip: the idle rule was not run -- no node, deno or qjs on this host. \
+                 Install one, or a GPU that has failed will only be found by somebody \
+                 noticing that a broken machine says it is idle."
+            );
+            return;
+        };
+
+        // health, clock, and whether "Idle" may be shown.
+        let cases: [(&str, &str, bool); 7] = [
+            ("\"ready\"", "0", true),
+            ("\"degraded\"", "0", false),
+            ("\"unavailable\"", "0", false),
+            ("undefined", "0", false),
+            ("\"unknown\"", "0", false),
+            ("\"ready\"", "450", false),
+            ("\"ready\"", "null", false),
+        ];
+        let calls = cases
+            .iter()
+            .map(|(health, clock, _)| format!("gpuIsIdle({health}, {clock})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let program = format!(
+            "{}\nconsole.log([{calls}].join(\",\"));",
+            &script[start..end]
+        );
+
+        let output = std::process::Command::new(engine)
+            .args(["-e", &program])
+            .output()
+            .expect("the engine runs");
+        assert!(
+            output.status.success(),
+            "the idle rule did not run: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let got = String::from_utf8_lossy(&output.stdout);
+        let answers: Vec<&str> = got.trim().split(',').collect();
+        assert_eq!(answers.len(), cases.len(), "one answer per case: {got}");
+        for ((health, clock, want), got) in cases.iter().zip(answers) {
+            assert_eq!(
+                got,
+                if *want { "true" } else { "false" },
+                "gpuIsIdle({health}, {clock}) must be {want}: a degraded or unavailable \
+                 stack reporting zero is the reading that matters, and calling it idle \
+                 hides it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_overview_puts_activity_beside_a_rail_that_has_room_to_grow() {
+        // The rail is where Now Playing and Recent Events go when there is something real to
+        // put in them, and it is sized for that now so their arrival is a card rather than a
+        // re-layout. This asserts the arrangement exists, because the alternative -- three
+        // sections stacked down one column -- is what it replaced and is one deleted
+        // wrapper away.
+        assert!(
+            PAGE.contains("class=\"ovgrid\" id=\"ovgrid\""),
+            "the Overview's composition below the summary row is one grid"
+        );
+        for id in ["metrics", "main", "snapshot"] {
+            assert!(
+                PAGE.contains(&format!("id=\"{id}\"")),
+                "{id} is one of the three regions that grid places"
+            );
+        }
+
+        let style = page_style();
+        assert!(
+            style.contains(".ovgrid {"),
+            "and the grid is laid out in the stylesheet rather than inline"
+        );
+        // The failure case: a list of findings and their remedies in a one-third column is a
+        // column of hyphens, so the health panel leaves the rail when it has something to
+        // say. Driven by a class the render sets from the data it just drew.
+        assert!(
+            style.contains(".ovgrid.alert > #main"),
+            "a health panel with findings in it must be able to take the full width"
+        );
+        assert!(
+            page_script().contains("classList.toggle(\"alert\""),
+            "and that state comes from the same data the panel was built from"
+        );
+    }
+
+    #[test]
     fn every_severity_a_meter_can_reach_is_one_the_stylesheet_paints() {
         // A meter's whole job is that 96% does not look like 6%, and for the entire life of
         // the activity card it did. `metricLevel` returned `warn-metricLevel` and
