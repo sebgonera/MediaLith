@@ -419,6 +419,7 @@ decides, and `http::refusal` is the only thing that calls it.
 | `/api/power` | Shut down, restart |
 | `/api/pair` | Spend a pairing code for an administrator session (ADR-0019). **The one mutating route with no credential**, because it issues one — and it has nothing to spend unless somebody pressed P at the machine |
 | `/api/session` | Is this browser still an administrator, and sign it out |
+| `/api/browser-pair/*` | One authorised browser approving another (ADR-0019). `start`, `redeem` and `cancel` carry no credential — the first because asking is not being let in, the other two because they need a secret only the asking browser has. `inspect`, `approve` and `deny` are gated like everything else |
 | `/api/token` | Rotate the recovery device code. Revokes every session and any pairing offer |
 
 **Publisher tooling**, all on the build host:

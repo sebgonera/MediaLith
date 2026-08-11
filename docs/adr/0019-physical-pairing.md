@@ -120,6 +120,87 @@ is special, and the only way to know which is to trust the request that arrived.
 against 128 bits there is nothing to guess, and a rule that invalidated the offer on a wrong
 attempt would give anyone who can reach the port a way to stop the owner pairing.
 
+## Revision, 2026-08-11: one authorised browser approving another
+
+The decision above answers "how does the *first* browser get in". The question that follows
+it, an hour later, at a desktop on the other side of the house, was left with the answer
+this ADR was written to remove: fetch the recovery device code and type sixteen characters.
+
+**A browser that is already an administrator may approve one that is not.** The desktop
+asks, the phone approves, and MediaLith issues the desktop a session of its own.
+
+### Three ways in, and they are different chains
+
+| | What is trusted | What it produces |
+| --- | --- | --- |
+| **Physical console pairing** | Somebody is at the machine and pressed a key on it | An administrator session |
+| **Browser approval** | Somebody who is *already* an administrator said yes | A **separate** administrator session |
+| **Recovery device code** | Somebody knows the credential this machine printed once | Authentication directly, and may also approve |
+
+The second is the new one, and it is a delegation rather than a third kind of credential:
+the authority it spends is authority the appliance already granted, and what it produces is
+an ordinary [`session`] with the ordinary deadlines.
+
+### The phone is not a relay
+
+The obvious implementation hands the phone's session token to the desktop. It works, and it
+is wrong: a credential that travels between browsers exists in two places, cannot be revoked
+in one of them, and turns "sign this desktop out" into a question about which copy.
+
+What the phone sends is a sentence — *I approve request X*. Everything else is the
+appliance's own work: it mints the session, when the desktop redeems, out of the same store
+every other session comes from. There is no mechanism here for moving a session, and the
+tests assert the absence at the two boundaries where somebody might add one.
+
+### Two values, because a monitor is a public place
+
+A request has an **id**, which travels in the QR on the desktop's screen, and a **secret**,
+which never leaves the desktop that asked. Redeeming needs both.
+
+Collapsing them into one QR secret would be simpler, would look identical in every
+demonstration, and would hand the session to whoever photographed the monitor first. With
+the split, somebody who watched the entire exchange — the QR, the approval, the redemption
+— still holds one half of two.
+
+The secret is also what authorises cancelling, which is why cancelling needs no
+administrator: only the browser that asked can have it. Without that, an id read off
+somebody's screen would let a passer-by stop their pairing, repeatedly, from anywhere on the
+network.
+
+### Anybody may ask; only an administrator may answer
+
+`POST /api/browser-pair/start` carries no credential, because asking is not being let in: it
+creates a request that does nothing until an administrator approves it. `inspect`, `approve`
+and `deny` are `POST`s, so the existing gate has already demanded an administrator before
+they are reached — **no new authentication logic exists in this feature.**
+
+A browser holding the recovery device code may approve as well as one holding a session.
+That follows from ADR-0013 rather than being decided here: the recovery code already
+authorises installing an operating system and opening a root shell, so withholding "may let
+another browser in" from it would be a distinction with nothing behind it. It falls out of
+using `auth::authenticate` rather than being written anywhere.
+
+### The verification code is not a secret
+
+Four digits, derived from the request id, shown on both screens. The id is in a QR on a
+monitor, so anybody who could compute this could already have read it. It exists for the
+mistake a person actually makes — approving the wrong request, because two are in flight or
+because the phone shows one thing and the desk another. Four digits is a length somebody
+will genuinely compare; sixteen characters is a length they will glance at and assume.
+
+### What is deliberately not here
+
+**The requesting browser's IP address**, which the approval screen would have shown. The
+request path does not carry the peer address, and plumbing it touches thirty struct literals
+in the code that parses untrusted input — for a field that is informational by this ADR's
+own rules, since redemption must not be bound to an address that changes when a phone moves
+between access points. The verification code does the job it would have done, better.
+
+**Any memory of an approved browser.** No trusted-device list, no certificates, no
+"remember this computer". A browser approved yesterday whose tab has closed is a browser
+that asks again — which is the same property the sessions themselves have, and the reason
+there is nothing here to revoke separately.
+
 ## Alternatives considered
 
 **A code typed off the screen instead of scanned.** That is the device token, which is what
@@ -139,6 +220,17 @@ a signed token cannot be revoked without the table it was meant to replace.
 because they depend on the console font carrying U+2580, and a missing glyph renders as a
 blank cell — so the failure looks like a broken feature rather than like a font, and nothing
 in this repository could see it. Modules are spaces with a background colour instead.
+
+**Handing the approving browser's session to the approved one.** Considered and rejected
+above; recorded here because it is what almost every implementation of this does, and
+because it is invisible in testing — the desktop ends up authenticated either way.
+
+**A trusted-device list, so a desktop is approved once and remembered.** Rejected: it is a
+persistent credential wearing different clothes, it needs storage that survives a rollback,
+and it turns a five-minute question into a database somebody has to be able to audit and
+prune. The session already lasts twelve hours, which is the length of a day at a desk.
+
+**One QR secret instead of two values.** Rejected, at length, above.
 
 **Showing the QR code permanently.** Rejected: a usable credential standing on a screen is
 one anybody who walks past can photograph, and the physical action is the entire security
