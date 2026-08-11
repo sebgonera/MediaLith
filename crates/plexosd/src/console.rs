@@ -3044,11 +3044,31 @@ mod tests {
         );
         for name in &carried {
             assert!(
-                matches!(name.as_str(), "value" | "held"),
+                matches!(name.as_str(), "value" | "held" | "typed"),
                 "a request built its own credential from {name:?} instead of asking \
                  credential() for one"
             );
         }
+
+        // `typed` is the one exception and it is a narrow one: checking a recovery code as
+        // somebody enters it is asking about a credential that is *not yet* in force. Using
+        // credential() there would validate the session this browser already holds and
+        // report "Unlocked" about the wrong thing entirely -- so the exception exists
+        // because the rule, applied literally, would be wrong.
+        let checker = script
+            .split_once("async function checkTypedToken()")
+            .map(|(_, rest)| rest)
+            .expect("checking a typed code is a named function");
+        let checker = &checker[..checker.find("\n}\n").unwrap_or(checker.len())];
+        assert_eq!(
+            script.matches("\"Bearer \" + typed").count(),
+            1,
+            "only one request may present a code that is not the credential in force"
+        );
+        assert!(
+            checker.contains("\"Bearer \" + typed"),
+            "and it is the one that checks what was typed"
+        );
 
         assert!(
             !script.contains("const value = token();") && !script.contains("const held = token();"),

@@ -2888,6 +2888,57 @@ async function confirmNetwork() {
   loadSettings();
 }
 
+/** How long after the last keystroke the code is checked. */
+let tokenCheck = null;
+
+/**
+ * Asks the appliance whether what has been typed is its own code, once it could be.
+ *
+ * `/api/session` with `check` needs no implementation to answer this: it is a POST, so the
+ * gate decides before the handler exists and reaching it *is* the answer. One route, one
+ * authority, and nothing here re-implements what authentication means.
+ *
+ * Only once the field holds a whole code, and a moment after the last keystroke. Asking
+ * sooner would put fifteen refusals in front of somebody halfway through typing a correct
+ * one, which is worse than saying nothing.
+ */
+async function checkTypedToken() {
+  const out = document.getElementById("token-result");
+  const typed = normaliseToken(document.getElementById("token").value);
+  if (tokenCheck) { clearTimeout(tokenCheck); tokenCheck = null; }
+
+  if (typed.length < TOKEN_CHARS) {
+    const left = TOKEN_CHARS - typed.length;
+    if (out) out.innerHTML = typed.length
+      ? `<div class="hint">${left} more character${left === 1 ? "" : "s"}…</div>`
+      : "";
+    return;
+  }
+
+  tokenCheck = setTimeout(async () => {
+    try {
+      const response = await fetch("/api/session", {
+        method: "POST", cache: "no-store",
+        headers: { "Authorization": "Bearer " + typed, "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "check" }),
+      });
+      if (response.ok) {
+        if (out) out.innerHTML = `<div class="progress"><span class="now">Unlocked</span>
+          <div>This browser can now change the appliance.</div></div>`;
+      } else {
+        if (out) out.innerHTML = `<div class="progress failed"><div>That is not this
+          machine\u2019s recovery device code.</div><div class="hint">Sixteen characters,
+          printed on the screen attached to the machine when it first started. There is no
+          O, I, L or U in it \u2014 a 0 is always a zero and a 1 is always a one.</div></div>`;
+      }
+    } catch (e) {
+      if (out) out.innerHTML = `<div class="progress failed"><div>Could not reach MediaLith
+        to check it.</div></div>`;
+    }
+    updateLock();
+  }, 250);
+}
+
 async function rotateToken() {
   const out = document.getElementById("token-result");
   const value = credential();
@@ -7014,6 +7065,11 @@ document.getElementById("restart").addEventListener("click", () => power("restar
   field.value = groupToken(normaliseToken(token()));
   field.addEventListener("input", event => {
     rememberToken(formatTokenField(event.target));
+    // Say whether it worked. There is no Unlock button -- the field takes effect as it is
+    // typed -- so without this the only sign is a badge in the header, and somebody who has
+    // just transcribed sixteen characters off a screen is left guessing. Reported in
+    // exactly those words: "I do not even know whether it works".
+    checkTypedToken();
     // The header follows the field as it is typed. Sixteen characters read off another
     // screen is a slow thing to type, and a lock that only flipped on the next click would
     // leave somebody wondering whether it had been accepted.

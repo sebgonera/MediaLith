@@ -444,49 +444,87 @@ fn pairing_url(facts: &Facts, secret: &str) -> String {
     format!("https://{}/#pair={secret}", facts.address().unwrap_or(""))
 }
 
-/// Asks for the largest built-in font the kernel has.
+/// Asks for the largest built-in font **that still leaves room for the screen**.
 ///
-/// The reference laptop is a fifteen-inch panel at 2880x1620, and the default 8x16 font
-/// puts characters about three millimetres tall on it — legible in a photograph and not to
-/// somebody standing in front of the machine. `TER16x32` is four times the area.
+/// Largest is not the answer, and a machine said so within an hour of the last one being
+/// shipped. The reference laptop is 2880x1620, where `TER16x32` gives 50 rows by 180 and
+/// text somebody can read across a room. A 1920x1080 panel with the same font is **33
+/// rows**, and the pairing screen needs 47 — so the QR code did not appear at all, on the
+/// machine whose owner had just asked for bigger text.
 ///
-/// Tried in order and the first that works wins, because "what fonts does this kernel
-/// have" is a question about the image rather than about the hardware, and an appliance
-/// built without the Terminus fonts should get a readable screen rather than an error.
+/// So it tries largest first and *measures the result*: a font is accepted only if the grid
+/// it produces can still hold everything this dashboard draws. The fallback is not a
+/// smaller screen, it is a smaller font, and on a 1080p panel that is `TER10x18` — 60 rows
+/// by 192, still twice the area of the kernel's default.
 ///
-/// The failure is logged rather than swallowed, and that line is the point of doing this at
-/// runtime at all: `fbcon=font:TER16x32` on the kernel command line asked for exactly this
-/// and did nothing for months, because `CONFIG_FONT_TER16x32` depends on `CONFIG_FONTS`,
-/// which was unset, so kconfig dropped it without a word. A kernel that has no such font
-/// answers `ENOENT` here, in a sentence, on a terminal somebody reads.
+/// The measurement is the point. Choosing by resolution would mean a table of panels, and
+/// the numbers that matter are the ones the terminal reports after the change rather than
+/// the ones arithmetic predicts from a framebuffer.
 fn choose_a_legible_font(screen: &std::fs::File, log: &mut dyn FnMut(&str)) {
     /// Largest first. `TER16x32` and `TER10x18` need `CONFIG_FONTS`; `VGA8x16` is what the
     /// kernel falls back to on its own and is always there.
     const PREFERRED: &[&str] = &["TER16x32", "TER10x18", "VGA8x16"];
 
-    let mut refusals = Vec::new();
+    let mut rejected = Vec::new();
     for name in PREFERRED {
-        match plexos_sys::tty::use_font(screen, name) {
-            Ok(()) => {
-                if !refusals.is_empty() {
-                    log(&format!(
-                        "the screen is using {name}; larger fonts were not available ({})",
-                        refusals.join(", ")
-                    ));
-                }
-                return;
-            }
-            Err(error) => refusals.push(format!("{name}: {error}")),
+        if let Err(error) = plexos_sys::tty::use_font(screen, name) {
+            rejected.push(format!("{name}: {error}"));
+            continue;
         }
+
+        // What the terminal says it is now, not what the font's name implies. A font that
+        // was accepted and produced a grid too small for the pairing screen is worse than
+        // the one before it -- the text is bigger and the thing somebody came to the screen
+        // for is missing.
+        let Ok(size) = plexos_sys::tty::size(screen) else {
+            // No measurement, so no basis to reject it. The dashboard falls back to 24x80
+            // and reports that it has no room, which is at least true.
+            return;
+        };
+        if fits(size) {
+            if !rejected.is_empty() {
+                log(&format!(
+                    "the screen is using {name} at {} by {}; larger fonts left too little \
+                     room ({})",
+                    size.rows,
+                    size.columns,
+                    rejected.join(", ")
+                ));
+            }
+            return;
+        }
+        rejected.push(format!(
+            "{name}: {} rows by {} is too few for a pairing code",
+            size.rows, size.columns
+        ));
     }
 
     log(&format!(
-        "the console font could not be changed ({}). The screen still works and its text \
-         will be small on a high-resolution panel. Remedy: check that CONFIG_FONTS and \
-         CONFIG_FONT_TER16x32 both survived kconfig -- the second depends on the first and \
-         is dropped without an error when it is missing.",
-        refusals.join("; ")
+        "no console font left room for this dashboard ({}). The screen still works. \
+         Remedy: check that CONFIG_FONTS and CONFIG_FONT_TER10x18 both survived kconfig -- \
+         the second depends on the first and is dropped without an error when it is \
+         missing.",
+        rejected.join("; ")
     ));
+}
+
+/// Whether a grid can hold everything this dashboard draws.
+///
+/// The binding case is the pairing screen: a symbol of [`qr::Symbol::drawn_width`] rows plus
+/// the wordmark, the countdown and the footer around it. The dashboard itself needs about
+/// twenty rows and fits anywhere.
+///
+/// Deliberately a little more than the exact arithmetic. A grid that fits by one row is one
+/// where the next line of text added to that screen breaks the QR code on somebody else's
+/// monitor, and the cost of asking for slack is a font one size down.
+fn fits(size: plexos_sys::tty::Size) -> bool {
+    /// Rows the pairing screen needs: a version-3 symbol with its quiet zone is 37, and
+    /// nine lines of text surround it.
+    const ROWS: u16 = 50;
+    /// Columns for the same symbol at two cells a module, with room either side.
+    const COLUMNS: u16 = 90;
+
+    size.rows >= ROWS && size.columns >= COLUMNS
 }
 
 /// Lowers how much the kernel prints to the screen, once there is a screen worth keeping.
@@ -542,6 +580,48 @@ mod tests {
 
     fn silent() -> impl FnMut(&str) {
         |_: &str| {}
+    }
+
+    #[test]
+    fn a_font_is_only_kept_if_the_screen_it_leaves_can_still_show_a_pairing_code() {
+        // The mistake this replaces, at the sizes that made it. Biggest-font-wins was right
+        // on the 2880x1620 reference laptop and wrong on a 1080p panel, where TER16x32
+        // gives 33 rows and the pairing screen needs 47 -- so asking for bigger text made
+        // the QR code disappear.
+        use plexos_sys::tty::Size;
+
+        // 2880x1620: TER16x32 -> 50x180. Kept.
+        assert!(fits(Size {
+            rows: 50,
+            columns: 180
+        }));
+        // 1920x1080 with the same font -> 33x120. Rejected, and this is the case the
+        // machine found.
+        assert!(!fits(Size {
+            rows: 33,
+            columns: 120
+        }));
+        // The same panel one size down, TER10x18 -> 60x192. Kept, and still twice the area
+        // of the kernel's default.
+        assert!(fits(Size {
+            rows: 60,
+            columns: 192
+        }));
+        // A 1366x768 laptop at 8x16 -> 48x170. Rejected by two rows, which is the slack
+        // being deliberate rather than tight.
+        assert!(!fits(Size {
+            rows: 48,
+            columns: 170
+        }));
+        // And nothing absurd is accepted.
+        assert!(!fits(Size {
+            rows: 24,
+            columns: 80
+        }));
+        assert!(!fits(Size {
+            rows: 60,
+            columns: 40
+        }));
     }
 
     #[test]
