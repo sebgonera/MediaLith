@@ -626,6 +626,17 @@ and its certificate — sign with the second one.
   above `0`, so every update would have been refused as older, with a message blaming
   whoever published it. Anything that must appear *in the image* has to be written before
   stage 1, and the check is to extract the built image and look — not to read the script.
+- **Git refuses a push to the branch the build host has checked out, and a build will
+  happily carry on without it.** `receive.denyCurrentBranch` rejects it — correctly — but the
+  refusal is on the *push*, several steps before the build, and if that output goes anywhere
+  nobody reads then `make` runs against the previous sources and stamps them with the new
+  version. That is the trap below wearing a different coat, and it survives `plexosd-rebuild`
+  completely: the rebuild was genuine, it just rebuilt the old file. Two things fix it, and
+  the second matters more than the first: **push to a ref nothing has checked out** and
+  `git reset --hard` onto it, and **grep the build host's checkout for something the change
+  added, before spending a build on it.** Found by comparing the SHA-256 of the page the
+  appliance serves against the working tree's — which is the check worth keeping, because it
+  compares the artefact to the source and nothing in between can lie about it.
 - **`make all` does not rebuild a package whose sources changed.** Buildroot rsyncs a
   package's tree into `output/build/<pkg>/` once and does not re-sync one it has already
   built, so a plain `make all` ships the *previous* binary under a new version stamp. Two
