@@ -276,17 +276,8 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: .9rem;
   }
-  .plex button {
-    padding: .55rem 1.1rem;
-    border: 1px solid var(--accent);
-    border-radius: 8px;
-    background: var(--accent);
-    color: #fff;
-    font: inherit;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .plex button[disabled] { opacity: .55; cursor: default; }
+  /* Buttons are styled once, further down, by `.card button` — not here per card kind. See
+     the comment on that rule for what enumerating the kinds cost. */
   .plex .hint { color: var(--muted); font-size: .9rem; margin: .4rem 0 0; }
   .plex .visit {
     display: inline-block;
@@ -353,23 +344,9 @@
     outline-offset: -1px;
     border-color: var(--accent);
   }
-  .form button {
-    padding: .55rem 1.1rem;
-    border: 1px solid var(--accent);
-    border-radius: 8px;
-    background: var(--accent);
-    color: #fff;
-    font: inherit;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .form button[disabled] { opacity: .55; cursor: default; }
-  .form button.ghost {
-    background: transparent;
-    color: var(--ink);
-    border-color: var(--line);
-    font-weight: 500;
-  }
+  /* Buttons: see `.card button` further down. The only thing a form needs of its own is a
+     lighter weight on the secondary control, so the primary one reads as the primary one. */
+  .card button.ghost { font-weight: 500; }
 
   /* ------------------------------------------------------------------
      The terminal.
@@ -749,36 +726,47 @@
   .hero.unavailable { background: linear-gradient(var(--unavailable-soft), var(--card) 60%); }
   .hero h2 { font-size: 1.65rem; letter-spacing: -.02em; }
 
-  /* One button treatment for the page. It was written three times -- in .plex, in .form
-     and in .power -- which is why the same control looked slightly different depending on
-     the card it was in. Those rules still apply; this restates what they had in common.
+  /* One button treatment for the page, keyed on **`.card`** rather than on which kind of
+     card it is. It was written three times first — in .plex, in .form and in .power — which
+     is why the same control looked slightly different depending on where it was; that was
+     noticed and the shared half was factored out, but the selectors stayed enumerated. So
+     the fourth case was never covered: the network card is a plain `<div class="card">`, and
+     its "Diagnose the network" button matched none of the three rules and therefore had **no
+     styling at all** — a raw operating-system button in the middle of a designed page. It
+     shipped that way and was reported from a machine.
+     Enumerating the variants was the defect. `.card button` cannot leave a card out.
      .power keeps its own hover, because stopping the machine should not look like every
      other button on the page. */
-  .plex button, .form button, .power button {
+  .card button {
+    border: 1px solid var(--accent);
     border-radius: var(--radius-sm);
     padding: .58rem .95rem;
+    font: inherit;
     font-weight: 600;
+    cursor: pointer;
     box-shadow: var(--shadow-sm);
     transition: background-color .12s ease, border-color .12s ease,
                 box-shadow .12s ease, transform .06s ease;
   }
-  .plex button:not(.ghost), .form button:not(.ghost) {
+  .card:not(.power) button:not(.ghost) {
     background: var(--accent);
     border-color: var(--accent);
     color: var(--accent-ink);
   }
-  .plex button:not(.ghost):hover, .form button:not(.ghost):hover { filter: brightness(1.07); }
-  .plex button.ghost, .form button.ghost, .power button {
+  .card:not(.power) button:not(.ghost):hover { filter: brightness(1.07); }
+  .card button.ghost, .power button {
     background: var(--card);
     color: var(--ink);
     border: 1px solid var(--line);
   }
-  .plex button.ghost:hover, .form button.ghost:hover {
+  .card button.ghost:hover {
     border-color: var(--accent);
     color: var(--accent);
   }
-  .plex button:active, .form button:active, .power button:active { transform: translateY(1px); }
-  .plex button[disabled], .form button[disabled], .power button[disabled] {
+  .card button:active { transform: translateY(1px); }
+  .card button[disabled] {
+    opacity: .55;
+    cursor: default;
     box-shadow: none;
     transform: none;
     filter: none;
@@ -873,10 +861,37 @@
       <h3 style="margin:0">Activity</h3>
       <span class="state" id="metrics-window">measuring…</span>
     </div>
+    <!-- Only this div is redrawn, twice a second. Everything below it is written once and
+         then left alone, and that division is the whole point rather than a tidiness: the
+         first version put the process table and the notes *inside* here, so opening either
+         one worked for up to two seconds and then the next poll replaced the element holding
+         it. It looked like a control that would not stay open. Reported from a machine, which
+         is the second time this card has needed somebody to look at the served page.
+
+         The rule the card now follows: anything with state a person set — an open
+         `<details>`, a table they asked for — cannot live inside a region on a timer. -->
     <div id="metrics-body">
       <p class="empty">Measuring… a rate is the difference between two readings, so the
          first figures arrive a couple of seconds after this page opens.</p>
     </div>
+
+    <div class="panel" id="procs-panel">
+      <h4>Processes</h4>
+      <p class="hint">Not shown by default, and not on a GET: a list of what is running with
+         its command lines is closer to what the terminal exposes than to a health reading,
+         so it needs the device token.</p>
+      <div class="row">
+        <button id="procs-load" class="ghost">Show what is running</button>
+      </div>
+      <div id="procs"></div>
+    </div>
+
+    <!-- Written once; the poll replaces the contents of the list and never the details
+         element, so whether it is open belongs to whoever opened it. -->
+    <details id="metrics-notes" hidden>
+      <summary>What these numbers do not say</summary>
+      <ul id="metrics-notes-list"></ul>
+    </details>
   </section>
 
   <main id="main" aria-live="polite">
@@ -1189,7 +1204,9 @@ function networkCard(net) {
            </table></div>`
         : `<p class="empty">No interface besides loopback. On this hardware Ethernet arrives over USB — check the adapter is plugged in.</p>`}
       <div class="row">
-        <button id="netdiag-run">Diagnose the network</button>
+        <!-- Ghost, because it reads and changes nothing. The accent is for the controls that
+             do something to the machine, and a diagnostic wearing it competed with them. -->
+        <button id="netdiag-run" class="ghost">Diagnose the network</button>
       </div>
       <div id="netdiag">${lastNetdiag}</div>
     </div>`;
@@ -3187,21 +3204,19 @@ function renderMetrics(m) {
       </table></div>` : ""}
 
     ${temps ? `<div class="panel"><h4>Temperatures</h4>
-      <table class="mtable"><tbody>${temps}</tbody></table></div>` : ""}
+      <table class="mtable"><tbody>${temps}</tbody></table></div>` : ""}`;
 
-    <div class="panel">
-      <h4>Processes</h4>
-      <p class="hint">Not shown by default, and not on a GET: a list of what is running with
-         its command lines is closer to what the terminal exposes than to a health reading,
-         so it needs the device token.</p>
-      <div class="row"><button id="procs-load" class="ghost">Show what is running</button></div>
-      <div id="procs"></div>
-    </div>
-
-    ${notes ? `<details>
-      <summary>What these numbers do not say</summary>
-      <ul>${notes}</ul>
-    </details>` : ""}`;
+  // The notes live outside the redrawn region, so only their contents are replaced — and
+  // only when they have actually changed. Rewriting the list on every poll would be
+  // harmless for a `<details>`, but it would move the caret and the selection of anybody
+  // reading it, which is the same class of rudeness as redrawing a field being typed into.
+  const notesHost = document.getElementById("metrics-notes");
+  const notesList = document.getElementById("metrics-notes-list");
+  if (notesList.dataset.rendered !== notes) {
+    notesList.dataset.rendered = notes;
+    notesList.innerHTML = notes;
+  }
+  notesHost.hidden = !notes;
 }
 
 /** Draws the process table. */
@@ -3230,6 +3245,12 @@ function renderProcesses(report) {
         <tbody>${rows}</tbody>
       </table>
     </div>${omitted}`;
+
+  // The list stays where it was put now that this panel is outside the redrawn region, so
+  // the control that fetched it becomes the one that fetches it again. Percentages need two
+  // readings, so the first list has none and a second press is what fills them in.
+  const button = document.getElementById("procs-load");
+  if (button) button.textContent = "Refresh the list";
 }
 
 /** Asks for the process list, which needs the token. */
