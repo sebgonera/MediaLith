@@ -845,7 +845,11 @@ and its certificate — sign with the second one.
   repository had ever parsed that file; the page's tests assert that strings appear in it,
   which a completely broken script satisfies. `the_pages_script_parses` runs `node --check`
   now, and announces a skip when no engine is installed, because a check nobody knows was
-  skipped is a check nobody has.
+  skipped is a check nobody has. It has since earned its keep on a second flavour of the same
+  thing: **a backtick inside a template literal ends the literal**, and the offender was an
+  HTML *comment* — one explaining why a variable existed, written as `` `lastNetdiag` ``,
+  inside the very template it was describing. Prose is code in there; quote code in comments
+  with nothing, or with quotation marks.
 - **A name used twice on the console page is not an error anywhere, and both halves of the
   duplicate keep working — on the wrong thing.** The Plex card's button and the disk
   installer's section were both `id="install"`, and both click handlers were
@@ -973,15 +977,28 @@ and its certificate — sign with the second one.
   written in" trap again, and the new detail worth keeping is *when* it appears — the card had
   no state at all until it grew a table and a `<details>`, so the polling loop was harmless
   right up to the commit that made it not.
-- **A style rule that enumerates the kinds of a thing will miss one.** Buttons were styled by
-  `.plex button`, `.form button` and `.power button`. The network card is a plain
-  `<div class="card">`, so its "Diagnose the network" button matched none of them and had **no
-  styling at all** — a raw operating-system button in the middle of a designed page, shipped
-  and reported by somebody looking at it. The stylesheet already carried a comment saying the
-  rule had been written three times and that the common half had been factored out; the
-  selectors stayed enumerated, so the gap survived the tidy-up that was about it. `.card
-  button` cannot leave a card out. Ask what the rule does about a kind that does not exist
-  yet.
+- **A style rule that enumerates the kinds of a thing will miss one — and narrowing the list
+  is not the fix.** Buttons were styled by `.plex button`, `.form button` and `.power button`,
+  so the network card — a plain `<div class="card">` — matched none of them and its "Diagnose
+  the network" button had **no styling at all**: a raw operating-system control in the middle
+  of a designed page, shipped and reported by somebody looking at it. The stylesheet already
+  carried a comment saying the rule had been written three times and that the common half had
+  been factored out; the selectors stayed enumerated, so the gap survived the tidy-up that was
+  about it. That was then "fixed" to `.card button` — which missed the next button added, the
+  power controls in the sticky header, **the same trap one turn of the screw later**. The rule
+  is on the element now: a rule about how a button looks should not know where buttons are.
+  Ask what a rule does about a case that does not exist yet.
+- **A presence check can be satisfied by a string that asserts the opposite.** The build
+  script greps the rsynced package tree to prove the new code got in. One marker was
+  `card button {` — and it passed *after that rule had been deleted*, because `grep -r` found
+  it in the list of forbidden selectors inside the test asserting its absence. A check that
+  cannot fail is worse than no check, because it is counted. Grep the **artefact** — the page,
+  the module — not the tree that also contains everything written *about* it.
+- **A function that names itself in its own output cannot be composed.** `humanUptime`
+  returned `"Up 1 h 21 min"` while its own comment described only the duration, so both callers
+  added a label of their own: the header badge read **"UP UP 18 MIN"** and the activity tile
+  was headed "Up" above a value of "Up 1 h 21 min", which had been on a machine for a day
+  without anyone noticing. A formatter returns the value; the caller says what it is.
 - **A class name in the page's script is a channel nothing was watching.** Three tests guard
   the console page — its script parses, every id it addresses exists, no id names two things
   — and a rename that mangled `class="meter"` into `class="metricMeter"` passed all three.
