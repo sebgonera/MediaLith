@@ -253,6 +253,15 @@ pub fn respond(request: &Request, env: &impl Environment, services: &Services) -
 
         ("POST", "/api/token") => rotate_token(),
 
+        // Pairing (ADR-0019). The one mutating route that carries no credential, because
+        // it is how a browser gets one -- `http::refusal` names it and lets it past. What
+        // it accepts is a code that only somebody standing at the machine's own screen can
+        // have caused to exist.
+        ("POST", crate::http::PAIR_ROUTE) => pair_route(&request.body),
+
+        // The session a pairing produced: is it still good, and end it.
+        ("POST", "/api/session") => session_route(request),
+
         // The three questions above the interface list: a resolver, a route, and a name
         // that actually resolves. Its own route rather than a field on /api/status
         // because the name lookup blocks for seconds, and the status page polls -- the
@@ -488,6 +497,124 @@ fn rotate_token() -> Response {
                  nothing changes until both the file and the running server have the new \
                  one.\n"
             ),
+        ),
+    }
+}
+
+/// Spends a pairing code and issues an administrator session (ADR-0019).
+///
+/// The only route on this console that changes the machine without a credential, and the
+/// only one that can be: it is where a credential comes from. What stands in for
+/// authentication is that [`crate::pairing`] has nothing to spend unless somebody pressed
+/// a key on the screen attached to the machine — an appliance nobody has touched answers
+/// every request here identically, and says so.
+///
+/// # Nothing here may say the code out loud
+///
+/// Not in the log, not in an error message, not in a panic. The refusals come from
+/// [`crate::pairing::Refusal`], which is an enum of three states and carries no input, so
+/// the code has no path into a message even by accident. The success line names the address
+/// that paired and nothing else.
+///
+/// # Bounded before it is parsed
+///
+/// `http` already caps a body at [`crate::http::MAX_BODY`]; this caps the field as well,
+/// because a 64 KiB "code" is not a mistyped one and there is no reason to hash it.
+fn pair_route(body: &[u8]) -> Response {
+    /// Longest string that could be a pairing code.
+    ///
+    /// The code is [`crate::pairing::SECRET_CHARS`]; the slack is for a client that sends
+    /// it with punctuation rather than for anything this issues.
+    const MAX_CODE: usize = 64;
+
+    let request: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        // The parser's message describes the document's shape and never its contents, so
+        // this cannot leak a code that arrived inside a malformed body.
+        Err(_) => {
+            return Response::text(
+                400,
+                "the body must be JSON of the form {\"code\": \"...\"}.\n",
+            );
+        }
+    };
+
+    let Some(code) = request.get("code").and_then(serde_json::Value::as_str) else {
+        return Response::text(400, "the body must carry a `code` field.\n");
+    };
+
+    if code.len() > MAX_CODE {
+        // Refused as wrong rather than as too long: telling a caller which of their inputs
+        // was the wrong *shape* is a way to learn the shape.
+        return Response::text(403, format!("{}\n", crate::pairing::Refusal::Wrong));
+    }
+
+    if let Err(refusal) = crate::pairing::consume(code) {
+        return Response::text(403, format!("{refusal}\n"));
+    }
+
+    match crate::session::issue() {
+        Ok(token) => {
+            println!("plexosd: administrator browser paired");
+            Response::json(format!(
+                "{{\"authenticated\":true,\"session_token\":\"{token}\",\
+                 \"expires_in\":{},\"idle_timeout\":{}}}",
+                crate::session::ABSOLUTE_LIFETIME.as_secs(),
+                crate::session::IDLE_TIMEOUT.as_secs()
+            ))
+        }
+        // The code is already spent at this point and deliberately not put back: a failure
+        // to read /dev/urandom is not a state to recover a credential into, and pressing P
+        // again costs one keystroke.
+        Err(error) => Response::text(
+            500,
+            format!(
+                "the pairing code was accepted but no session could be issued: {error}. \
+                 Remedy: press P on the screen attached to the machine to pair again. If \
+                 that keeps failing, /dev is not mounted, which is a larger fault than \
+                 this one.\n"
+            ),
+        ),
+    }
+}
+
+/// Asks after the administrator session this request carries, or ends it.
+///
+/// `check` needs no implementation at all, which is the point of it: this route is a
+/// `POST`, so [`crate::http::refusal`] has already decided whether the caller is an
+/// administrator before the handler exists. Reaching here *is* the answer. A second
+/// implementation of the question would be a second thing to keep in agreement with the
+/// gate.
+fn session_route(request: &Request) -> Response {
+    let action = serde_json::from_slice::<serde_json::Value>(&request.body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        });
+
+    match action.as_deref() {
+        Some("check") | None => Response::json("{\"authenticated\":true}"),
+        Some("sign-out") => {
+            // The credential this request arrived with, which is the only session a
+            // request is entitled to end. Signing out with the recovery device code
+            // revokes nothing and is not an error: there is no server-side state behind it
+            // to remove, and the browser drops its own copy either way.
+            let presented = request
+                .header("Authorization")
+                .and_then(crate::auth::bearer)
+                .unwrap_or_default();
+            let revoked = crate::session::revoke(presented);
+            if revoked {
+                println!("plexosd: administrator session signed out");
+            }
+            Response::json(format!("{{\"signed_out\":{revoked}}}"))
+        }
+        Some(other) => Response::text(
+            400,
+            format!("{other:?} is not a session action. Remedy: one of check, sign-out.\n"),
         ),
     }
 }
@@ -1419,6 +1546,194 @@ mod tests {
         }
     }
 
+    /// A `POST` with a JSON body, for the routes that take one.
+    fn post(path: &str, body: &str) -> Request {
+        Request {
+            method: "POST".to_owned(),
+            path: path.to_owned(),
+            headers: Vec::new(),
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
+    /// What `POST /api/pair` answered, as the page would read it.
+    fn pair_with(code: &str) -> (u16, String) {
+        let response = respond_test(
+            &post(crate::http::PAIR_ROUTE, &format!("{{\"code\":\"{code}\"}}")),
+            &Fixture::new(),
+        );
+        (
+            response.status,
+            String::from_utf8_lossy(&response.body).into_owned(),
+        )
+    }
+
+    #[test]
+    fn an_appliance_nobody_has_touched_pairs_with_nothing() {
+        // The state every machine on the LAN sees for all but five minutes of its life,
+        // and the reason this route can be unauthenticated: there is nothing to spend.
+        crate::pairing::cancel();
+        let (status, body) = pair_with("ANYTHINGATALL");
+        assert_eq!(status, 403);
+        assert!(body.contains("Remedy:"), "{body}");
+        assert!(
+            body.contains("press P"),
+            "and the remedy is the physical action, which is the whole security model: \
+             {body}"
+        );
+    }
+
+    #[test]
+    fn the_code_on_the_screen_pairs_once_and_then_never_again() {
+        // The end-to-end shape of ADR-0019 through the route table: a code that only the
+        // attached screen could have produced becomes a session, and the second browser to
+        // present the same code gets nothing.
+        let code = crate::pairing::start().expect("/dev/urandom");
+
+        let (status, body) = pair_with(&code);
+        assert_eq!(status, 200, "{body}");
+
+        let issued: serde_json::Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(issued["authenticated"], serde_json::json!(true));
+        assert_eq!(
+            issued["expires_in"],
+            serde_json::json!(crate::session::ABSOLUTE_LIFETIME.as_secs())
+        );
+        assert_eq!(
+            issued["idle_timeout"],
+            serde_json::json!(crate::session::IDLE_TIMEOUT.as_secs())
+        );
+
+        let session = issued["session_token"].as_str().expect("a session token");
+        assert_eq!(session.len(), crate::session::TOKEN_BYTES * 2);
+        assert_ne!(session, code, "the session is not the pairing code renamed");
+
+        let (again, _) = pair_with(&code);
+        assert_eq!(
+            again, 403,
+            "single use, and the second browser is a stranger"
+        );
+
+        assert!(crate::session::revoke(session), "cleanup: it was live");
+    }
+
+    #[test]
+    fn nothing_in_a_pairing_reply_carries_a_credential_it_should_not() {
+        // The list is short and every item on it has a reason to be tempting: the recovery
+        // code because the route is about credentials, the Plex token because it is the
+        // other secret this daemon holds, and the fingerprints because they are what the
+        // server actually compares.
+        let code = crate::pairing::start().expect("/dev/urandom");
+        let (_, body) = pair_with(&code);
+
+        for forbidden in ["device-token", "PlexOnlineToken", "fingerprint", "digest"] {
+            assert!(
+                !body.contains(forbidden),
+                "{forbidden} must not appear: {body}"
+            );
+        }
+
+        let issued: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let session = issued["session_token"].as_str().unwrap();
+        assert!(crate::session::revoke(session));
+    }
+
+    #[test]
+    fn a_pairing_body_that_is_not_what_it_should_be_is_refused_without_a_hint() {
+        // And in particular a very long one is refused as wrong rather than as too long:
+        // telling a caller which of their inputs had the wrong *shape* is a way to learn
+        // the shape.
+        let _ = crate::pairing::start().expect("/dev/urandom");
+
+        assert_eq!(
+            respond_test(&post(crate::http::PAIR_ROUTE, "not json"), &Fixture::new()).status,
+            400
+        );
+        assert_eq!(
+            respond_test(
+                &post(crate::http::PAIR_ROUTE, "{\"nope\":1}"),
+                &Fixture::new()
+            )
+            .status,
+            400
+        );
+
+        let (status, body) = pair_with(&"A".repeat(4096));
+        assert_eq!(status, 403);
+        assert!(!body.contains("long"), "{body}");
+        crate::pairing::cancel();
+    }
+
+    #[test]
+    fn a_pairing_refusal_never_repeats_what_was_presented() {
+        // The rule that keeps a wrong code out of a log and out of a browser's history. It
+        // holds by construction -- Refusal carries no input -- and this is what stops that
+        // becoming untrue later.
+        let _ = crate::pairing::start().expect("/dev/urandom");
+        let guess = "WRONGCODE7T8BHVWPQ2M4X6Z";
+        let (status, body) = pair_with(guess);
+
+        assert_eq!(status, 403);
+        assert!(!body.contains(guess), "the guess is echoed back: {body}");
+        crate::pairing::cancel();
+    }
+
+    #[test]
+    fn reaching_the_session_route_is_itself_the_answer_to_being_signed_in() {
+        // No implementation, and that is the point: the route is a POST, so the gate
+        // decided before the handler existed. A second implementation of "are you an
+        // administrator" is a second thing to keep in agreement with the gate.
+        let response = respond_test(
+            &post("/api/session", "{\"action\":\"check\"}"),
+            &Fixture::new(),
+        );
+        assert_eq!(response.status, 200);
+        assert!(String::from_utf8_lossy(&response.body).contains("\"authenticated\":true"));
+    }
+
+    #[test]
+    fn signing_out_ends_the_session_the_request_arrived_with() {
+        let code = crate::pairing::start().expect("/dev/urandom");
+        let (_, body) = pair_with(&code);
+        let session = serde_json::from_str::<serde_json::Value>(&body).unwrap()["session_token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let mut request = post("/api/session", "{\"action\":\"sign-out\"}");
+        request
+            .headers
+            .push(("Authorization".to_owned(), format!("Bearer {session}")));
+
+        let response = respond_test(&request, &Fixture::new());
+        assert_eq!(response.status, 200);
+        assert!(String::from_utf8_lossy(&response.body).contains("\"signed_out\":true"));
+
+        // And it is gone from the gate, which is the only place that matters.
+        assert!(
+            crate::auth::authenticate(
+                &session,
+                &crate::auth::Credential::Set(crate::auth::fingerprint("4K7QM2XR9T8BHVWP"))
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn signing_out_with_a_recovery_code_revokes_nothing_and_is_not_an_error() {
+        // There is no server-side state behind the recovery code to remove. The browser
+        // drops its own copy either way, which is the outcome the caller wanted.
+        let mut request = post("/api/session", "{\"action\":\"sign-out\"}");
+        request.headers.push((
+            "Authorization".to_owned(),
+            "Bearer 4K7Q-M2XR-9T8B-HVWP".to_owned(),
+        ));
+
+        let response = respond_test(&request, &Fixture::new());
+        assert_eq!(response.status, 200);
+        assert!(String::from_utf8_lossy(&response.body).contains("\"signed_out\":false"));
+    }
+
     #[test]
     fn the_root_path_serves_the_page() {
         let response = respond_test(&get("/"), &Fixture::new());
@@ -2156,21 +2471,289 @@ mod tests {
                 && !script.contains("localStorage.getItem(TOKEN_KEY"),
             "and never in localStorage, which outlives the tab"
         );
-        // Locking is a thing this browser does, not a thing the appliance is told. Rotating
-        // is the other button and it is the one that reaches the machine.
+        // This assertion is the reverse of what it was, and the reversal is the point of
+        // ADR-0019 rather than a relaxation. Locking used to be a thing this browser did
+        // and nothing the appliance was told, which was exactly right while the only
+        // credential was the device token: there is no server-side state behind a device
+        // token, so there was nothing to end and a request would have been ceremony.
+        //
+        // A session is not like that. It is state on the appliance, and a "Sign out" that
+        // dropped the browser's copy and left the session live would leave a working
+        // credential behind -- the one thing somebody pressing that button is trying to
+        // prevent. So sign-out now reaches the machine, and what must stay true is that it
+        // reaches it *first* and then forgets locally whatever the answer was.
         let lock = script
-            .split_once("function lockAdmin()")
+            .split_once("async function lockAdmin()")
             .map(|(_, rest)| rest)
-            .expect("locking is a named function");
-        let lock = &lock[..lock.find("\n}").unwrap_or(lock.len())];
+            .expect("signing out is a named function");
+        let lock = &lock[..lock.find("\n}\n").unwrap_or(lock.len())];
         assert!(
-            lock.contains("sessionStorage.removeItem(TOKEN_KEY)"),
-            "locking forgets the token in this tab: {lock}"
+            lock.contains("sessionStorage.removeItem(TOKEN_KEY)")
+                && lock.contains("forgetSession()"),
+            "signing out forgets both credentials in this tab: {lock}"
         );
         assert!(
-            !lock.contains("fetch("),
-            "and asks the appliance for nothing -- rotating is the button that does that: {lock}"
+            lock.contains("/api/session") && lock.contains("sign-out"),
+            "and tells the appliance, so the session it holds stops working: {lock}"
         );
+        let (asked, forgot) = (
+            lock.find("fetch(").expect("it asks"),
+            lock.find("forgetSession()").expect("it forgets"),
+        );
+        assert!(
+            asked < forgot,
+            "the request goes first: a sign-out that gave up because the network was down \
+             would leave the credential in a tab somebody believes they closed: {lock}"
+        );
+    }
+
+    #[test]
+    fn every_request_that_carries_a_credential_asks_one_function_for_it() {
+        // ADR-0019's integration on the browser's side, and the one property that keeps it
+        // from becoming fifteen decisions: there is one function that answers "what does
+        // this tab send", it prefers the session, and nothing reaches for storage itself.
+        //
+        // Checked by reading every `Bearer` on the page rather than by counting call
+        // sites, because a request added tomorrow is the one that would get this wrong.
+        let script = page_script();
+        let marker = "\"Bearer \" + ";
+
+        let mut carried = Vec::new();
+        for (index, _) in script.match_indices(marker) {
+            let rest = &script[index + marker.len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            carried.push(name);
+        }
+
+        assert!(
+            carried.len() >= 15,
+            "the page sends a credential on many more routes than this: {carried:?}"
+        );
+        for name in &carried {
+            assert!(
+                matches!(name.as_str(), "value" | "held"),
+                "a request built its own credential from {name:?} instead of asking \
+                 credential() for one"
+            );
+        }
+
+        assert!(
+            !script.contains("const value = token();") && !script.contains("const held = token();"),
+            "and the two names those requests use are assigned from credential(), so a \
+             paired browser never sends the recovery code in front of its own session"
+        );
+        assert!(
+            script.contains("function credential() { return session() || token(); }"),
+            "the session wins, because it is the one the person just established and the \
+             one Sign out can end"
+        );
+    }
+
+    #[test]
+    fn running_the_pages_own_code_shows_the_fragment_gone_and_the_code_recovered() {
+        // An assertion about the page's text cannot see this, and the page's text has been
+        // right while its behaviour was wrong before -- the terminal cleaner destroyed
+        // sixty-one per cent of every session's output under tests that all passed. So
+        // this runs takePairingCode itself, under a real engine, against the four URLs it
+        // will actually meet.
+        //
+        // The case that matters most is the last: a hash that is not a pairing code must
+        // come through untouched, because that hash is how the console chooses which view
+        // to show. A function that cleared it unconditionally would send every link
+        // somebody sends -- `#network`, `#terminal` -- to the Overview instead.
+        let script = page_script();
+        let start = script
+            .find("function takePairingCode(")
+            .expect("taking the code out of the URL is a named function");
+        let end = script[start..]
+            .find("\n}\n")
+            .map(|at| start + at + "\n}".len())
+            .expect("and ends at a brace in the first column");
+        let function = &script[start..end];
+
+        // The prefix comes from the page too, rather than being written again here. A test
+        // that declared its own would agree with itself while the page looked for
+        // something else -- which is the fixture-you-imagined trap, and this is the one
+        // string that has to match what the appliance puts in the QR code.
+        let prefix = script
+            .lines()
+            .find(|line| line.starts_with("const PAIR_PREFIX = "))
+            .expect("the fragment prefix is declared on one line");
+
+        let Some(engine) = ["node", "deno", "qjs"].into_iter().find(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        }) else {
+            println!(
+                "skip: the pairing bootstrap was not run -- no node, deno or qjs on this \
+                 host. Install one, or a fragment left in the address bar will only be \
+                 found by scanning a QR code with a phone."
+            );
+            return;
+        };
+
+        // A window just real enough. `history.replaceState` records what it was given,
+        // which is the half of the behaviour that has no return value to inspect.
+        let harness = format!(
+            r##"
+{prefix}
+{function}
+
+const cases = [
+  ["#pair=ABC123", "", "ABC123"],
+  ["#pair=", "", ""],
+  ["", "", ""],
+  ["#network", "#network", ""],
+];
+
+for (const [hash, expectedHash, expectedCode] of cases) {{
+  let replaced = null;
+  globalThis.window = {{ location: {{ hash, pathname: "/", search: "" }} }};
+  globalThis.history = {{ replaceState: (_s, _t, url) => {{ replaced = url; }} }};
+
+  const got = takePairingCode();
+  if (got !== expectedCode) {{
+    console.log("FAIL code " + JSON.stringify(hash) + ": " + JSON.stringify(got));
+    process.exit(1);
+  }}
+  // A hash that is not a pairing code must be left where it is, hence "no replaceState".
+  const left = replaced === null ? hash : "";
+  if (left !== expectedHash) {{
+    console.log("FAIL hash " + JSON.stringify(hash) + ": left " + JSON.stringify(left)
+                + ", replaced with " + JSON.stringify(replaced));
+    process.exit(1);
+  }}
+}}
+console.log("OK");
+"##
+        );
+
+        let path = std::env::temp_dir().join("medialith-take-pairing-code-test.js");
+        std::fs::write(&path, harness).expect("write the harness");
+        let output = std::process::Command::new(engine)
+            .arg(&path)
+            .output()
+            .expect("run the harness");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("OK"),
+            "the page's own pairing bootstrap misbehaved:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn the_pairing_code_leaves_the_url_before_anything_can_read_it() {
+        // The fragment is not sent to the server, which is why the QR uses one. What the
+        // fragment *is* exposed to is the address bar, the history, a screenshot and --
+        // on this page specifically -- the view router, which reads the hash to decide
+        // which section to show. All four are closed by taking it out immediately.
+        let script = page_script();
+
+        let take = script
+            .split_once("function takePairingCode()")
+            .map(|(_, rest)| rest)
+            .expect("taking the code out of the URL is a named function");
+        let take = &take[..take.find("\n}\n").unwrap_or(take.len())];
+        assert!(
+            take.contains("history.replaceState"),
+            "removed with replaceState: assigning location.hash adds a history entry, so \
+             Back would put the code straight back: {take}"
+        );
+        assert!(
+            !take.contains("await"),
+            "and removed synchronously, before anything can await and let the router run: \
+             {take}"
+        );
+
+        // Before the router reads the URL. This ordering is the whole reason the call sits
+        // where it does, and nothing else in the file would fail if it moved.
+        let bootstrap = script
+            .find("bootstrapPairing();")
+            .expect("the bootstrap runs at start-up");
+        let router = script
+            .find("showView(viewInUrl());")
+            .expect("the router reads the URL at start-up");
+        assert!(
+            bootstrap < router,
+            "the pairing code must be out of the hash before showView looks a view up by it"
+        );
+    }
+
+    #[test]
+    fn a_pairing_code_travels_in_a_body_and_never_in_a_url() {
+        // The rule the whole flow is arranged around. A query parameter would put the code
+        // in the request line -- and in a browser's history, and in anything that ever logs
+        // one -- which is what the fragment exists to avoid.
+        let script = page_script();
+
+        let bootstrap = script
+            .split_once("async function bootstrapPairing()")
+            .map(|(_, rest)| rest)
+            .expect("the bootstrap is a named function");
+        assert!(
+            bootstrap.contains("body: JSON.stringify({ code })"),
+            "the code goes in the body of the POST"
+        );
+
+        for forbidden in ["?pair=", "?token=", "?session=", "?code=", "?device-token="] {
+            assert!(
+                !PAGE.contains(forbidden),
+                "no credential may appear in a query string, and the page has {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_administrator_session_is_kept_where_it_dies_with_the_tab() {
+        // sessionStorage for the same reason the device token is there, and one more: this
+        // credential is meant to end. localStorage would quietly undo the first of the five
+        // ways it does.
+        let script = page_script();
+        assert!(
+            script.contains("sessionStorage.getItem(SESSION_KEY)")
+                && script.contains("sessionStorage.setItem(SESSION_KEY"),
+            "the session lives in sessionStorage"
+        );
+        assert!(
+            !script.contains("localStorage.getItem(SESSION_KEY)")
+                && !script.contains("localStorage.setItem(SESSION_KEY"),
+            "and never in localStorage, which outlives the tab"
+        );
+        assert!(
+            !script.contains("document.cookie"),
+            "and never in a cookie, which would be attached to requests automatically -- \
+             the thing ADR-0013 chose a bearer token to avoid"
+        );
+    }
+
+    #[test]
+    fn nothing_that_redraws_can_overwrite_a_session_that_was_just_stored() {
+        // This console has already shipped a redraw that closed what somebody had opened
+        // and a rename that broke every meter. A poll that wrote to the session key would
+        // be the same shape of fault with a credential in it -- the browser would appear
+        // to sign itself out at a rate of once every three seconds.
+        //
+        // The property that prevents it is that exactly one place writes the key, and it is
+        // the one that has just been handed a session by the appliance.
+        let script = page_script();
+        assert_eq!(
+            script.matches("rememberSession(").count(),
+            2,
+            "one definition and one caller, and the caller is the pairing bootstrap"
+        );
+        let bootstrap = script
+            .split_once("async function bootstrapPairing()")
+            .map(|(_, rest)| rest)
+            .expect("the bootstrap is a named function");
+        assert!(bootstrap.contains("rememberSession("));
     }
 
     #[test]
@@ -3212,8 +3795,8 @@ mod tests {
             .expect("the activity poll exists");
         let head = &poll[..poll.find("PLEX_SESSIONS_ENDPOINT").unwrap_or(poll.len())];
         assert!(
-            head.contains("const value = token();") && head.contains("if (!value)"),
-            "the poll must decide on the token before it reaches the fetch: {head}"
+            head.contains("const value = credential();") && head.contains("if (!value)"),
+            "the poll must decide on the credential before it reaches the fetch: {head}"
         );
     }
 

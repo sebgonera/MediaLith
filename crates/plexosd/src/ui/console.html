@@ -1882,10 +1882,14 @@
        kept in sessionStorage alone, and still sent as an Authorization header. -->
   <section class="card plex" id="token-card" hidden>
     <h3>Administrator access</h3>
-    <p class="hint">Printed on the screen attached to this machine the first time it
-       started — sixteen characters in four groups. Case does not matter and the dashes
-       are optional. Reading this page needs nothing; every button that changes something
-       needs this.</p>
+    <p class="hint">The quickest way in is the screen attached to the machine: press
+       <strong>P</strong> on it and scan the QR code with a phone. That signs this browser
+       in without anything being typed.</p>
+    <p class="hint">The recovery device code below is the other way, and the way back if
+       the screen is not to hand — sixteen characters in four groups, printed on that
+       screen the first time this machine started. Case does not matter and the dashes are
+       optional. Reading this page needs nothing; every button that changes something
+       needs one of the two.</p>
     <div class="row">
       <input type="text" id="token" placeholder="4K7Q-M2XR-9T8B-HVWP"
              autocomplete="off" spellcheck="false" autocapitalize="characters">
@@ -1893,11 +1897,13 @@
     <p class="hint" id="token-note">Held for this browser tab only, and never written to
        disk. Closing the tab locks it again.</p>
     <div class="row">
-      <button id="token-lock" class="ghost">Lock</button>
-      <button id="token-rotate" class="ghost">Rotate the device token</button>
+      <button id="token-lock" class="ghost">Sign out</button>
+      <button id="token-rotate" class="ghost">Rotate the recovery device code</button>
     </div>
-    <p class="hint">Rotating issues a new one and revokes this one immediately. It is
-      shown once, here and on the attached screen, and cannot be asked for again.</p>
+    <p class="hint">Rotating issues a new code and revokes the old one immediately. It
+      also signs out <em>every</em> paired browser, this one included — which is the point,
+      because rotating is what you do when a credential has got out. The new code is shown
+      once, here and on the attached screen, and cannot be asked for again.</p>
     <div id="token-result"></div>
   </section>
 
@@ -2247,6 +2253,35 @@ const WIFI_ENDPOINT = "/api/wifi";
 
 function token() { return sessionStorage.getItem(TOKEN_KEY) || ""; }
 function rememberToken(value) { sessionStorage.setItem(TOKEN_KEY, value); }
+
+// The administrator session (ADR-0019), which is what scanning the QR code on the
+// machine's own screen produces. sessionStorage for the same reason the device token is
+// there and one more: this credential is *meant* to end. It ends when the tab closes,
+// when the appliance restarts, after an hour idle, after twelve hours whatever happens,
+// and when somebody signs out. localStorage would quietly undo the first of those, and a
+// cookie would undo the whole design -- ADR-0013 chose a bearer token precisely so that
+// nothing is attached to a request automatically.
+const SESSION_KEY = "medialith-admin-session";
+
+function session() { return sessionStorage.getItem(SESSION_KEY) || ""; }
+function rememberSession(value) { sessionStorage.setItem(SESSION_KEY, value); }
+function forgetSession() { sessionStorage.removeItem(SESSION_KEY); }
+
+/**
+ * The credential this tab sends. One function, and every request goes through it.
+ *
+ * The session wins when there is one. That ordering is not a preference: a tab that
+ * paired and *also* has an old device token typed into it must send the session, because
+ * the session is the one the person just established and the one they can sign out of. A
+ * request that quietly sent the recovery code instead would leave "Sign out" doing
+ * nothing visible, which is the shape of bug that gets diagnosed as "the appliance
+ * ignores logout".
+ *
+ * There is deliberately no way to ask which of the two this returned. The server does not
+ * tell routes how a request authenticated, and neither does this: the page has one idea
+ * of "administrator", so it has one credential.
+ */
+function credential() { return session() || token(); }
 
 // The token alphabet, and it is not the obvious one: Crockford base32, which leaves out
 // I, L, O and U so that nothing in a printed token can be misread as something else.
@@ -2807,7 +2842,7 @@ function networkTrialBanner() {
 }
 
 async function confirmNetwork() {
-  const value = token();
+  const value = credential();
   if (!value) return;
   try {
     await fetch("/api/network", {
@@ -2821,13 +2856,13 @@ async function confirmNetwork() {
 
 async function rotateToken() {
   const out = document.getElementById("token-result");
-  const value = token();
+  const value = credential();
   if (!value) {
     if (out) out.innerHTML = `<div class="progress failed"><div>The current token is
       needed to issue a new one.</div></div>`;
     return;
   }
-  if (!confirm("Rotate the device token? The current one stops working at once, and every browser using it will have to be given the new one.")) return;
+  if (!confirm("Rotate the recovery device code? The current one stops working at once, and every paired browser is signed out — including this one, which will be signed back in with the new code.")) return;
 
   try {
     const response = await fetch("/api/token", {
@@ -2837,16 +2872,25 @@ async function rotateToken() {
     });
     const text = await response.text();
     if (!response.ok) throw new Error(text.trim() || response.statusText);
-    const issued = JSON.parse(text).token;
+    const reply = JSON.parse(text);
+    const issued = reply.token;
+    // The rotation revoked every session, this tab's included, so the one it was holding
+    // is now a string that authenticates nothing. Dropping it here is what keeps
+    // credential() from sending a dead session in front of the code that does work --
+    // which would look exactly like the new code being refused.
+    forgetSession();
     // Stored straight away: the old one in this tab is already dead, and a page that
-    // showed the new token and then refused every button would be a poor trade.
+    // showed the new code and then refused every button would be a poor trade.
     rememberToken(issued);
     const field = document.getElementById("token");
     if (field) field.value = groupToken(normaliseToken(issued));
-    if (out) out.innerHTML = `<div class="progress"><span class="now">New device token</span>
+    const alsoSignedOut = Number(reply.sessions_revoked) || 0;
+    if (out) out.innerHTML = `<div class="progress"><span class="now">New recovery device code</span>
       <div class="mono" style="font-size:1.1rem;letter-spacing:.06em">${esc(issued)}</div>
       <div>Write it down. It is not stored anywhere it can be read back, and it is also
-        on the machine's attached screen.</div></div>`;
+        on the machine's attached screen.</div>${alsoSignedOut
+        ? `<div>${alsoSignedOut} paired browser${alsoSignedOut === 1 ? " was" : "s were"}
+             signed out. Pair again by pressing P on the attached screen.</div>` : ""}</div>`;
   } catch (e) {
     if (out) out.innerHTML = `<div class="progress failed"><div>${esc(String(e))}</div></div>`;
   }
@@ -2899,7 +2943,7 @@ async function saveSettings(which) {
   const out = document.getElementById(network ? "net-result" : "settings-result");
   const button = document.getElementById(network ? "net-save" : "settings-save");
   const label = network ? "Save addressing" : "Save settings";
-  const value = token();
+  const value = credential();
   if (!value) {
     if (out) out.innerHTML = `<div class="progress failed"><span class="now">Not saved</span>
       <div>The device token is needed to change settings. Unlock with the control in the
@@ -3064,7 +3108,7 @@ function termWrite(text) {
 }
 
 async function termPost(payload) {
-  const value = token();
+  const value = credential();
   if (!value) throw new Error("The device token is needed to open a terminal. Enter it in the Device token box at the top of this page.");
   const response = await fetch("/api/terminal", {
     method: "POST",
@@ -3315,7 +3359,7 @@ function wifiRender(report) {
 }
 
 async function wifiPost(payload) {
-  const value = token();
+  const value = credential();
   if (!value) {
     sectionError("wifi", "The device token is needed to change the network. Enter it in the Device token box at the top of this page.");
     return false;
@@ -3411,7 +3455,7 @@ function startTerminalWindow() {
   // A popup is given a copy of the opener's sessionStorage, so the token normally comes
   // with the window. When it does not, the field is the only way in and has to stay.
   const card = document.getElementById("token-card");
-  if (card) card.hidden = Boolean(token());
+  if (card) card.hidden = Boolean(credential());
 }
 
 /// Watches the screen and tells the shell whenever its size changes.
@@ -3619,7 +3663,7 @@ function chooseTheme(choice) {
 // showing a large empty box, and every refusal further down already names this control.
 // ------------------------------------------------------------------------------------
 function updateLock() {
-  const held = Boolean(token());
+  const held = Boolean(credential());
   const button = document.getElementById("admin-lock");
   const text = document.getElementById("admin-lock-text");
   button.dataset.state = held ? "unlocked" : "locked";
@@ -3628,9 +3672,17 @@ function updateLock() {
   text.innerHTML = held
     ? `Administrator <span class="dot" aria-hidden="true">●</span>`
     : "Locked";
+  // The title says which of the two credentials this is, because the two end differently
+  // and somebody deciding whether to write anything down needs to know which they have.
+  // The indicator itself does not: the page has one idea of "administrator", and so does
+  // the appliance -- no route is told how a request authenticated.
   button.title = held
-    ? "This tab holds the device token. Everything on this page can be changed."
-    : "Read-only. Enter the device token to change anything.";
+    ? (session()
+        ? "This browser was paired at the machine's own screen. It administers the \
+appliance until you sign out, close the tab, or leave it idle."
+        : "This tab holds the recovery device code. Everything on this page can be changed.")
+    : "Read-only. Press P on the screen attached to the machine and scan the QR code, or \
+enter the recovery device code.";
 }
 
 function openAdmin(open) {
@@ -3640,13 +3692,111 @@ function openAdmin(open) {
   if (open) document.getElementById("token").focus();
 }
 
-/// Forgets the token in this tab. The appliance is untouched -- rotating is the other button.
-function lockAdmin() {
+/**
+ * Signs this tab out: the session on the appliance, then both credentials here.
+ *
+ * The server call goes first and its failure is ignored, which is the right order for a
+ * sign-out. If the appliance cannot be reached, the credential still has to leave this
+ * browser -- a "Sign out" that refused because the network was down would leave a
+ * credential in a tab somebody believes they closed.
+ *
+ * Signing out with the recovery device code revokes nothing on the appliance and is not an
+ * error: there is no server-side state behind it. It still leaves this tab.
+ */
+async function lockAdmin() {
+  const held = credential();
+  if (held) {
+    try {
+      await fetch("/api/session", {
+        method: "POST", cache: "no-store",
+        headers: { "Authorization": "Bearer " + held, "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "sign-out" }),
+      });
+    } catch (e) { /* the credential leaves this browser either way */ }
+  }
+  forgetSession();
   sessionStorage.removeItem(TOKEN_KEY);
   document.getElementById("token").value = "";
   document.getElementById("token-result").innerHTML = "";
   updateLock();
   openAdmin(false);
+}
+
+// ------------------------------------------------------------------------------------
+// Pairing bootstrap (ADR-0019).
+//
+// The QR code on the appliance's screen carries this machine's own address with
+// `#pair=<code>` on the end, and the fragment is the whole reason it is shaped that way: a
+// fragment is **not sent to the server**. A query parameter would put the code in the
+// request line, and from there into
+// whatever logs a request line -- which for this appliance is nothing today and is not a
+// property to depend on. It would also survive in the browser's history and in the
+// address bar for anybody standing behind the person holding the phone.
+//
+// So the code arrives in the fragment, is taken out of the visible URL before anything
+// else happens, and is then sent in a POST body.
+// ------------------------------------------------------------------------------------
+const PAIR_PREFIX = "#pair=";
+
+/**
+ * Takes the pairing code out of the URL and returns it, or "" if there was none.
+ *
+ * Removal happens here rather than after the request, and that ordering is the point: a
+ * failed pairing must not leave the code in the address bar, where a reload would retry it
+ * and a screenshot would publish it. `replaceState` rather than assigning `location.hash`
+ * -- the latter adds a history entry, so Back would put the code straight back.
+ */
+function takePairingCode() {
+  const hash = window.location.hash || "";
+  if (!hash.startsWith(PAIR_PREFIX)) return "";
+  const code = decodeURIComponent(hash.slice(PAIR_PREFIX.length));
+  history.replaceState(null, "", window.location.pathname + window.location.search);
+  return code;
+}
+
+/**
+ * Spends a pairing code for an administrator session.
+ *
+ * Runs before the polls start, so a paired browser's first request already carries the
+ * session and nothing has to be re-fetched when it arrives. It never throws: a machine
+ * that cannot be reached has to render its page and say so, not blank.
+ */
+async function bootstrapPairing() {
+  const code = takePairingCode();
+  if (!code) return;
+
+  const out = document.getElementById("token-result");
+  const say = (html, failed) => {
+    if (out) out.innerHTML = `<div class="progress${failed ? " failed" : ""}">${html}</div>`;
+  };
+
+  try {
+    const response = await fetch("/api/pair", {
+      method: "POST", cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      // The code travels here and only here. Never a query parameter, never a header the
+      // browser will repeat, never a field in the document.
+      body: JSON.stringify({ code }),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      // The appliance's own words. It distinguishes "expired", "already used" and "not the
+      // code on the screen", and every one of them names the same remedy -- press P -- so
+      // there is nothing to add here and a second copy of the wording to get wrong.
+      say(`<div>Pairing did not work.</div><div>${esc(text.trim())}</div>`, true);
+      openAdmin(true);
+      return;
+    }
+    rememberSession(JSON.parse(text).session_token);
+    say(`<span class="now">Paired</span><div>This browser is administering the appliance.
+      It stays signed in until you sign out, close the tab, or leave it alone for an
+      hour.</div>`);
+  } catch (e) {
+    say(`<div>Could not contact MediaLith. Check that this device is on the same
+      network as the appliance.</div><div>${esc(String(e))}</div>`, true);
+    openAdmin(true);
+  }
+  updateLock();
 }
 
 // ------------------------------------------------------------------------------------
@@ -4433,7 +4583,7 @@ function wirePlexVersionControls(report) {
  * read here beyond whether the appliance accepted the job.
  */
 async function checkPlexVersion() {
-  const value = token();
+  const value = credential();
   if (!value) {
     sectionError("plex", "Enter the device token above first. It was printed on the screen attached to this machine when it started.");
     return;
@@ -4590,7 +4740,7 @@ async function scanPlexMedia() {
 
 /** Installs a package the scan found on a stick. */
 async function startPlexFromMedia(path) {
-  const value = token();
+  const value = credential();
   if (!value) {
     sectionError("plex", "Enter the device token above first. It was printed on the screen attached to this machine when it started.");
     return;
@@ -4626,7 +4776,7 @@ async function startPlexFromMedia(path) {
  * second progress bar for the eight seconds this takes is not worth an older API.
  */
 async function startPlexUpload() {
-  const value = token();
+  const value = credential();
   if (!value) {
     sectionError("plex", "Enter the device token above first. It was printed on the screen attached to this machine when it started.");
     return;
@@ -4667,7 +4817,7 @@ async function startPlexUpload() {
  * this button asked the appliance to erase a disk instead.
  */
 async function startPlexInstall() {
-  const value = token();
+  const value = credential();
   if (!value) {
     sectionError("plex", "Enter the device token above first. It was printed on the screen attached to this machine when it started.");
     return;
@@ -4799,7 +4949,7 @@ function renderShares(list) {
 }
 
 async function shareRequest(body) {
-  const value = token();
+  const value = credential();
   if (!value) {
     sectionError("shares", "The device token is needed to mount or remove a share. Enter it in the Device token box at the top of this page.");
     return null;
@@ -5026,7 +5176,7 @@ function renderUpdate(report) {
 }
 
 async function startUpdate(install) {
-  const value = token();
+  const value = credential();
   if (!value) {
     sectionError("update", "The device token is needed to check for or install an update. Enter it in the Device token box at the top of this page.");
     return;
@@ -5236,7 +5386,7 @@ function human(bytes) {
 
 /** Asks the appliance to install itself onto the chosen disk. */
 async function startInstall() {
-  const value = token();
+  const value = credential();
   if (!value) {
     sectionError("install", "The device token is needed to install. Enter it in the Device token box at the top of this page.");
     return;
@@ -5758,7 +5908,7 @@ function toggleProcesses() {
 
 /** Asks for the process list, which needs the token. */
 async function loadProcesses() {
-  const value = token();
+  const value = credential();
   const host = document.getElementById("procs");
   if (!value) {
     host.innerHTML = `<p class="hint">The device token is needed for this. Enter it in the
@@ -6237,7 +6387,7 @@ let plexActivityTimer = null;
  */
 async function plexActivityTick() {
   clearTimeout(plexActivityTimer);
-  const value = token();
+  const value = credential();
   let next = NP_IDLE_MS;
 
   if (!value) {
@@ -6304,7 +6454,7 @@ function powerNote(message) {
 
 /** Stops or restarts the appliance, once. */
 async function power(action, label) {
-  const value = token();
+  const value = credential();
   if (!value) {
     powerNote("The device token is needed to " + label.toLowerCase() +
       ". Enter it in the Device token box at the top of this page.");
@@ -6476,6 +6626,16 @@ applyTheme(localStorage.getItem(THEME_KEY) || "system");
   select.addEventListener("change", event => chooseTheme(event.target.value));
 }
 updateLock();
+
+// Before showView reads the URL, and that ordering is load-bearing rather than tidy: the
+// fragment is *also* what chooses which view is showing, so a `#pair=...` left in place
+// would be looked up as a view name. takePairingCode runs synchronously at the top of
+// this call -- before its first await -- so the hash is already gone by the next line.
+//
+// It is not awaited. The request takes a round trip, and holding the whole page's start-up
+// behind it would mean a browser that cannot reach the appliance renders nothing at all,
+// which is the opposite of what this console is for.
+bootstrapPairing();
 
 // The keyboard's way out of the panel and the drawer. Escape is what people press, and a
 // popover that only closes by clicking the thing that opened it is one that traps a keyboard.
