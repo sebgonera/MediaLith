@@ -3,6 +3,13 @@
 Each ADR records one decision, the alternatives considered, and the consequences we
 accept. An ADR is never edited after acceptance — it is superseded by a new one.
 
+> **The product was renamed to MediaLith on 2026-08-11.** Every ADR below was written
+> before that and says PlexOS, and they are left as written: an ADR is a dated record of a
+> decision, and editing the name out of one would be rewriting the record of what was
+> decided and when. The identifiers they describe — `/var/lib/plexos`, `plexos.slot`, the
+> manifest's `product` field — were **not** renamed either, so those ADRs also remain
+> literally accurate about the system. See the README for which names stayed and why.
+
 These cover the decisions that are expensive or impossible to reverse once an image
 has shipped to a device: on-disk layout, the trust chain, the update protocol, and the
 schemas that outlive any single release. ADR-0011, ADR-0012 and ADR-0013 are the

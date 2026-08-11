@@ -1,4 +1,4 @@
-//! PID 1 for PlexOS: verified `/usr`, assembled root, persistent `/var`.
+//! PID 1 for MediaLith: verified `/usr`, assembled root, persistent `/var`.
 //!
 //! ```
 //! use plexos_init::{cmdline::BootArgs, plan, state};

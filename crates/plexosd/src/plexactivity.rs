@@ -1,4 +1,4 @@
-//! What Plex is playing *right now*, as PlexOS's own document.
+//! What Plex is playing *right now*, as MediaLith's own document.
 //!
 //! Everything else this console reports is a state: which slot booted, whether `/usr`
 //! verified, how full `/var` is. This is the one question about a moment that a person
@@ -98,7 +98,7 @@ pub const TIMEOUT: Duration = Duration::from_secs(2);
 /// thing that fails.
 pub const MAX_BODY: u64 = 512 * 1024;
 
-/// What PlexOS can say about live playback, and why when it cannot.
+/// What MediaLith can say about live playback, and why when it cannot.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Report {
     /// Whether [`Report::sessions`] is an answer rather than an explanation.
@@ -133,7 +133,7 @@ impl Report {
 /// These are separate states because they take **different remedies**, which is the test
 /// for whether a distinction is worth carrying: an unclaimed server needs signing in, a
 /// missing token needs signing in again, an unreachable one needs Plex restarted, and an
-/// unreadable answer needs somebody to look at PlexOS rather than at Plex.
+/// unreadable answer needs somebody to look at MediaLith rather than at Plex.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
@@ -196,7 +196,7 @@ impl State {
                  or the token was replaced. Remedy: open Plex and sign in again."
             }
             Self::Unreadable => {
-                "Plex answered with something this version of PlexOS does not recognise, \
+                "Plex answered with something this version of MediaLith does not recognise, \
                  which usually means Plex changed its API. Remedy: report it — nothing on \
                  the appliance is wrong, and every other view is unaffected."
             }
@@ -523,7 +523,7 @@ pub fn observe(mount: &Path) -> Report {
     }
 }
 
-/// Turns Plex's answer into PlexOS's model.
+/// Turns Plex's answer into MediaLith's model.
 ///
 /// Separated from every socket so it can be run against captured responses, which is the
 /// only way the shapes in this file were established in the first place.

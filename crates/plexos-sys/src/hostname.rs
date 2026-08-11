@@ -1,6 +1,6 @@
 //! The machine's name, as the kernel holds it.
 //!
-//! An appliance with no keyboard is found by name or not at all, and until now PlexOS had
+//! An appliance with no keyboard is found by name or not at all, and until now MediaLith had
 //! none: nothing ever called `sethostname`, so the kernel's default stood and every log
 //! line, every DHCP request and every future mDNS announcement carried it.
 //!

@@ -67,7 +67,7 @@ CERT="${5:-}"
 if [ -z "${GOOD}" ] || [ -z "${BROKEN}" ] || [ -z "${VERSION}" ] \
    || [ -z "${KEY}" ] || [ -z "${CERT}" ]; then
     printf >&2 'usage: %s <good-bundle-dir> <broken-bundle-dir> <version> <signing-key> <certificate>\n' "$0"
-    printf >&2 '  remedy: the first is output/images/plexos-update from a build; the\n'
+    printf >&2 '  remedy: the first is output/images/medialith-update from a build; the\n'
     printf >&2 '          third must sort above what the appliance is running, and the\n'
     printf >&2 '          last two are what tools/sign-bundle.sh takes\n'
     exit 1
@@ -86,7 +86,7 @@ esac
 
 [ -f "${GOOD}/update.json" ] || {
     printf >&2 'no update.json in %s, so that is not a bundle\n' "${GOOD}"
-    printf >&2 '  remedy: point this at output/images/plexos-update\n'
+    printf >&2 '  remedy: point this at output/images/medialith-update\n'
     exit 1
 }
 

@@ -1,6 +1,6 @@
 //! The status console: the routes, and the page.
 //!
-//! This is the first thing in PlexOS a person interacts with rather than reads off a
+//! This is the first thing in MediaLith a person interacts with rather than reads off a
 //! kernel console, and its job is narrow: answer "is this machine working, and if not,
 //! what do I do about it" from a browser on another device.
 //!
@@ -214,7 +214,7 @@ pub fn respond(request: &Request, env: &impl Environment, services: &Services) -
             }
         }
 
-        // Putting PlexOS on a disk (ADR-0016). The most destructive route here, and the
+        // Putting MediaLith on a disk (ADR-0016). The most destructive route here, and the
         // only one whose refusals are the point rather than the edge cases.
         ("GET" | "HEAD", "/api/install") => report_disks(env, install),
 
@@ -1134,7 +1134,7 @@ fn bind(address: SocketAddr) -> io::Result<TcpListener> {
     })
 }
 
-/// The disks on this machine, with the one PlexOS runs from marked.
+/// The disks on this machine, with the one MediaLith runs from marked.
 fn report_disks(env: &impl Environment, install: &std::sync::Arc<crate::install::Job>) -> Response {
     let source = crate::install::running_disk(env);
     match serde_json::to_string(&install.snapshot(env, source.as_deref())) {
@@ -1260,8 +1260,8 @@ fn begin_install(
         return Response::text(
             500,
             "this machine's own disk could not be identified, so no disk can safely be \
-             erased. Remedy: none from the console -- PlexOS finds its own disk behind the \
-             verified /usr, and not finding it means this is not a booted PlexOS system.\n",
+             erased. Remedy: none from the console -- MediaLith finds its own disk behind the \
+             verified /usr, and not finding it means this is not a booted MediaLith system.\n",
         );
     };
 
@@ -1285,7 +1285,7 @@ fn begin_install(
                 500,
                 format!(
                     "this system's own partitions could not be found ({error}), so there \
-                     is nothing to copy. This is not a PlexOS disk.\n"
+                     is nothing to copy. This is not a MediaLith disk.\n"
                 ),
             );
         }
@@ -2702,7 +2702,7 @@ mod tests {
 
     #[test]
     fn the_page_says_what_installing_destroys_before_it_offers_to_do_it() {
-        // The only control on this page that erases data which was never PlexOS's. The
+        // The only control on this page that erases data which was never MediaLith's. The
         // warning is part of the markup rather than something a render function might skip
         // in some state, and the confirmation is a text field because a checkbox is a
         // thing people tick.
@@ -3073,6 +3073,48 @@ mod tests {
         assert!(
             call.contains("Authorization"),
             "and carrying the device token: {call}"
+        );
+    }
+
+    #[test]
+    fn the_page_calls_the_product_by_its_name() {
+        // The rename is only done when the artefact says so. This asserts the three places
+        // a person actually reads it — the tab, the header, and the terminal window — and
+        // then that the old name appears nowhere in the page at all.
+        assert!(PAGE.contains("<title>MediaLith</title>"), "the browser tab");
+        assert!(
+            PAGE.contains(r#"<h1 id="product">MediaLith</h1>"#),
+            "the header"
+        );
+        assert!(
+            PAGE.contains(r#"document.title = "MediaLith Terminal""#),
+            "the terminal window"
+        );
+
+        // Deliberately the whole file, comments included: a comment that still describes
+        // this as PlexOS is telling the next reader something untrue about the product.
+        // Internal *identifiers* are lower-case `plexos` and are not what this looks for.
+        assert!(
+            !PAGE.contains("PlexOS"),
+            "the page still calls the product PlexOS somewhere"
+        );
+    }
+
+    #[test]
+    fn the_page_says_what_it_is_told_rather_than_assuming_the_product_name() {
+        // The header shows `PRETTY_NAME` from the machine's own os-release, and falls back
+        // to the product name only when there is none. That matters more after a rename
+        // than before it: an appliance running an older release must be described by the
+        // name *it* reports, not by the name this page was built with, or the console would
+        // tell somebody they are running MediaLith while the machine is not.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("one script block");
+        assert!(
+            script.contains("p.name || \"MediaLith\""),
+            "the fallback is only reached when os-release said nothing"
         );
     }
 

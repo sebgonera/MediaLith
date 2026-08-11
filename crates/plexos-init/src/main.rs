@@ -58,7 +58,7 @@ static SERVICES: &[Service] = &[
 ];
 
 const USAGE: &str = "\
-plexos-init — PlexOS PID 1
+plexos-init — MediaLith PID 1
 
 USAGE:
     plexos-init [--dry-run] [--cmdline <string>] [--state-version <n>] [--force]
@@ -290,7 +290,7 @@ fn main() -> ExitCode {
     };
 
     // Absent on a fresh /var, and unreadable when running as an ordinary user on a
-    // machine that is not PlexOS. Both are treated as "no state yet", which is the
+    // machine that is not MediaLith. Both are treated as "no state yet", which is the
     // right answer in each case.
     let found = state_version.unwrap_or_else(|| {
         std::fs::read_to_string(paths::STATE_VERSION_FILE)

@@ -148,7 +148,7 @@ define PLEXOS_SYSTEMD_BOOT_BUILD_CMDS
 endef
 
 # Flat in BINARIES_DIR rather than pre-arranged into an efi-part/ tree. Where the
-# bootloader goes on the ESP, and how boot entries are named, is PlexOS policy
+# bootloader goes on the ESP, and how boot entries are named, is MediaLith policy
 # expressed in post-image.sh and the installer -- not something a package that
 # compiles a binary should be deciding.
 define PLEXOS_SYSTEMD_BOOT_INSTALL_IMAGES_CMDS

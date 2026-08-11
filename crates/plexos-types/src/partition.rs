@@ -1,12 +1,12 @@
 //! The on-disk partition contract (ADR-0003).
 //!
-//! This module is the single definition of PlexOS's disk layout. Nothing else may
+//! This module is the single definition of MediaLith's disk layout. Nothing else may
 //! hardcode a type GUID or a partition label; the installer, the updater, and
 //! `plexos-init` all read them from here, so a typo is impossible to introduce in one
 //! place and not the others.
 //!
-//! Type GUIDs come from the Discoverable Partitions Specification, so that a PlexOS
-//! disk is legible to `blkid`, `sfdisk`, and `systemd-repart` without PlexOS-specific
+//! Type GUIDs come from the Discoverable Partitions Specification, so that a MediaLith
+//! disk is legible to `blkid`, `sfdisk`, and `systemd-repart` without MediaLith-specific
 //! knowledge. Slot identity is carried in the partition *label*, because the two `/usr`
 //! slots are interchangeable and must share a type.
 //!

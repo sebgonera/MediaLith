@@ -38,7 +38,7 @@ pub struct Partition {
     /// GPT unique partition GUID, lower case.
     ///
     /// The only identifier here that is unique across disks. Labels are not — an installed
-    /// PlexOS with its installer stick attached has two partitions called `esp` — and this
+    /// MediaLith with its installer stick attached has two partitions called `esp` — and this
     /// is what `systemd-boot` reports in `LoaderDevicePartUUID` to say which one the
     /// firmware actually booted.
     pub partuuid: String,
@@ -129,7 +129,7 @@ pub const LOADER_DEVICE_PART_UUID: &str =
 ///
 /// # The only authoritative answer at boot
 ///
-/// Everything else PlexOS could ask is ambiguous once a machine has two PlexOS disks: the
+/// Everything else MediaLith could ask is ambiguous once a machine has two MediaLith disks: the
 /// labels are duplicated, and the running system has not been assembled yet so there is no
 /// device-mapper device to work back from. `systemd-boot` knows, because it is the thing
 /// the firmware loaded, and it writes the answer here.
@@ -182,7 +182,7 @@ pub fn disk_with_partuuid(partuuid: &str) -> io::Result<String> {
 ///
 /// # Why a label alone is not a question with one answer
 ///
-/// It was, for as long as a PlexOS machine had one PlexOS disk. The installer ended that:
+/// It was, for as long as a MediaLith machine had one MediaLith disk. The installer ended that:
 /// a machine with the system on its internal drive and the USB stick still plugged in has
 /// **two** partitions labelled `esp`, two labelled `usr_a`, and two labelled `var`.
 /// [`by_partlabel`] returns whichever the kernel enumerated first, and that call chooses
@@ -229,7 +229,7 @@ pub fn by_partlabel_on(disk: &str, label: &str) -> io::Result<String> {
 
 /// Resolves a GPT partition label to the device node `devtmpfs` created for it.
 ///
-/// **Ambiguous once more than one PlexOS disk is attached**, which an installed machine
+/// **Ambiguous once more than one MediaLith disk is attached**, which an installed machine
 /// with its installer stick still in it has. Prefer [`by_partlabel_on`] wherever the disk
 /// is known, and it is known wherever something is about to be written.
 ///
@@ -237,7 +237,7 @@ pub fn by_partlabel_on(disk: &str, label: &str) -> io::Result<String> {
 ///
 /// If no partition carries the label. The message lists what *was* found, because the
 /// realistic causes — an image written by a tool that dropped GPT labels, or a disk
-/// that is not a PlexOS disk at all — are indistinguishable without that list.
+/// that is not a MediaLith disk at all — are indistinguishable without that list.
 pub fn by_partlabel(label: &str) -> io::Result<String> {
     let partitions = labelled_partitions()?;
 
@@ -340,7 +340,7 @@ pub fn resolve(path: &str, log: &mut dyn FnMut(&str)) -> io::Result<String> {
 
 /// [`resolve`], preferring partitions on `disk`.
 ///
-/// `None` means "any disk", which is what a machine with one PlexOS disk has always meant
+/// `None` means "any disk", which is what a machine with one MediaLith disk has always meant
 /// and what this did before an installer existed.
 ///
 /// # Errors
@@ -391,7 +391,7 @@ const EFIVARS_MOUNT: &str = "/run/plexos-efivars";
 /// assembled system: nothing after this needs `efivarfs` and leaving it mounted would put
 /// the firmware's variable store inside a running appliance for no reason.
 ///
-/// `None` for every failure, each logged. A machine with one PlexOS disk has always booted
+/// `None` for every failure, each logged. A machine with one MediaLith disk has always booted
 /// without this, and turning "I could not ask" into a failed boot would be a worse trade
 /// than the ambiguity it removes.
 #[must_use]
@@ -545,7 +545,7 @@ mod tests {
 
     #[test]
     fn a_missing_label_reports_what_was_found_instead() {
-        // On a developer machine there are no PlexOS labels, so this exercises the
+        // On a developer machine there are no MediaLith labels, so this exercises the
         // real failure text. "No such file or directory" alone gives nothing to act
         // on; the list distinguishes "wrong disk" from "labels were dropped".
         let error = by_partlabel("usr_a").unwrap_err();
@@ -573,7 +573,7 @@ mod tests {
 
     #[test]
     fn a_label_alone_stopped_being_a_question_with_one_answer() {
-        // The installer is what ended it. A machine with PlexOS on its internal disk and
+        // The installer is what ended it. A machine with MediaLith on its internal disk and
         // the stick it was installed from still plugged in carries two of every label, and
         // the label is what chooses the partition an update is written to.
         //

@@ -1,7 +1,7 @@
-# PlexOS BR2_EXTERNAL tree
+# MediaLith BR2_EXTERNAL tree
 
 Buildroot's mechanism for keeping a downstream project outside the upstream tree.
-Upstream Buildroot stays a pinned, unmodified checkout; everything PlexOS-specific
+Upstream Buildroot stays a pinned, unmodified checkout; everything MediaLith-specific
 lives here (ADR-0002).
 
 ```
@@ -9,7 +9,7 @@ external.desc                 Tree name (PLEXOS) and description
 external.mk                   Includes every package/*/*.mk
 Config.in                     Sources package menu entries
 configs/                      defconfigs, one per target
-package/                      PlexOS packages (plexos-init, plexosd, ...)
+package/                      MediaLith packages (plexos-init, plexosd, ...)
 board/plexos/x86_64/          Kernel config, post-image image assembly
 ```
 

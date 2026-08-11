@@ -34,7 +34,7 @@ pub const SYSROOT: &str = "/sysroot";
 /// A merged `/usr` is what makes `/usr` the unit of update at all (ADR-0001), and
 /// these four links are the other half of that arrangement: every `/bin/...` and
 /// `/lib/...` path in the system resolves through them. Buildroot creates them in its
-/// target root, but the root PlexOS boots is a tmpfs assembled here, so they have to
+/// target root, but the root MediaLith boots is a tmpfs assembled here, so they have to
 /// be recreated — nothing carries them across.
 ///
 /// Omitting them produces a system that mounts perfectly and then cannot execute

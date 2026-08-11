@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time host setup for building PlexOS images on this machine.
+# One-time host setup for building MediaLith images on this machine.
 # Everything here needs root, which is why it is a script you run rather than
 # something the assistant can do for itself.
 #

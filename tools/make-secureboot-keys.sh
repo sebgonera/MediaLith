@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Generate the three Secure Boot keys PlexOS signs with, once.
+# Generate the three Secure Boot keys MediaLith signs with, once.
 #
 #   tools/make-secureboot-keys.sh [directory]     # default ~/.plexos-keys/secureboot
 #
@@ -16,7 +16,7 @@
 #   KEK (Key Exchange Key)  signs updates to the signature databases
 #   db  (Signature DB)      the keys firmware will actually launch a binary with
 #
-# Only **db** signs anything PlexOS ships. PK and KEK exist so the enrolment is a proper
+# Only **db** signs anything MediaLith ships. PK and KEK exist so the enrolment is a proper
 # hierarchy rather than a db entry with nothing above it -- firmware that is put back into
 # User Mode wants a PK, and a machine whose PK belongs to nobody cannot have its databases
 # updated later without clearing them entirely.
@@ -63,9 +63,9 @@ DAYS=7300
 
 for key in PK KEK db; do
   case "$key" in
-    PK)  subject="PlexOS Platform Key" ;;
-    KEK) subject="PlexOS Key Exchange Key" ;;
-    db)  subject="PlexOS Signature Database Key" ;;
+    PK)  subject="MediaLith Platform Key" ;;
+    KEK) subject="MediaLith Key Exchange Key" ;;
+    db)  subject="MediaLith Signature Database Key" ;;
   esac
 
   openssl req -newkey rsa:2048 -nodes -keyout "${key}.key" \

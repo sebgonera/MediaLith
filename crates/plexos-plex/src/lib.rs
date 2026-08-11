@@ -1,6 +1,6 @@
 //! Provisioning Plex Media Server from Plex's own signed packages (ADR-0010).
 //!
-//! PlexOS images never contain Plex: it is proprietary and not ours to redistribute, so
+//! MediaLith images never contain Plex: it is proprietary and not ours to redistribute, so
 //! the appliance fetches it at first boot and converts it into an app image (ADR-0007).
 //! Everything that happens to that download before it is trusted lives here.
 //!

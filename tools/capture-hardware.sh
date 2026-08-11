@@ -1,5 +1,5 @@
 #!/bin/sh
-# Capture everything PlexOS needs to know about a candidate machine.
+# Capture everything MediaLith needs to know about a candidate machine.
 #
 # Read-only: this script inspects and prints. It writes nothing, installs nothing,
 # and loads no modules. Safe to run on a machine you care about.
@@ -33,7 +33,7 @@ have() {
     command -v "$1" >/dev/null 2>&1
 }
 
-echo "PlexOS hardware capture"
+echo "MediaLith hardware capture"
 echo "generated: $(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo unknown)"
 echo "user: $(id -un 2>/dev/null || echo unknown) (uid $(id -u 2>/dev/null || echo '?'))"
 
@@ -56,7 +56,7 @@ if [ -d /sys/firmware/efi ]; then
     show /sys/firmware/efi/fw_platform_size
 else
     echo "UEFI: NO — this machine booted in legacy BIOS mode."
-    echo "PlexOS requires UEFI (ADR-0003). Check the firmware setup for a CSM or"
+    echo "MediaLith requires UEFI (ADR-0003). Check the firmware setup for a CSM or"
     echo "Legacy Boot option and disable it, then re-run this capture."
 fi
 
@@ -153,7 +153,7 @@ else
 fi
 
 section "Block devices"
-# Relevant to the installer: PlexOS needs a whole disk (ADR-0003).
+# Relevant to the installer: MediaLith needs a whole disk (ADR-0003).
 if have lsblk; then
     lsblk -o NAME,SIZE,TYPE,TRAN,MODEL 2>/dev/null || lsblk 2>/dev/null
 else

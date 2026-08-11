@@ -1,6 +1,6 @@
 <!doctype html>
 <!--
-  The PlexOS status console.
+  The MediaLith status console.
 
   Embedded into the plexosd binary with include_str!, because /usr is read-only and
   sealed by dm-verity: there is no directory to drop assets into at runtime, and a file
@@ -18,7 +18,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PlexOS</title>
+<title>MediaLith</title>
 <style>
   :root {
     --bg: #f6f7f9;
@@ -1564,7 +1564,7 @@
      happening to this stream".
 
      Deliberately not a copy of Plex's own interface. No artwork, no gradients, nothing
-     animated: this is PlexOS reporting on Plex, and the value of it is that codecs,
+     animated: this is MediaLith reporting on Plex, and the value of it is that codecs,
      resolutions and a hardware verdict are readable at a glance. A title set in 2rem would
      push the technical line -- the only thing here Plex's own dashboard does not say as
      plainly -- below the fold of a rail card.
@@ -1838,7 +1838,7 @@
       </svg>
     </button>
 
-    <h1 id="product">PlexOS</h1>
+    <h1 id="product">MediaLith</h1>
     <span class="version" id="version"></span>
 
     <!-- What the machine is, right now. These scroll sideways rather than wrapping: the bar
@@ -3396,7 +3396,7 @@ const SOLO = new URLSearchParams(location.search).get("view") === "terminal";
 /// status card that redraws every ten seconds, and every poll it does not make is one the
 /// appliance does not answer.
 function startTerminalWindow() {
-  document.title = "PlexOS terminal";
+  document.title = "MediaLith Terminal";
   document.body.classList.add("solo-body");
   const wrap = document.querySelector(".wrap");
   wrap.classList.add("solo");
@@ -3542,7 +3542,7 @@ function showView(name) {
       item.removeAttribute("aria-current");
     }
   }
-  document.title = view === "overview" ? "PlexOS" : "PlexOS — " + view[0].toUpperCase() + view.slice(1);
+  document.title = view === "overview" ? "MediaLith" : "MediaLith — " + view[0].toUpperCase() + view.slice(1);
 
   // A card that is the subject of the view somebody just opened should not be shut. The
   // defaults in `folded` are about the page as a whole -- what a console loading on an
@@ -3806,7 +3806,7 @@ function renderSummary() {
 
   const plexNote = provision.running ? "" : provision.installed
     ? "The supervisor restarts it. This is a start in progress, or one that will not start."
-    : "PlexOS does not ship Plex. Installing fetches it from Plex and checks its signature.";
+    : "MediaLith does not ship Plex. Installing fetches it from Plex and checks its signature.";
 
   const markup =
     summaryCard("sum-plex", ICONS.plex, "Plex", plexLevel, plexState, plexNote,
@@ -4075,7 +4075,7 @@ function renderStorageDisks(report) {
     const rate = io.find(x => x.name === d.name);
     return `
       <tr>
-        <td class="name">${esc(d.name)}${d.is_source ? ' <span class="tag">PlexOS</span>' : ""}</td>
+        <td class="name">${esc(d.name)}${d.is_source ? ' <span class="tag">MediaLith</span>' : ""}</td>
         <td>${esc(d.model)}</td>
         <td class="num rate">${esc(human(d.bytes))}</td>
         <td class="num rate">${esc(metricRate(rate && rate.read_per_second))}</td>
@@ -4096,7 +4096,7 @@ function renderStorageDisks(report) {
         : `<p class="empty">No disk could be enumerated.</p>`}
       <p class="hint">Read and write rates come from the activity poll and are for the whole
          device. There is no SMART here: nothing in this image reads it yet, and a panel of
-         invented health figures would be worse than an honest gap. Installing PlexOS onto one
+         invented health figures would be worse than an honest gap. Installing MediaLith onto one
          of these is in <button class="linkish" data-goto="system">System</button>.</p>
     </section>`;
 }
@@ -4170,12 +4170,12 @@ function renderEvents() {
 function render(status) {
   const p = status.product || {};
 
-  // `PRETTY_NAME` is "PlexOS 0.1.0.202608110811" and `VERSION_ID` is the tail of it, so
+  // `PRETTY_NAME` is "MediaLith 0.1.0.202608110811" and `VERSION_ID` is the tail of it, so
   // printing both put a nineteen-digit version in the header twice, next to itself. The
   // wordmark keeps the name with that tail removed; the badge keeps the version. Neither is
   // hard-coded -- an image that renames itself still says so here, which is the whole reason
-  // this reads os-release rather than saying "PlexOS".
-  const name = p.name || "PlexOS";
+  // this reads os-release rather than saying "MediaLith".
+  const name = p.name || "MediaLith";
   const trimmed = p.version && name.endsWith(p.version)
     ? name.slice(0, -p.version.length).trim()
     : name;
@@ -4518,7 +4518,7 @@ function renderPlexInto(report) {
 
   section.innerHTML = `
     <h3>Plex Media Server</h3>
-    <p>Plex is proprietary software from Plex Inc. PlexOS does not ship it: installing
+    <p>Plex is proprietary software from Plex Inc. MediaLith does not ship it: installing
        downloads the official package from Plex, checks its signature, and turns it into
        an app image on this machine. Doing so means accepting Plex's terms.</p>
     <div class="row">
@@ -5202,7 +5202,7 @@ function renderInstall(report) {
 
   document.getElementById("install").innerHTML = `
     <h3>Install to a disk</h3>
-    <p class="warn"><strong>This erases the disk you choose, completely.</strong> PlexOS
+    <p class="warn"><strong>This erases the disk you choose, completely.</strong> MediaLith
       copies the system it is running now onto it. The disk this console is running from is
       not offered, and anything else you pick loses everything it holds.</p>
     <ul class="disks">${disks.map(row).join("")}</ul>
@@ -5242,7 +5242,7 @@ async function startInstall() {
     return;
   }
   const confirm_ = (document.getElementById("install-confirm").value || "").trim();
-  if (!confirm(`Erase ${chosen.value} completely and install PlexOS onto it?`)) return;
+  if (!confirm(`Erase ${chosen.value} completely and install MediaLith onto it?`)) return;
 
   try {
     const response = await fetch(INSTALL_ENDPOINT, {

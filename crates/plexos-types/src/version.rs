@@ -1,6 +1,6 @@
 //! Version types.
 //!
-//! PlexOS carries four independent version numbers, and conflating any two of them is
+//! MediaLith carries four independent version numbers, and conflating any two of them is
 //! a bug:
 //!
 //! | Version | Meaning | Where it lives |
@@ -26,12 +26,51 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 /// that costs nothing and that a signature cannot make for you, since a correctly signed
 /// manifest for something else is still correctly signed.
 ///
-/// Lower-case and no spaces, because `os-release` says so. This is one of the things the
-/// open naming decision would change; it is a constant so that changing it is one edit.
+/// Lower-case and no spaces, because `os-release` says so.
+///
+/// # Legacy internal identifier, retained deliberately
+///
+/// The product is **MediaLith**. This still says `plexos`, and changing it would not be
+/// a rename — it would make the rename undeliverable.
+///
+/// `plan::for_manifest` refuses any bundle whose `product` differs from this constant,
+/// with "this update is for X and this appliance is Y". Every appliance already in the
+/// world runs a build compiled with `plexos` here. Publishing a MediaLith bundle that
+/// said `medialith` would therefore be **refused by every existing machine**, and the
+/// only way to install it would be a reinstall — which gives the machine a fresh `/var`,
+/// and with it a new device token, a new TLS identity and an unprovisioned Plex.
+///
+/// The check is doing its job in that scenario. The mistake would be ours: this string
+/// identifies the *product line whose updates are interchangeable*, and a rebrand does not
+/// change which images are interchangeable. It can only move when nothing in the field
+/// still expects the old value, which is a migration to design on its own.
 pub const PRODUCT: &str = "plexos";
 
 /// Manifest structure version understood by this build (ADR-0006).
 pub const MANIFEST_VERSION: u32 = 1;
+
+#[cfg(test)]
+mod product_identity {
+    /// The product was renamed to MediaLith and this constant was not, deliberately.
+    ///
+    /// A test rather than a comment because the comment is what a future rename would
+    /// delete. Changing this string makes every appliance in the field refuse every
+    /// update built after the change — the failure is total, silent until somebody tries
+    /// to update, and unfixable except by reinstalling each machine.
+    ///
+    /// If this ever has to move, it moves as a designed migration in which a release
+    /// accepts *both* values for long enough that no machine is left behind. Until such a
+    /// release has been in the field, this test failing means the change is wrong.
+    #[test]
+    fn the_update_product_identifier_is_still_the_legacy_one() {
+        assert_eq!(
+            super::PRODUCT,
+            "plexos",
+            "renaming this refuses every update on every machine already installed; \
+             see the constant's documentation before changing this test"
+        );
+    }
+}
 
 /// Configuration schema version understood by this build (ADR-0008).
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
@@ -39,7 +78,7 @@ pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 /// Layout version of `/var` expected by this build (ADR-0009).
 pub const STATE_LAYOUT_VERSION: u32 = 1;
 
-/// A PlexOS release version: `MAJOR.MINOR.PATCH`.
+/// A MediaLith release version: `MAJOR.MINOR.PATCH`.
 ///
 /// Ordering is numeric per component, so `0.10.0` correctly sorts after `0.9.0`.
 /// This ordering is for display and diagnostics only — update eligibility is decided

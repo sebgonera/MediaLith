@@ -1,10 +1,10 @@
-# PlexOS kernel requirements, applied on top of the architecture default config.
+# MediaLith kernel requirements, applied on top of the architecture default config.
 #
 # A fragment rather than a full linux.config, deliberately. A complete .config is
-# thousands of lines of architecture defaults in which the handful of options PlexOS
+# thousands of lines of architecture defaults in which the handful of options MediaLith
 # actually depends on are invisible, and every kernel bump becomes a merge conflict
 # over settings nobody chose. This file states requirements and nothing else, so a
-# reviewer can see the whole of what PlexOS needs from the kernel on one screen.
+# reviewer can see the whole of what MediaLith needs from the kernel on one screen.
 #
 # The rule that shapes most of it: **=y, not =m**. The initrd inside the UKI is a
 # single static binary with no module loader, no udev, and no modules to load
@@ -140,7 +140,7 @@ CONFIG_IWLWIFI=y
 CONFIG_IWLMVM=y
 CONFIG_CFG80211=y
 CONFIG_MAC80211=y
-# Wired adapters common on the mini-PCs PlexOS targets.
+# Wired adapters common on the mini-PCs MediaLith targets.
 CONFIG_E1000E=y
 CONFIG_IGB=y
 CONFIG_IGC=y
@@ -211,7 +211,7 @@ CONFIG_MODULE_SIG_SHA256=y
 #
 # `efivarfs` is the one that matters. plexos_sys::device mounts it at
 # /run/plexos-efivars to read LoaderDevicePartUUID, which is how PID 1 learns which ESP
-# the firmware actually booted -- the fix for a machine with two PlexOS disks, where
+# the firmware actually booted -- the fix for a machine with two MediaLith disks, where
 # resolving by label had been a coin toss. As a module the mount returns ENODEV, the
 # lookup fails, and the boot falls back to exactly the behaviour that fix replaced. It
 # is invisible on a one-disk machine and it is the whole defence on a two-disk one.
@@ -231,7 +231,7 @@ CONFIG_EFIVAR_FS=y
 #
 # It removes the concern about configuring wireless before a network exists: with a
 # wired adapter present at setup, the first-boot flow in ADR-0010 works exactly as
-# designed. PlexOS v1 therefore **requires a wired connection at setup**, over PCI or
+# designed. MediaLith v1 therefore **requires a wired connection at setup**, over PCI or
 # USB, and does not support wireless configuration. For a media server that is a
 # reasonable requirement rather than a limitation — the wireless-before-network
 # ordering can be designed later if it is ever wanted.

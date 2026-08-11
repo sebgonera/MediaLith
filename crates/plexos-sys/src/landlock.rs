@@ -21,7 +21,7 @@
 //!
 //! The kernel grows access rights between versions, and asking for one it does not know
 //! fails the whole call with `EINVAL` rather than ignoring the bit. The version is
-//! queried first and the request masked down to it, so a newer PlexOS on an older
+//! queried first and the request masked down to it, so a newer MediaLith on an older
 //! kernel loses precision rather than losing confinement altogether.
 //!
 //! # What is verified and what is not
@@ -166,7 +166,7 @@ pub fn abi_version() -> io::Result<i32> {
 
 /// Rights that exist at a given ABI version.
 ///
-/// Masking rather than failing means a newer PlexOS on an older kernel loses precision
+/// Masking rather than failing means a newer MediaLith on an older kernel loses precision
 /// instead of losing confinement, which is the safer way round: a ruleset that fails to
 /// apply leaves the process unconfined.
 #[must_use]

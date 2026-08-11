@@ -56,7 +56,7 @@ impl fmt::Display for ConfigError {
         match self {
             Self::UnsupportedVersion { found, supported } if *found > *supported => write!(
                 f,
-                "config schema version {found} was written by a newer PlexOS release \
+                "config schema version {found} was written by a newer MediaLith release \
                  (this one supports {supported})"
             ),
             Self::UnsupportedVersion { found, supported } => write!(
@@ -211,8 +211,19 @@ pub struct System {
 }
 
 impl System {
+    /// The name a machine takes when nobody has chosen one.
+    ///
+    /// Changed with the MediaLith rename, and it reaches **new installations only**: a
+    /// machine whose `/etc/plexos/config.toml` already names it keeps that name, because
+    /// this is a serde default and a file that has the field does not consult it. Nothing
+    /// rewrites a hostname somebody chose.
+    ///
+    /// Safe to change where the identifiers above are not, because a hostname is not a
+    /// contract: no update, boot or state path resolves anything by it, and the TLS
+    /// certificate carries the machine's *address* rather than its name — recorded in
+    /// ADR-0014 as the reason a DNS name is no use for a certificate here.
     fn default_hostname() -> String {
-        "plexos".into()
+        "medialith".into()
     }
     fn default_timezone() -> String {
         "UTC".into()
@@ -352,7 +363,7 @@ pub struct Plex {
     pub transcode_dir: String,
     /// Whether to require a verified hardware transcode before reporting healthy.
     ///
-    /// On by default: silent fallback to software transcoding is the failure PlexOS
+    /// On by default: silent fallback to software transcoding is the failure MediaLith
     /// exists to make visible.
     #[serde(default = "Plex::default_require_hw_transcode")]
     pub require_hardware_transcode: bool,
@@ -442,7 +453,9 @@ mod tests {
     fn a_minimal_config_yields_a_working_system() {
         let config = Config::parse("schema_version = 1").unwrap();
         assert_eq!(config, Config::default());
-        assert_eq!(config.system.hostname, "plexos");
+        // The product default, which changed with the MediaLith rename. It reaches new
+        // installations only: a machine whose config already names it never asks for this.
+        assert_eq!(config.system.hostname, "medialith");
         assert!(config.updates.automatic);
         assert!(config.plex.require_hardware_transcode);
         assert!(!config.shares.smb.enabled);
@@ -502,7 +515,7 @@ mod tests {
         assert_eq!(Config::probe_version(text).unwrap(), 7);
         let err = Config::parse(text).unwrap_err();
         assert!(
-            err.to_string().contains("newer PlexOS release"),
+            err.to_string().contains("newer MediaLith release"),
             "got: {err}"
         );
     }

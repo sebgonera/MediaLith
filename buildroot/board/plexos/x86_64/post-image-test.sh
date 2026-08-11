@@ -2,7 +2,7 @@
 #
 # Tests for post-image.sh.
 #
-# Image assembly is the one part of PlexOS whose mistakes are both silent and
+# Image assembly is the one part of MediaLith whose mistakes are both silent and
 # expensive: a wrong section offset, a non-reproducible filesystem, or a partition
 # written at the wrong sector all produce an artifact that looks entirely normal and
 # fails only on a machine that will not boot. Waiting for a four-hour Buildroot build
@@ -104,14 +104,14 @@ done
 # A /usr with enough content that the verity tree spans more than one block.
 cp /bin/sh "${MOCK}/target/usr/bin/" 2>/dev/null || true
 head -c 4000000 /dev/urandom > "${MOCK}/target/usr/lib/filler.bin"
-printf 'NAME="PlexOS"\nID=plexos\nVERSION_ID=0.1.0\n' > "${MOCK}/target/usr/lib/os-release"
+printf 'NAME="MediaLith"\nID=plexos\nVERSION_ID=0.1.0\n' > "${MOCK}/target/usr/lib/os-release"
 
 # shellcheck source=post-image.sh disable=SC1091
 source "${BOARD_DIR}/post-image.sh" "${MOCK}/images"
 set +e   # post-image.sh sets -e; the checks below must be allowed to fail
 
 WORK="${MOCK}/images/plexos-work"
-IMAGE="${MOCK}/images/plexos.img"
+IMAGE="${MOCK}/images/medialith.img"
 mkdir -p "${WORK}"
 
 # --------------------------------------------------------------------------
@@ -393,7 +393,7 @@ stage "stage 0b — the version stamp"
 # boot entry said something else. The test has to follow the same order the build does.
 stage_os_release >/dev/null
 assert "an os-release is written" "[ -s '${WORK}/os-release' ]"
-check "it carries the PlexOS version rather than Buildroot's" \
+check "it carries the MediaLith version rather than Buildroot's" \
       "$(sed -n 's/^VERSION_ID=//p' "${WORK}/os-release")" \
       "${PLEXOS_VERSION}"
 assert "and the same file reaches the image tree" \
@@ -401,6 +401,27 @@ assert "and the same file reaches the image tree" \
 check "with the same version in it" \
       "$(sed -n 's/^VERSION_ID=//p' "${MOCK}/target/usr/lib/os-release")" \
       "${PLEXOS_VERSION}"
+
+# The product name, which is what a person reads: the console header, the boot menu, and
+# the vendor string Plex reports to its clients.
+check "the product names itself MediaLith" \
+      "$(sed -n 's/^NAME=//p' "${WORK}/os-release" | tr -d '\"')" \
+      "MediaLith"
+check "and says so with its version" \
+      "$(sed -n 's/^PRETTY_NAME=//p' "${WORK}/os-release" | tr -d '\"')" \
+      "MediaLith ${PLEXOS_VERSION}"
+
+# And the two that did NOT change, asserted so that a later tidy-up cannot quietly take
+# them. SORT_KEY is what systemd-boot groups entries by: an ESP holding one UKI keyed
+# `plexos` and another keyed `medialith` is two groups, and how the bootloader orders
+# between groups is not established here. ID has no consumer at all, so changing it buys
+# nothing and risks the same surprise.
+check "the boot sort key is still the legacy one" \
+      "$(sed -n 's/^SORT_KEY=//p' "${WORK}/os-release")" \
+      "plexos"
+check "and so is the os-release ID" \
+      "$(sed -n 's/^ID=//p' "${WORK}/os-release")" \
+      "plexos"
 
 # The stamp is not cosmetic any more. It is the manifest's anti-rollback sequence
 # (ADR-0006) and the string systemd-boot orders entries by, so an image built without one

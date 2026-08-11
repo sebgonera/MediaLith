@@ -173,7 +173,7 @@ mod tests {
     fn version_id_is_read_quoted_or_bare() {
         assert_eq!(
             os_release_value(
-                "NAME=\"PlexOS\"\nVERSION_ID=0.1.0.202608092053\n",
+                "NAME=\"MediaLith\"\nVERSION_ID=0.1.0.202608092053\n",
                 "VERSION_ID"
             ),
             Some("0.1.0.202608092053")
@@ -182,6 +182,6 @@ mod tests {
             os_release_value("VERSION_ID=\"0.1.0.202608092053\"\n", "VERSION_ID"),
             Some("0.1.0.202608092053")
         );
-        assert_eq!(os_release_value("NAME=PlexOS\n", "VERSION_ID"), None);
+        assert_eq!(os_release_value("NAME=MediaLith\n", "VERSION_ID"), None);
     }
 }

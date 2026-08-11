@@ -1,4 +1,4 @@
-# PlexOS — working notes
+# MediaLith — working notes
 
 An immutable, atomically-updated Linux appliance distribution built to run Plex Media
 Server well. Read `docs/ARCHITECTURE.md` first, then `docs/adr/` for why anything is
@@ -37,7 +37,7 @@ Everything else is cheap to revise. Prefer revising it.
 
 ## Rules for the work itself
 
-Not about PlexOS. About mistakes made *while building* it, every one of which happened
+Not about MediaLith. About mistakes made *while building* it, every one of which happened
 more than once, and none of which the "Known traps" list could have prevented because that
 list is about the system. Check against this before committing; it is short on purpose.
 
@@ -81,7 +81,7 @@ list is about the system. Check against this before committing; it is short on p
 
 | Component | State |
 | --- | --- |
-| `crates/plexos-types` | Done. Formats and the layout emitter and the GPT writer, 65 tests. The ADR-0006 manifest schema was reconciled with the artefacts PlexOS actually builds — one UKI per slot, and a `release` string `OsVersion` cannot express — which was the last moment that was an edit rather than a migration. |
+| `crates/plexos-types` | Done. Formats and the layout emitter and the GPT writer, 65 tests. The ADR-0006 manifest schema was reconciled with the artefacts MediaLith actually builds — one UKI per slot, and a `release` string `OsVersion` cannot express — which was the last moment that was an edit rather than a migration. |
 | `crates/plexos-update` | Which slot an update goes to, writing a partition and reading it back, the ADR-0006 trust chain, the anti-rollback sequence, root-signed revocation, boot-entry/slot agreement, and `plexos-sign` as the publisher's half. 65 tests. **Has updated the reference laptop four times, alternating slots — and one of those updates was deliberately unbootable and was rolled back.** All four were unsigned, through an improvised `update.json` this crate no longer parses. **Nothing signed has yet reached a machine.** |
 | `crates/plexos-gpu` | 46 tests, and it has now answered the question it was written for — on four machines, three of which it was wrong about until they were tried. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
 | `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, `reboot(2)`, `sethostname(2)`, PTY allocation for the console terminal, reaping children for PID 1, resolving partitions on a *named disk* rather than by label alone, and `statvfs(3)` — free space is the one thing this appliance reports about itself that is not readable as a file. 100 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
@@ -92,7 +92,7 @@ list is about the system. Check against this before committing; it is short on p
 | `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 47 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree. |
 | Installer, updater, first-boot wizard | Not started. |
 
-**PlexOS is installed on the reference laptop's internal disk and boots from it.** Its own
+**MediaLith is installed on the reference laptop's internal disk and boots from it.** Its own
 installer put it there (ADR-0016); the USB stick it was installed from is still attached and
 still holds a working system, which makes it the recovery medium. Everything below that
 says "USB stick" is history rather than the present arrangement.
@@ -212,7 +212,7 @@ clicked through.
 it — was partitioned, written and booted: `/api/install` listed it as `EFI system
 partition, Microsoft reserved partition, Basic data partition` so there was no mistaking
 whose disk it was, all five refusals were exercised against the real machine first, and
-the install took under two minutes. The machine now boots PlexOS from its internal disk
+the install took under two minutes. The machine now boots MediaLith from its internal disk
 with an empty `/var`, which means a new device token, a new TLS key, and Plex reported as
 not provisioned — a fresh appliance, exactly as ADR-0016 intended.
 
@@ -399,7 +399,7 @@ shell's output cannot be read without one.
 | `/api/metrics/processes` | What is running. **A `POST`**, so the method-based gate applies: a process list with command lines is not something every reader on the LAN should have |
 | `/api/plex/sessions` | What Plex is playing now: who, on what, and what is happening to the picture and the sound (ADR-0018). **A `POST`** for the same reason and a stronger one — a title, a username and a device name are what somebody in the house is doing this evening |
 | `/api/setup` | The first-boot flow: ordered steps, computed not stored (ADR-0016) |
-| `/api/install` | Disks, refusals, and installing PlexOS onto one (ADR-0016) |
+| `/api/install` | Disks, refusals, and installing MediaLith onto one (ADR-0016) |
 | `/api/update` | Check and install a signed update; gate verdict; rollback record (ADR-0005/0006) |
 | `/api/provision` | Install Plex from Plex's own packages (ADR-0010) |
 | `/api/config`, `/api/network` | Hostname, timezone, static addressing (ADR-0008) |
@@ -501,7 +501,7 @@ and its certificate — sign with the second one.
   table while generating each filesystem image, into a copy — so `TARGET_DIR/etc/passwd`
   never gains the accounts, and anything in `post-image.sh` that reads `TARGET_DIR/etc`
   is reading the tree from before they existed. That is how the `plex` account ended up
-  in `rootfs.erofs` and absent from the `/usr` image PlexOS actually boots. `post-image.sh`
+  in `rootfs.erofs` and absent from the `/usr` image MediaLith actually boots. `post-image.sh`
   stage 0 now runs Buildroot's own `mkusers` against `TARGET_DIR` first, and stage 1
   refuses to build an image whose factory `/etc` is missing an account `users.table`
   declares. The Buildroot behaviour has not changed, so anything else added here that
@@ -784,9 +784,9 @@ and its certificate — sign with the second one.
   verdict and the version string with it, and the system that comes back is the older one,
   which cannot tell it is a replacement. `/var` is the only surface that survives, and it
   survives because of the rule that makes it awkward everywhere else.
-- **Everything in PlexOS resolves partitions by label, and an installer makes labels
+- **Everything in MediaLith resolves partitions by label, and an installer makes labels
   ambiguous — including for the updater and for PID 1.** This is bigger than the console
-  bug below it and was found the same evening. With PlexOS installed to an internal disk and
+  bug below it and was found the same evening. With MediaLith installed to an internal disk and
   the USB stick still plugged in, the machine has two partitions called `esp`, two called
   `usr_a`, two called `var`. `plexos_sys::device::by_partlabel` returns whichever the kernel
   enumerated first, and it is used by the updater to choose the partition to *write*, by
@@ -796,7 +796,7 @@ and its certificate — sign with the second one.
   running from the USB stick, and both the `/usr` write *and* the boot entry landed on the
   internal disk. The stick's ESP never saw the new entry. It was harmless and it was not a
   decision. **Label resolution has to be scoped to the disk the running system is on**, and until
-  it is, a machine with two PlexOS disks attached is a machine whose updates land somewhere
+  it is, a machine with two MediaLith disks attached is a machine whose updates land somewhere
   arbitrary. **Fixed** by `by_partlabel_on(disk, label)` and a running-disk lookup that goes
   through dm-verity's `slaves` rather than through a label — in the updater's partition
   writes, the boot-entry install, the installer's own source resolution, and the health
@@ -818,7 +818,7 @@ and its certificate — sign with the second one.
   true.** The console found the disk it was running from by resolving the ESP's partition
   label. That worked until the first successful install, at which point the machine had two
   partitions called `esp` and `by_partlabel` returned the one on the disk that had just been
-  written — so the console reported PlexOS as running from the *target*, and would then have
+  written — so the console reported MediaLith as running from the *target*, and would then have
   offered the disk it was actually running from as somewhere to install. Accepting that
   erases the running system. The copy path had been designed against exactly this hazard,
   by resolving the source partitions before writing anything; the same hazard in a second
@@ -1009,7 +1009,7 @@ and its certificate — sign with the second one.
   defect in what the return *meant*.
 - **A schema written before the artefact exists describes an artefact that does not
   exist.** `plexos-types::manifest` had one `uki` field and one `os_version` of the form
-  `MAJOR.MINOR.PATCH`. PlexOS builds two UKIs, because `plexos.slot=` is on the command
+  `MAJOR.MINOR.PATCH`. MediaLith builds two UKIs, because `plexos.slot=` is on the command
   line *inside* one, and stamps its version `0.1.0.202607281844`, which that type cannot
   hold. Both were written months before either artefact existed, both had passing
   fixture-based tests, and neither could have carried a real update. What made it cheap was
@@ -1214,7 +1214,16 @@ there reaches GitHub and nothing else, and Buildroot fetches from a dozen other 
 
 ## Open decisions, none blocking
 
-1. **Name.** "PlexOS" uses a third-party trademark and likely needs to change. Cheap
-   now, a state migration later — `/var/lib/plexos` is in the frozen layout.
+1. **Name — decided.** The product is **MediaLith** (2026-08-11). This entry existed
+   because "PlexOS" used a third-party trademark; it no longer does, and the disclaimer
+   in the README states the absence of any affiliation with Plex Inc.
+   **The internal namespace was deliberately not renamed with it**, and that is the part
+   still open: `/var/lib/plexos`, `/etc/plexos/config.toml`, `plexos.slot`, the
+   `plexos-<version>.efi` boot entries, the manifest's `product` field and every crate
+   name still say `plexos`. Each is a contract with a disk or with a release already in
+   the field — see "Names that did not change" in the README. Moving any of them is a
+   migration in which a release must accept both spellings for long enough that no machine
+   is left behind, and it gets cheaper the sooner it is done and more expensive the more
+   machines exist.
 2. **Secure Boot keys.** Enrol our own, or go through Microsoft's shim process.
 3. **Licence.** Not chosen.

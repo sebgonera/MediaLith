@@ -34,7 +34,7 @@ CERT="${3:-}"
 
 usage() {
     printf >&2 'usage: tools/sign-bundle.sh <bundle-dir> <signing-key> <certificate-file>\n'
-    printf >&2 '  the bundle is <output>/images/plexos-update\n'
+    printf >&2 '  the bundle is <output>/images/medialith-update\n'
     exit 2
 }
 

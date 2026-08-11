@@ -1,4 +1,4 @@
-# PlexOS — x86-64 UEFI appliance target.
+# MediaLith — x86-64 UEFI appliance target.
 #
 # Every option here was resolved by actually running Buildroot's kconfig against this
 # file, not by reading option names out of the tree. That distinction earned its keep:
@@ -61,7 +61,7 @@ BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_LATEST_VERSION=y
 
 # A fragment rather than a full linux.config. Carrying thousands of lines of
-# architecture defaults obscures the handful of options PlexOS actually requires, and
+# architecture defaults obscures the handful of options MediaLith actually requires, and
 # makes every kernel bump a merge conflict. The fragment states our requirements and
 # nothing else.
 BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y

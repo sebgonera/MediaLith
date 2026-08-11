@@ -15,13 +15,13 @@
 #   curl -k -X POST https://<appliance>/api/update \
 #        -H "Authorization: Bearer <device token>" \
 #        -H 'Content-Type: application/json' \
-#        -d '{"install":true,"source":"http://<this host>:8080/plexos-update"}'
+#        -d '{"install":true,"source":"http://<this host>:8080/medialith-update"}'
 
 set -euo pipefail
 
 OUTPUT="${1:-${PLEXOS_OUTPUT:-$(pwd)/output}}"
 PORT="${2:-8080}"
-BUNDLE="${OUTPUT}/images/plexos-update"
+BUNDLE="${OUTPUT}/images/medialith-update"
 
 [ -d "${BUNDLE}" ] || {
     printf >&2 'no bundle at %s\n' "${BUNDLE}"
@@ -48,9 +48,9 @@ fi
 # write completes, the entry is installed, and systemd-boot keeps choosing the old one.
 VERSION=$(sed -n 's/.*"release": *"\([^"]*\)".*/\1/p' "${BUNDLE}/manifest.json")
 SIGNER=$(sed -n 's/.*"key_id": *"\([^"]*\)".*/\1/p' "${BUNDLE}/manifest.json")
-printf 'serving PlexOS %s from %s, signed by %s\n' "${VERSION}" "${BUNDLE}" "${SIGNER}"
+printf 'serving MediaLith %s from %s, signed by %s\n' "${VERSION}" "${BUNDLE}" "${SIGNER}"
 printf '  the appliance must be running something that sorts BELOW %s\n' "${VERSION}"
-printf '  source URL: http://%s:%s/plexos-update\n\n' \
+printf '  source URL: http://%s:%s/medialith-update\n\n' \
     "$(hostname -I 2>/dev/null | awk '{print $1}')" "${PORT}"
 
 # --bind is not passed: the appliance is a different machine, so binding loopback only

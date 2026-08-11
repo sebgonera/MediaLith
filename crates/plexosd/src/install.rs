@@ -1,4 +1,4 @@
-//! Putting PlexOS on a disk (ADR-0016).
+//! Putting MediaLith on a disk (ADR-0016).
 //!
 //! The appliance boots from a USB stick, prints a URL, and from a browser somebody chooses
 //! a disk. What gets written is **the system that is running** — its `/usr`, its verity
@@ -8,7 +8,7 @@
 //!
 //! # This is the most destructive thing in the repository
 //!
-//! Everything else here writes to a partition PlexOS owns. This erases a whole disk that
+//! Everything else here writes to a partition MediaLith owns. This erases a whole disk that
 //! may belong to somebody's computer, and the machine it was written for has Windows on its
 //! internal drive. So the shape of this module is refusals: [`candidates`] reads, [`vet`]
 //! decides, and only [`install`] writes.
@@ -78,7 +78,7 @@ pub struct Candidate {
 /// Why a disk will not be installed onto.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    /// It is the disk PlexOS is running from.
+    /// It is the disk MediaLith is running from.
     IsSource(String),
     /// There is no such disk.
     Unknown(String),
@@ -98,8 +98,8 @@ impl std::fmt::Display for Refusal {
         match self {
             Self::IsSource(name) => write!(
                 f,
-                "{name} is the disk PlexOS is running from, so it cannot be installed \
-                 onto. Remedy: choose the disk you want PlexOS to live on. This one is \
+                "{name} is the disk MediaLith is running from, so it cannot be installed \
+                 onto. Remedy: choose the disk you want MediaLith to live on. This one is \
                  the installer, and erasing it half way through would leave a machine \
                  with neither system."
             ),
@@ -114,7 +114,7 @@ impl std::fmt::Display for Refusal {
                 f,
                 "this would erase everything on {wanted}, and the confirmation said \
                  {typed:?}. Remedy: type {wanted} exactly. The confirmation is typed \
-                 rather than clicked because this is the one thing PlexOS does that \
+                 rather than clicked because this is the one thing MediaLith does that \
                  destroys data which was never its own."
             ),
         }
@@ -123,7 +123,7 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
-/// Every disk on this machine, with the one PlexOS is running from marked.
+/// Every disk on this machine, with the one MediaLith is running from marked.
 ///
 /// Partitions, device-mapper devices and loop devices are not disks and are skipped. What
 /// remains is what somebody could install onto, whether or not they should.
@@ -355,7 +355,7 @@ impl Source {
     /// already-installed machine, would otherwise be able to copy the wrong system.
     ///
     /// # Errors
-    /// If any of the three cannot be found, which means this is not a PlexOS disk and
+    /// If any of the three cannot be found, which means this is not a MediaLith disk and
     /// there is nothing to copy.
     pub fn resolve(disk: &str, slot: plexos_types::Slot) -> io::Result<Self> {
         Ok(Self {
@@ -381,7 +381,7 @@ const VERITY_MAPPER_NAME: &str = "plexos-usr";
 /// first successful install. Labels are not unique across disks: the moment a target's
 /// table is written the machine has two partitions called `esp`, and
 /// `by_partlabel` returns whichever the kernel enumerated first — which was the disk that
-/// had just been installed onto. The console then reported that PlexOS was running from the
+/// had just been installed onto. The console then reported that MediaLith was running from the
 /// *target*, and would have offered the disk it was actually running from as somewhere to
 /// install. That is not a cosmetic error: accepting it erases the running system.
 ///
@@ -829,7 +829,7 @@ mod tests {
     use plexos_gpu::env::Fixture;
 
     /// A machine shaped like the reference laptop: an internal `NVMe` with Windows on it,
-    /// and the USB stick PlexOS booted from.
+    /// and the USB stick MediaLith booted from.
     ///
     /// Built from the sizes and models read off that machine rather than invented, because
     /// a fixture somebody imagined is a test that agrees with the code and not with the
@@ -919,7 +919,7 @@ mod tests {
     #[test]
     fn this_systems_own_machinery_is_not_offered_as_a_disk() {
         // loop0 is the mounted Plex app image and dm-0 is the verified /usr. Offering
-        // either would be offering to install PlexOS onto PlexOS.
+        // either would be offering to install MediaLith onto MediaLith.
         let names: Vec<String> = candidates(&laptop(), Some("sda"))
             .unwrap()
             .into_iter()
@@ -1077,7 +1077,7 @@ mod tests {
         // Found on hardware within a minute of the first successful install. The first
         // implementation resolved the ESP by partition label -- and the moment a target's
         // table is written there are two partitions called `esp`, so it returned the disk
-        // that had just been installed onto. The console then reported PlexOS as running
+        // that had just been installed onto. The console then reported MediaLith as running
         // from the target, and would have offered the disk it was really running from.
         // Accepting that erases the running system.
         let fixture = laptop()

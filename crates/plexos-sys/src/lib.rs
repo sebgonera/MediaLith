@@ -1,4 +1,4 @@
-//! The audited unsafe surface of PlexOS.
+//! The audited unsafe surface of MediaLith.
 //!
 //! Every other crate in the workspace sets `unsafe_code = "forbid"`. This one exists
 //! so that they can: the work `plexos-init` does as PID 1 — creating a device-mapper

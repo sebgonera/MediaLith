@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Assemble a bootable PlexOS disk image.
+# Assemble a bootable MediaLith disk image.
 #
 # All six stages run, and the image they produce boots: systemd-boot loads the UKI,
 # dm-verity opens, /usr mounts read-only from it, /var and the /etc overlay come up,
@@ -36,7 +36,7 @@ BOARD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${BOARD_DIR}/../../../.." && pwd)"
 
 WORK="${BINARIES_DIR}/plexos-work"
-IMAGE="${BINARIES_DIR}/plexos.img"
+IMAGE="${BINARIES_DIR}/medialith.img"
 
 # --------------------------------------------------------------------------
 # Knobs
@@ -287,9 +287,26 @@ check_factory_accounts() {
 #
 # SORT_KEY is what systemd-boot groups entries by before it compares versions; entries
 # with one and entries without sort by different rules, so every entry gets it.
+#
+# NAME and PRETTY_NAME are the product, and they are what a person reads: the console
+# header, the boot menu, and the vendor string Plex reports to its clients (plexos-plex
+# passes NAME through as PLEX_MEDIA_SERVER_INFO_VENDOR).
+#
+# ID and SORT_KEY deliberately still say `plexos`, and this is not an oversight:
+#
+#   * SORT_KEY is what systemd-boot groups by. An ESP holding one UKI keyed `plexos` and
+#     another keyed `medialith` is two groups, and ADR-0005 depends on the newest version
+#     being chosen. How the bootloader orders *between* groups has not been established
+#     here, and the moment to find out is not on a machine that has just been updated.
+#   * ID has no consumer in this tree -- checked -- so changing it would buy nothing and
+#     risk the same class of surprise.
+#
+# Legacy internal identifiers retained for update/rollback compatibility after the
+# MediaLith product rename. VERSION_ID is untouched for the sharper reason that the
+# updater's anti-rollback floor is read from it.
 stage_os_release() {
     msg "stamping the version into os-release"
-    printf 'NAME="PlexOS"\nID=plexos\nVERSION_ID=%s\nPRETTY_NAME="PlexOS %s"\nSORT_KEY=plexos\n' \
+    printf 'NAME="MediaLith"\nID=plexos\nVERSION_ID=%s\nPRETTY_NAME="MediaLith %s"\nSORT_KEY=plexos\n' \
         "${PLEXOS_VERSION}" "${PLEXOS_VERSION}" > "${WORK}/os-release"
     install -D -m 0644 "${WORK}/os-release" "${TARGET_DIR}/usr/lib/os-release"
     msg "  VERSION_ID=${PLEXOS_VERSION}"
@@ -807,7 +824,13 @@ build_esp() {
 
     rm -f "${esp}"
     truncate -s "${esp_mib}M" "${esp}"
-    "${HOST_DIR}/sbin/mkfs.vfat" -F 32 -n PLEXOS_ESP "${esp}" >/dev/null
+    # The FAT volume label, which nothing in this system reads: the ESP is found by its
+    # *GPT partition* label (`esp`, ADR-0003) everywhere. This string exists for the one
+    # case where somebody plugs the disk into another computer and a file manager names it,
+    # so it is product branding with no compatibility weight, and it reaches newly built
+    # images only — an installed machine's ESP is copied byte for byte and keeps whatever
+    # it had. Eleven characters is the FAT limit.
+    "${HOST_DIR}/sbin/mkfs.vfat" -F 32 -n MEDIALITH "${esp}" >/dev/null
 
     local -r mcopy="${HOST_DIR}/bin/mcopy"
     local -r mmd="${HOST_DIR}/bin/mmd"
@@ -957,7 +980,7 @@ write_partition() {
 # every host with a Buildroot tree, and a manifest must be written exactly once -- the
 # signature covers its bytes, so a second tool that reformats it breaks it.
 build_bundle() {
-    local bundle="${BINARIES_DIR}/plexos-update"
+    local bundle="${BINARIES_DIR}/medialith-update"
     msg "building update bundle"
 
     rm -rf "${bundle}"

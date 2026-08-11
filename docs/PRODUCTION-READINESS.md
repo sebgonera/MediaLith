@@ -179,11 +179,19 @@ fatal" posture as the rest of boot, closes this.
 
 ### 1.5 Name and licence
 
-Both already recorded as open decisions, both now blocking rather than deferrable:
+Two open decisions, and only one of them is still blocking:
 
-- **"PlexOS" uses a third-party trademark.** Renaming after release is a state
-  migration — `/var/lib/plexos` is in the frozen layout — so the last cheap moment
-  to decide is before the first unit ships, not after.
+- **The product name is settled: MediaLith** (2026-08-11), and it borrows nobody's
+  trademark. What this entry warned about has happened in the cheapest possible form —
+  the rename covered everything a person reads and **deliberately touched nothing on
+  disk**, so no machine needed migrating and a rollback to a release published under the
+  old name still works.
+  What is left is the internal namespace: `/var/lib/plexos`, `/etc/plexos/config.toml`,
+  the `plexos.` boot parameters, the `plexos-<version>.efi` entries and the manifest's
+  `product` field. None of it is visible to an owner, and each is a contract with a disk
+  or with an installed release, so moving it needs a release that accepts both spellings
+  for long enough that no machine is left behind. Still cheapest before the first unit
+  ships; no longer blocking, because nothing about it is wrong — only inconsistent.
 - **No licence is chosen.** Nothing can be distributed at all until one is. The
   image also aggregates GPL components (kernel, Buildroot packages), so shipping
   binaries carries source-offer obligations that need an answer (Buildroot's

@@ -23,7 +23,7 @@
 //! delta transport can be introduced later with no `manifest_version` bump: a device
 //! that does not implement it simply skips it and takes the full image.
 //!
-//! **The schema describes the artefacts PlexOS actually builds.** Two of its fields were
+//! **The schema describes the artefacts MediaLith actually builds.** Two of its fields were
 //! written before anything had been built and did not survive contact with the images:
 //! there is one UKI *per slot*, because `plexos.slot=` is on the kernel command line
 //! inside it and the appliance cannot build one (that needs `objcopy`); and the version
@@ -132,7 +132,7 @@ impl fmt::Display for ManifestError {
             Self::UnsupportedVersion { found, supported } => write!(
                 f,
                 "manifest version {found} is not supported by this release \
-                 (supports {supported}); update to a newer PlexOS release first"
+                 (supports {supported}); update to a newer MediaLith release first"
             ),
             Self::Malformed(detail) => write!(f, "malformed manifest: {detail}"),
             Self::Inconsistent(detail) => write!(
@@ -337,7 +337,7 @@ pub enum Source {
         /// Location of the artifact: an absolute `http`/`https` URL, or a bare file name
         /// beside the manifest.
         ///
-        /// A bare name is what PlexOS publishes, and the reason is that the signature
+        /// A bare name is what MediaLith publishes, and the reason is that the signature
         /// covers these bytes. An absolute URL fixed at build time would tie a signed
         /// manifest to the one address it was built for, so moving a bundle to another
         /// host — which is every publish this project has ever done — would mean

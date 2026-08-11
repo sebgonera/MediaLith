@@ -224,7 +224,7 @@ report() {
     errors=$(grep -cE 'Error [0-9]+$' "${LOG}" 2>/dev/null)
     errors=${errors:-0}
 
-    printf '\n  PlexOS build  %s  %s%%\n' "$(bar "${pct}")" "${pct}"
+    printf '\n  MediaLith build  %s  %s%%\n' "$(bar "${pct}")" "${pct}"
     if [ "${unknown}" -eq 1 ]; then
         printf '  %-14s %s\n' "packages" "${n_done} done; TOTAL UNKNOWN, so this bar reads high"
     else
@@ -255,7 +255,7 @@ report() {
         grep -E 'Error [0-9]+$' "${LOG}" 2>/dev/null | tail -1 | sed 's/^/    /'
     fi
     if [ "${status}" = "COMPLETE" ]; then
-        printf '\n  Image: %s\n' "${OUTPUT}/images/plexos.img"
+        printf '\n  Image: %s\n' "${OUTPUT}/images/medialith.img"
     fi
     if [ "${status}" = "STOPPED" ] && [ "${pct}" -lt 100 ]; then
         printf '\n  The build is not running. Resume it with:\n'

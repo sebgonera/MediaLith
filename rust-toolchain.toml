@@ -1,5 +1,5 @@
 [toolchain]
-# Pinned deliberately: PlexOS components run as PID 1 and as an updater with no
+# Pinned deliberately: MediaLith components run as PID 1 and as an updater with no
 # recovery path, so the compiler is part of the reproducible build, not an ambient
 # detail of whoever's machine ran the build.
 channel = "1.94"

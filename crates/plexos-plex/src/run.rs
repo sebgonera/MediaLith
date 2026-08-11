@@ -277,7 +277,7 @@ pub fn grants(mount: &Path, media: &[PathBuf]) -> Vec<Grant> {
         // and rejected twice over: Landlock rules need the path to exist when the ruleset
         // is built, so a machine that has not downloaded a codec yet would silently get no
         // rule and fail exactly as before until a restart; and creating that directory
-        // ourselves would mean PlexOS writing into a layout ADR-0010 says belongs to Plex.
+        // ourselves would mean MediaLith writing into a layout ADR-0010 says belongs to Plex.
         //
         // What the confinement is *for* is unchanged: nothing outside these grants is
         // reachable, so `/etc`, `/root`, the ESP, the update path and every other slot
@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn the_binary_is_where_plexs_own_package_puts_it() {
         // Including the space in the file name, which is upstream's and not a typo.
-        let spec = spec(&mount(), "PlexOS", "0.1.0", "x86_64");
+        let spec = spec(&mount(), "MediaLith", "0.1.0", "x86_64");
         assert_eq!(
             spec.binary,
             Path::new("/run/plexos/plex/usr/lib/plexmediaserver/Plex Media Server")
@@ -470,7 +470,7 @@ mod tests {
         // Read out of plexmediaserver.service in the package rather than invented. A
         // missing variable here does not stop Plex starting; it makes it behave oddly
         // later in ways nothing connects back to this list.
-        let spec = spec(&mount(), "PlexOS", "0.1.0", "x86_64");
+        let spec = spec(&mount(), "MediaLith", "0.1.0", "x86_64");
         assert_eq!(
             value(&spec, "PLEX_MEDIA_SERVER_HOME"),
             Some("/run/plexos/plex/usr/lib/plexmediaserver")
@@ -485,7 +485,7 @@ mod tests {
         );
         assert_eq!(
             value(&spec, "PLEX_MEDIA_SERVER_INFO_VENDOR"),
-            Some("PlexOS")
+            Some("MediaLith")
         );
     }
 
@@ -494,7 +494,7 @@ mod tests {
         // Without TMPDIR Plex uses /tmp, which here is a tmpfs. A 4K transcode would
         // then be written into RAM, and the machine would meet the OOM killer rather
         // than finish the file.
-        let spec = spec(&mount(), "PlexOS", "0.1.0", "x86_64");
+        let spec = spec(&mount(), "MediaLith", "0.1.0", "x86_64");
         assert_eq!(value(&spec, "TMPDIR"), Some(paths::PLEX_TRANSCODE_DIR));
         assert!(
             paths::PLEX_TRANSCODE_DIR.starts_with("/var/"),
@@ -507,7 +507,7 @@ mod tests {
         // plexosd is started by PID 1 and inherits an empty environment; Plex's own
         // launcher shells out to grep, awk and uname. This is the same trap that cost
         // a boot in plexosd::net.
-        let spec = spec(&mount(), "PlexOS", "0.1.0", "x86_64");
+        let spec = spec(&mount(), "MediaLith", "0.1.0", "x86_64");
         let path = value(&spec, "PATH").expect("a PATH");
         assert!(path.contains("/usr/bin"), "{path}");
         assert!(path.contains("/sbin"), "{path}");
@@ -749,7 +749,7 @@ mod tests {
 
     #[test]
     fn the_directories_plex_owns_are_the_two_it_writes_to() {
-        let spec = spec(&mount(), "PlexOS", "0.1.0", "x86_64");
+        let spec = spec(&mount(), "MediaLith", "0.1.0", "x86_64");
         assert_eq!(
             spec.owned_directories,
             vec![

@@ -2,7 +2,7 @@ config BR2_PACKAGE_PLEXOSD
 	bool "plexosd"
 	depends on BR2_x86_64
 	help
-	  PlexOS management daemon.
+	  MediaLith management daemon.
 
 	  Its first job, and the reason it exists before any management API
 	  does, is the boot health gate: plexosd declares a boot good, and

@@ -114,7 +114,7 @@ pub struct Status {
 
 /// Pulls one `KEY=value` out of a kernel command line.
 ///
-/// Values are not quoted on the command line PlexOS builds, so this does not attempt
+/// Values are not quoted on the command line MediaLith builds, so this does not attempt
 /// to unquote them; doing so would invent a syntax the producer never emits.
 #[must_use]
 pub fn cmdline_value(cmdline: &str, key: &str) -> Option<String> {
@@ -257,10 +257,10 @@ mod tests {
 
     #[test]
     fn os_release_values_lose_their_quotes() {
-        let contents = "NAME=\"PlexOS\"\nVERSION_ID=0.1.0\nPRETTY_NAME=\"PlexOS 0.1.0\"\n";
+        let contents = "NAME=\"MediaLith\"\nVERSION_ID=0.1.0\nPRETTY_NAME=\"MediaLith 0.1.0\"\n";
         assert_eq!(
             os_release_value(contents, "PRETTY_NAME").unwrap(),
-            "PlexOS 0.1.0"
+            "MediaLith 0.1.0"
         );
         assert_eq!(os_release_value(contents, "VERSION_ID").unwrap(), "0.1.0");
     }

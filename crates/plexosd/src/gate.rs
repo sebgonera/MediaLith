@@ -347,6 +347,10 @@ fn trial_state(device: &str, running: &str) -> Trial {
 /// is not a way to check the fix.
 #[must_use]
 pub fn decide_trial(entries: &[crate::bootcounter::BootEntry], running: &str) -> Trial {
+    // Legacy `plexos-` prefix, and it must agree with `esp::install_entry` exactly -- see
+    // the comment there for what a disagreement costs. Retained after the MediaLith rename
+    // for that reason: the entry this build boots from may have been written by a release
+    // that predates the name.
     let running_stem = format!("plexos-{running}");
 
     let Some(booted) = entries.iter().find(|e| e.stem == running_stem) else {

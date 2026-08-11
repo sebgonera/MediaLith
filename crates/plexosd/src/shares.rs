@@ -253,7 +253,7 @@ impl std::fmt::Display for Error {
                 let remedy = match cause.kind() {
                     io::ErrorKind::InvalidInput => {
                         "The kernel rejected the mount options, not the server. This is a \
-                         fault in PlexOS rather than anything to check on the NAS: the \
+                         fault in MediaLith rather than anything to check on the NAS: the \
                          option string is built in plexosd::shares."
                     }
                     io::ErrorKind::PermissionDenied => {
@@ -280,7 +280,7 @@ impl std::fmt::Display for Error {
                 f,
                 "nothing would mount at {}. Every option set was refused:\n  {}\n\
                  An EINVAL here is the kernel rejecting the options and is a fault in \
-                 PlexOS; an EACCES is the server refusing this machine's address, which \
+                 MediaLith; an EACCES is the server refusing this machine's address, which \
                  is not the build host's.",
                 target.display(),
                 attempts.join("\n  ")
@@ -955,7 +955,7 @@ mod tests {
             cause: io::Error::from(io::ErrorKind::InvalidInput),
         };
         let message = bad_options.to_string();
-        assert!(message.contains("fault in PlexOS"), "{message}");
+        assert!(message.contains("fault in MediaLith"), "{message}");
         assert!(
             !message.contains("export"),
             "and does not blame the NAS: {message}"

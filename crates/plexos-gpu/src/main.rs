@@ -1,6 +1,6 @@
 //! `plexos-gpu` — report whether hardware transcoding will work on this machine.
 //!
-//! Runs on PlexOS at boot, and standalone on any Linux system, which is the point: the
+//! Runs on MediaLith at boot, and standalone on any Linux system, which is the point: the
 //! premise of the whole project can be checked against real hardware before an image
 //! exists to check it on.
 //!

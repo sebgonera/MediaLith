@@ -610,8 +610,8 @@ fn running_disk_or_refuse() -> Result<String, Box<dyn std::error::Error>> {
     crate::install::running_disk(&plexos_gpu::env::System).ok_or_else(|| {
         Box::<dyn std::error::Error>::from(
             "this machine's own disk could not be identified, so nothing will be written. \
-             PlexOS finds it behind the verified /usr; not finding it means this is not a \
-             booted PlexOS system.",
+             MediaLith finds it behind the verified /usr; not finding it means this is not a \
+             booted MediaLith system.",
         )
     })
 }

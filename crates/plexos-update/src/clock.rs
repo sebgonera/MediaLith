@@ -75,7 +75,7 @@ pub fn rfc3339(unix_seconds: u64) -> String {
 
 /// The UTC build stamp out of a version string: `0.1.0.202607281844` → `202607281844`.
 ///
-/// PlexOS versions are a release followed by a `YYYYMMDDHHMM` stamp. That stamp is the
+/// MediaLith versions are a release followed by a `YYYYMMDDHHMM` stamp. That stamp is the
 /// only timestamp on the appliance that cannot be wrong, because the build wrote it rather
 /// than reading it from a clock — which is what makes it both the sanity check for the
 /// clock ([`built_at`]) and the anti-rollback counter (`crate::sequence`).

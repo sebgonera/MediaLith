@@ -2,7 +2,7 @@
 # Without these, clippy::doc_markdown demands backticks around them, which would
 # wrongly render names as code. ".." keeps clippy's own default list.
 doc-valid-idents = [
-    "PlexOS",
+    "MediaLith",
     "OpenEmbedded",
     "QuickSync",
     "VA-API",

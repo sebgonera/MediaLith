@@ -312,7 +312,7 @@ const DRI: &str = "/dev/dri";
 /// **This is what `udev` does everywhere else, and there is no `udev` here.** DRM does
 /// not set a mode on its device nodes, so `devtmpfs` creates them `0600 root:root`; every
 /// ordinary distribution then relaxes the render nodes with a rule like
-/// `SUBSYSTEM=="drm", KERNEL=="renderD*", MODE="0666"`. PlexOS has no such rule and
+/// `SUBSYSTEM=="drm", KERNEL=="renderD*", MODE="0666"`. MediaLith has no such rule and
 /// nothing else was doing it, so Plex — which runs as uid 900 and has its supplementary
 /// groups deliberately cleared — could not open the device at all.
 ///
@@ -1100,7 +1100,7 @@ mod tests {
     fn signed_in(token: &str) -> String {
         format!(
             "<?xml version=\"1.0\"?><Preferences MachineIdentifier=\"m\" \
-             PlexOnlineToken=\"{token}\" FriendlyName=\"PlexOS\"/>"
+             PlexOnlineToken=\"{token}\" FriendlyName=\"MediaLith\"/>"
         )
     }
 
@@ -1111,7 +1111,7 @@ mod tests {
         // the worst possible moment -- the first restart after the account was lost.
         assert!(carries_account_token(&signed_in("abc123")));
         assert!(!carries_account_token(
-            "<Preferences PlexOnlineToken=\"\" FriendlyName=\"PlexOS\"/>"
+            "<Preferences PlexOnlineToken=\"\" FriendlyName=\"MediaLith\"/>"
         ));
         assert!(!carries_account_token(
             "<Preferences MachineIdentifier=\"m\"/>"
@@ -1334,7 +1334,7 @@ mod tests {
         // names neither this list nor that one.
         let spec = plexos_plex::run::spec(
             Path::new(paths::PLEX_MOUNT),
-            "PlexOS",
+            "MediaLith",
             "0.1.0",
             std::env::consts::ARCH,
         );

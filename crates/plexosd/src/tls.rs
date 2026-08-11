@@ -116,7 +116,7 @@ fn issue(dir: &Path, names: &[String], key_pair: &rcgen::KeyPair) -> io::Result<
     let mut params = rcgen::CertificateParams::new(names.to_vec()).map_err(bad_material)?;
     params
         .distinguished_name
-        .push(rcgen::DnType::CommonName, "PlexOS console");
+        .push(rcgen::DnType::CommonName, "MediaLith console");
 
     let certificate = params.self_signed(key_pair).map_err(bad_material)?;
     let der = certificate.der().to_vec();

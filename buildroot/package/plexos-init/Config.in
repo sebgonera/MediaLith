@@ -2,7 +2,7 @@ config BR2_PACKAGE_PLEXOS_INIT
 	bool "plexos-init"
 	depends on BR2_x86_64
 	help
-	  PlexOS PID 1: sets up dm-verity over the /usr image, assembles
+	  MediaLith PID 1: sets up dm-verity over the /usr image, assembles
 	  the root filesystem, and supervises services.
 
 	  Built as a fully static binary, which is not a preference. The

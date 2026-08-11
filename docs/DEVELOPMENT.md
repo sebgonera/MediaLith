@@ -176,7 +176,7 @@ slot A populated.
 
 ### Under QEMU first
 
-PlexOS boots UEFI only, so QEMU needs OVMF firmware. Give it a writable copy of the
+MediaLith boots UEFI only, so QEMU needs OVMF firmware. Give it a writable copy of the
 variable store, or the boot order cannot be recorded:
 
 ```
@@ -346,7 +346,7 @@ sbverify --cert ~/.plexos-keys/secureboot/db.crt /tmp/boot.efi
 
 ### Enrolling the key in a machine, once
 
-Nothing in PlexOS does this. It is a person, in the firmware's own setup screens, and that
+Nothing in MediaLith does this. It is a person, in the firmware's own setup screens, and that
 is deliberate — see ADR-0017.
 
 1. Copy `db.auth`, `KEK.auth` and `PK.auth` somewhere the firmware can read. A FAT32 USB
@@ -356,7 +356,7 @@ is deliberate — see ADR-0017.
    be edited at all.
 3. Enrol `db.auth` into **db**. Some firmware calls this "Enroll key from file", some
    "Append", some hides it behind "Key Management". Then **look at the list** and confirm
-   `PlexOS Signature Database Key` is in it. Do not go on until it is.
+   `MediaLith Signature Database Key` is in it. Do not go on until it is.
 4. Enrol `KEK.auth` into **KEK**, and confirm it the same way.
 5. Enrol `PK.auth` into **PK** — **last**. This is the step that takes the platform out of
    Setup Mode and switches enforcement on.
@@ -391,7 +391,7 @@ Boot → Key Management**.
 ### When it does not boot
 
 A signed image on a machine that has not enrolled the key fails at the first step, and
-**the firmware's message will not mention PlexOS** — expect "Security Violation", "Invalid
+**the firmware's message will not mention MediaLith** — expect "Security Violation", "Invalid
 signature detected" or a screen naming only the file. That is the expected symptom of a
 correct image and an unenrolled machine, not of a bad build.
 
