@@ -459,6 +459,23 @@ and its certificate — sign with the second one.
   the defconfig, always re-run kconfig and check the options actually survived. Four
   were being dropped at one point, and the result was a uClibc toolchain that Plex
   cannot run on.
+- **The same trap again, in the kernel fragment, and it hid for months behind evidence
+  pointing somewhere else.** `CONFIG_FONT_TER16x32` and `CONFIG_FONT_TER10x18`
+  `depends on !SPARC && FONTS`, and `CONFIG_FONTS` was never set — so both were dropped
+  in silence and the image shipped with the two fonts the kernel picks on its own. The
+  command line then asked for `fbcon=font:TER16x32`, `find_font` returned NULL for a font
+  that had never been compiled in, and fbcon carried on with 8x16. On the reference
+  laptop's 2880x1620 panel that is a 360x101 grid: characters about three millimetres
+  tall on a fifteen-inch screen, reported by the person looking at it as "the text is
+  barely visible".
+  Everything about the symptom says *the command line does not take effect*, which is
+  where two attempts to diagnose it went. The fault is a Kconfig dependency two
+  directories away. **`ls output/build/linux-*/lib/fonts/*.o` answers it in a second** —
+  two object files where there should be four — and that is the shape of check worth
+  reaching for whenever a `CONFIG_*` symbol appears not to have done anything: look for
+  what the build *produced*, not for what the configuration says.
+  `plexos_sys::tty::use_font` now asks the kernel directly as well, so a font that is not
+  there fails in a log line naming both symbols instead of silently.
 - **Rollback reverts `/usr`, never `/var`.** Any migration must leave state the
   previous release can still read. `crates/plexos-init/src/state.rs` encodes this.
 - **Tests that only compare a thing to itself will pass while it is wrong.** Every
