@@ -3038,8 +3038,15 @@ function metricNum(value, decimals) {
  */
 function metricLevel(percent, warn, bad) {
   if (percent === null || percent === undefined) return "";
-  if (percent >= bad) return " bad-metricLevel";
-  if (percent >= warn) return " warn-metricLevel";
+  // `bad-level` and `warn-level`, spelled the way the stylesheet spells them. They read
+  // `bad-metricLevel` and `warn-metricLevel` for the whole life of this card, because the
+  // rename that made this function `metricLevel` was applied to the file rather than to the
+  // identifier and rewrote the two string literals with it. Nothing could see it: the class
+  // names are only ever concatenated into markup, so both halves stayed internally
+  // consistent and every meter simply drew in the accent -- a /var at 96% full looking
+  // exactly like one at 6%, which is the one reading this card exists to make loud.
+  if (percent >= bad) return " bad-level";
+  if (percent >= warn) return " warn-level";
   return "";
 }
 

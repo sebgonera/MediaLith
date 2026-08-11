@@ -2595,6 +2595,92 @@ mod tests {
     }
 
     #[test]
+    fn every_severity_a_meter_can_reach_is_one_the_stylesheet_paints() {
+        // A meter's whole job is that 96% does not look like 6%, and for the entire life of
+        // the activity card it did. `metricLevel` returned `warn-metricLevel` and
+        // `bad-metricLevel` while the stylesheet defined `.meter.warn-level` and
+        // `.meter.bad-level`, so no meter ever left the accent colour: a /var about to fill
+        // drew exactly like an empty one. The rename that produced it was applied to the file
+        // rather than to the identifier and rewrote the two string literals along with the
+        // function name -- trap one in CLAUDE.md, in the form where the result still parses,
+        // still renders, and is wrong only in a colour nobody had a reference for.
+        //
+        // Nothing that reads the page as text could catch it: both halves were internally
+        // consistent. So the class names are taken from the function *by running it*, and
+        // each one is looked up in the stylesheet.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+        let style = PAGE
+            .split_once("<style>")
+            .and_then(|(_, rest)| rest.split_once("</style>"))
+            .map(|(body, _)| body)
+            .expect("the page has one style block");
+
+        let start = script
+            .find("function metricLevel(")
+            .expect("the severity of a reading is decided by a named function");
+        let end = script[start..]
+            .find("\n}\n")
+            .map(|at| start + at + "\n}".len())
+            .expect("and ends at a brace in the first column");
+
+        let Some(engine) = ["node", "deno", "qjs"].into_iter().find(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        }) else {
+            println!(
+                "skip: the meter's severity classes were not compared against the stylesheet \
+                 -- no node, deno or qjs on this host. Install one, or a meter that never \
+                 leaves the accent colour will only be found by somebody noticing that a full \
+                 disk looks like an empty one."
+            );
+            return;
+        };
+
+        // Below the warning, between the two, and above the failure threshold: the three
+        // answers this function has, asked for with the defaults the meters use.
+        let program = format!(
+            "{}\nconsole.log([10, 80, 97].map(p => metricLevel(p, 70, 90)).join(\"\\n\"));",
+            &script[start..end]
+        );
+        let output = std::process::Command::new(engine)
+            .args(["-e", &program])
+            .output()
+            .expect("the engine runs");
+        assert!(
+            output.status.success(),
+            "the page's severity function did not run: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let got = String::from_utf8_lossy(&output.stdout);
+        let classes: Vec<&str> = got.lines().map(str::trim).collect();
+        assert_eq!(
+            classes.len(),
+            3,
+            "three readings, three answers: {classes:?}"
+        );
+        assert_eq!(classes[0], "", "an unremarkable reading earns no class");
+        for class in &classes[1..] {
+            assert!(
+                !class.is_empty(),
+                "a reading over a threshold must earn a class: {classes:?}"
+            );
+            assert!(
+                style.contains(&format!(".meter.{class} ")),
+                "the script puts `{class}` on a meter and the stylesheet paints no such \
+                 thing, so that meter draws in the accent however bad the reading is. The \
+                 stylesheet is the definition; the script is what changes."
+            );
+        }
+    }
+
+    #[test]
     fn the_process_list_cannot_be_read_without_a_credential() {
         // The whole reason this is a second route. A GET on this console needs nothing, by
         // design -- somebody diagnosing a machine that will not boot should not have to find
