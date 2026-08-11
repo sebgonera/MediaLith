@@ -518,11 +518,18 @@ fn choose_a_legible_font(screen: &std::fs::File, log: &mut dyn FnMut(&str)) {
 /// where the next line of text added to that screen breaks the QR code on somebody else's
 /// monitor, and the cost of asking for slack is a font one size down.
 fn fits(size: plexos_sys::tty::Size) -> bool {
-    /// Rows the pairing screen needs: a version-3 symbol with its quiet zone is 37, and
-    /// nine lines of text surround it.
-    const ROWS: u16 = 50;
-    /// Columns for the same symbol at two cells a module, with room either side.
-    const COLUMNS: u16 = 90;
+    /// Rows the pairing screen needs, which is the symbol plus the two lines that are
+    /// never given away. A version-3 symbol with its quiet zone is 37 modules, drawn one
+    /// row per module, and the countdown and the way out take four rows between them.
+    ///
+    /// 44 rather than 50, and the four rows of slack are deliberate rather than left over.
+    /// The first version asked for 50, which on a 1024x768 panel rejected **every** font --
+    /// 8x16 gives 48 rows there -- and left the screen with no QR code at all. Asking for
+    /// more than the layout needs does not make the layout safer; it makes the machine
+    /// refuse on screens the layout would have fitted.
+    const ROWS: u16 = 44;
+    /// Columns for the same symbol at two cells a module, with a little either side.
+    const COLUMNS: u16 = 80;
 
     size.rows >= ROWS && size.columns >= COLUMNS
 }
@@ -607,12 +614,26 @@ mod tests {
             rows: 60,
             columns: 192
         }));
-        // A 1366x768 laptop at 8x16 -> 48x170. Rejected by two rows, which is the slack
-        // being deliberate rather than tight.
-        assert!(!fits(Size {
+        // A 1024x768 panel at 8x16 -> 48x128. **Accepted**, and the previous version of
+        // this test asserted the opposite. Asking for 50 rows rejected every font on that
+        // screen and left it with no QR code at all, which is not caution -- it is refusing
+        // on a screen the layout fits. The pairing screen needs the symbol and four rows,
+        // and sheds its optional text to make room rather than reserving a fixed block.
+        assert!(fits(Size {
             rows: 48,
-            columns: 170
+            columns: 128
         }));
+        assert!(fits(Size {
+            rows: 44,
+            columns: 80
+        }));
+        assert!(
+            !fits(Size {
+                rows: 43,
+                columns: 80
+            }),
+            "below the symbol plus the countdown and the way out there is no screen"
+        );
         // And nothing absurd is accepted.
         assert!(!fits(Size {
             rows: 24,

@@ -290,26 +290,63 @@ fn footer(can_pair: bool) -> Line {
 }
 
 /// The pairing screen: a symbol, a countdown, and the way out.
+///
+/// **The symbol comes first and everything else is optional.** That ordering is the whole
+/// of this function, and it is a correction: the first version reserved ten rows for text
+/// and gave the symbol what was left, so on a short screen it reported that it had no room
+/// — which is a pairing screen with no pairing code on it, on the one machine whose owner
+/// was standing in front of it.
+///
+/// So the room is spent in order of what somebody came here for. The symbol, then the
+/// countdown, then the way out, then the wordmark and the explanations. A screen with
+/// thirty rows shows a QR code and a timer; a screen with sixty shows all of it.
 fn pairing(url: &str, seconds_left: u64, rows: usize, columns: usize) -> Vec<Line> {
-    let mut lines = vec![
-        Line::drawn(format!("{}PAIR A BROWSER{}", sgr::BOLD, sgr::RESET), 14),
-        Line::blank(),
-    ];
+    /// Rows that are never given away: the countdown and the way out, with a blank line
+    /// above each. Below this there is no screen worth drawing.
+    const ESSENTIAL: usize = 4;
 
-    match symbol_rows(url, rows, columns) {
-        Ok(drawn) => lines.extend(drawn),
+    let symbol = match symbol_rows(url, rows.saturating_sub(ESSENTIAL), columns) {
+        Ok(drawn) => drawn,
         Err(problem) => {
-            lines.push(Line::plain(problem));
-            lines.push(Line::blank());
-            lines.push(Line::plain(
-                "Use the recovery device code in the browser instead.",
-            ));
+            return vec![
+                Line::drawn(format!("{}PAIR A BROWSER{}", sgr::BOLD, sgr::RESET), 14),
+                Line::blank(),
+                Line::plain(problem),
+                Line::blank(),
+                Line::plain("Use the recovery device code in the browser instead."),
+            ];
         }
+    };
+
+    // What the symbol did not take. Everything below is added only while there is room, and
+    // in the order it is worth having.
+    let mut spare = rows.saturating_sub(symbol.len() + ESSENTIAL);
+    let mut afford = |cost: usize| {
+        let can = spare >= cost;
+        if can {
+            spare -= cost;
+        }
+        can
+    };
+
+    let mut lines = Vec::new();
+    if afford(2) {
+        lines.push(Line::drawn(
+            format!("{}PAIR A BROWSER{}", sgr::BOLD, sgr::RESET),
+            14,
+        ));
+        lines.push(Line::blank());
+    }
+    lines.extend(symbol);
+    lines.push(Line::blank());
+
+    if afford(1) {
+        lines.push(Line::plain("Scan to administer this appliance"));
+    }
+    if afford(1) {
+        lines.push(Line::blank());
     }
 
-    lines.push(Line::blank());
-    lines.push(Line::plain("Scan to administer this appliance"));
-    lines.push(Line::blank());
     lines.push(Line::drawn(
         format!(
             "{}{}Expires in {}{}",
@@ -320,11 +357,15 @@ fn pairing(url: &str, seconds_left: u64, rows: usize, columns: usize) -> Vec<Lin
         ),
         11 + countdown(seconds_left).chars().count(),
     ));
-    lines.push(Line::drawn(
-        format!("{}Single use{}", sgr::DIM, sgr::RESET),
-        10,
-    ));
-    lines.push(Line::blank());
+    if afford(1) {
+        lines.push(Line::drawn(
+            format!("{}Single use{}", sgr::DIM, sgr::RESET),
+            10,
+        ));
+    }
+    if afford(1) {
+        lines.push(Line::blank());
+    }
     lines.push(Line::drawn(
         format!("{}ESC  cancel      P  new code{}", sgr::DIM, sgr::RESET),
         27,
@@ -339,17 +380,12 @@ fn countdown(seconds: u64) -> String {
 
 /// The symbol as lines, or why there is not one.
 fn symbol_rows(url: &str, rows: usize, columns: usize) -> Result<Vec<Line>, String> {
-    // Room for the wordmark, the countdown and the footer as well as the symbol. Counted
-    // rather than guessed, and counted again when the console font doubled and halved the
-    // rows: the pairing screen puts nine lines around the symbol, and one spare row keeps
-    // the arithmetic from being exactly tight. A symbol that used every row would push the
-    // countdown off the bottom -- the one part of this screen that changes, and therefore
-    // the one a person is looking at.
-    const SURROUND: usize = 10;
-
+    // `rows` is what the caller has already decided the symbol may have, not the height of
+    // the screen. That is the correction: reserving a fixed block for text and giving the
+    // symbol the remainder is how a pairing screen came to have no pairing code on it.
     let symbol = Symbol::encode(url)?;
     let scale = symbol
-        .scale_for(rows.saturating_sub(SURROUND), columns)
+        .scale_for(rows, columns)
         .ok_or_else(|| "This screen is too small to show a pairing code.".to_owned())?;
 
     let width = symbol.drawn_width() * super::qr::CELLS_PER_MODULE * scale;
@@ -424,7 +460,10 @@ fn first_boot(
         Some(url) => {
             lines.push(Line::plain("Scan to open setup:"));
             lines.push(Line::blank());
-            match symbol_rows(url, rows, columns) {
+            // Twelve rows of welcome, recovery code and instructions surround it here,
+            // and unlike the pairing screen those are the point -- the code is the one
+            // thing this screen exists to show. So the symbol takes what is left.
+            match symbol_rows(url, rows.saturating_sub(14), columns) {
                 Ok(drawn) => lines.extend(drawn),
                 Err(problem) => lines.push(Line::plain(problem)),
             }
@@ -750,6 +789,73 @@ mod tests {
         assert_eq!(countdown(61), "1:01");
         assert_eq!(countdown(9), "0:09");
         assert_eq!(countdown(0), "0:00");
+    }
+
+    #[test]
+    fn a_pairing_code_appears_on_every_screen_that_has_room_for_one() {
+        // The question this was asked in as many words: can it not just fit itself to
+        // whatever screen is plugged in? It could not, and the reason was that ten rows
+        // were reserved for text before the symbol got any -- so a short screen produced a
+        // pairing screen with no pairing code on it.
+        //
+        // These are the grids the fonts in this image actually produce on panels people
+        // own, and every one of them must show a symbol. The text around it is what gives
+        // way, in the order it is worth having.
+        let screen = Screen::Pairing {
+            url: "https://192.168.2.188/#pair=4K7QM2XR9T8BHVWPQ2M4X6Z8AB".to_owned(),
+            seconds_left: 277,
+        };
+
+        // 1920x1080 at TER16x32 is 33 rows and is deliberately absent: a 37-module symbol
+        // cannot be drawn in 33 rows at any whole scale, which is exactly why the font
+        // check refuses that font on that panel and takes TER10x18 instead. The screen
+        // that says so is covered below.
+        for (rows, columns, what) in [
+            (50_usize, 180_usize, "2880x1620 at TER16x32"),
+            (60, 192, "1920x1080 at TER10x18"),
+            (48, 128, "1024x768 at 8x16"),
+            (44, 80, "the smallest grid this claims to serve"),
+        ] {
+            let painted = frame(&screen, &working(), rows, columns);
+            assert!(
+                painted.contains("\x1b[40m") && painted.contains("\x1b[47m"),
+                "no symbol on {what} ({rows}x{columns})"
+            );
+            let seen = visible(&painted);
+            assert!(
+                seen.contains("Expires in"),
+                "no countdown on {what}: the one part of this screen that changes"
+            );
+            assert!(seen.contains("ESC  cancel"), "no way out of {what}");
+            // And it still does not wrap, which would push everything below it down a row.
+            for line in seen.lines() {
+                assert!(
+                    line.chars().count() <= columns,
+                    "{what}: a line of {} columns in {columns}",
+                    line.chars().count()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_short_screen_gives_up_its_words_before_it_gives_up_the_code() {
+        // What "adapts to the screen" means here, made checkable: the same request drawn
+        // on a tall screen and a short one differ by the text, not by the symbol.
+        let screen = Screen::Pairing {
+            url: "https://192.168.2.188/#pair=4K7QM2XR9T8BHVWPQ2M4X6Z8AB".to_owned(),
+            seconds_left: 277,
+        };
+
+        let tall = visible(&frame(&screen, &working(), 60, 192));
+        let short = visible(&frame(&screen, &working(), 44, 80));
+
+        assert!(tall.contains("PAIR A BROWSER") && tall.contains("Single use"));
+        assert!(
+            !short.contains("Single use"),
+            "a short screen keeps the code and the timer and drops the rest: {short}"
+        );
+        assert!(short.contains("Expires in"), "{short}");
     }
 
     #[test]
