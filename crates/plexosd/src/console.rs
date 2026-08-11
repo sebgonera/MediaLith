@@ -3154,6 +3154,102 @@ mod tests {
     }
 
     #[test]
+    fn the_progress_clock_advances_only_while_plex_says_it_is_playing() {
+        // The one place this console deliberately shows something the appliance did not say
+        // in so many words: between polls, the bar and the clock move on a local timer, or
+        // the numbers sit still for three seconds and then jump three, which reads as a page
+        // that has come unstuck from the machine.
+        //
+        // What makes that honest is entirely in this function, so it is a function and this
+        // runs it — the lesson from `termClean`, which was wrong for the whole life of the
+        // feature because the page's *text* was fine and its behaviour was not.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+
+        let start = script
+            .find("function npAdvance(")
+            .expect("the page advances the clock somewhere");
+        let end = script[start..]
+            .find("function npTick(")
+            .expect("and npTick is what uses it")
+            + start;
+        let slice = &script[start..end];
+
+        let Some(engine) = ["node", "deno", "qjs"].into_iter().find(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        }) else {
+            println!(
+                "skip: the progress clock was not run -- no node, deno or qjs on this host. \
+                 Install one, or a clock that counts through a pause will only be found by \
+                 watching a paused film advance on the page."
+            );
+            return;
+        };
+
+        // Ten minutes in, of a two-hour film, five seconds after the appliance answered.
+        let driver = format!(
+            "{slice}\n\
+             const film = {{ position_ms: 600000, duration_ms: 7200000 }};\n\
+             const out = {{\n\
+             \x20 playing: npAdvance({{ ...film, state: 'playing' }}, 5000),\n\
+             \x20 paused: npAdvance({{ ...film, state: 'paused' }}, 5000),\n\
+             \x20 buffering: npAdvance({{ ...film, state: 'buffering' }}, 5000),\n\
+             \x20 unstated: npAdvance(film, 5000),\n\
+             \x20 past_the_end: npAdvance({{ position_ms: 7199000, duration_ms: 7200000, \
+             state: 'playing' }}, 60000),\n\
+             \x20 no_duration: npAdvance({{ position_ms: 600000, state: 'playing' }}, 5000),\n\
+             \x20 backwards: npAdvance({{ ...film, state: 'playing' }}, -9000),\n\
+             }};\n\
+             console.log(JSON.stringify(out));"
+        );
+
+        let output = std::process::Command::new(engine)
+            .arg("-e")
+            .arg(&driver)
+            .output()
+            .expect("the engine runs");
+        assert!(
+            output.status.success(),
+            "{engine} refused the page's own function: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let answer: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("the driver prints JSON");
+
+        assert_eq!(
+            answer["playing"], 605_000,
+            "five seconds of wall clock is five seconds of film"
+        );
+        for still in ["paused", "buffering", "unstated"] {
+            assert_eq!(
+                answer[still], 600_000,
+                "{still}: a film that is not playing does not advance, and inventing progress \
+                 for one is the whole thing this must never do"
+            );
+        }
+        assert_eq!(
+            answer["past_the_end"], 7_200_000,
+            "a bar wider than its track breaks the card, and Plex does report a position past \
+             the end as an item finishes"
+        );
+        assert_eq!(
+            answer["no_duration"], 0,
+            "with nothing to be a fraction of, there is no position to draw"
+        );
+        assert_eq!(
+            answer["backwards"], 600_000,
+            "a clock that went backwards would be a machine whose clock had, and this one is \
+             the browser's"
+        );
+    }
+
+    #[test]
     fn every_field_the_page_reads_off_a_session_is_one_the_server_sends() {
         // The fourth question about this page, asked about a fifth pair of files. Three tests
         // already check that the script parses, that every id it addresses exists and that

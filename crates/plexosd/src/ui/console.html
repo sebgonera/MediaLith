@@ -933,6 +933,17 @@
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
+  /* A cell holding a *formatted* quantity, whose text changes length as the machine works:
+     the same disk wrote `0 B/s`, `177 kB/s` and `17.1 MB/s` within twenty seconds, which is
+     five, eight and nine characters. A table is laid out from its content, so that column
+     breathes by a dozen pixels on every poll and drags its header and everything right of it
+     sideways with it — reported from a machine as the Read heading sliding about while the
+     disclosure was open, and it had nothing to do with the meters above it.
+     `tabular-nums` cannot fix this: it equalises the width of a digit, not the number of
+     them. A floor wide enough for the longest form does, and it is a property of what the
+     cell holds rather than of which table it is in — so it is a class on the cell and not a
+     selector naming the panel. */
+  table.mtable .rate { min-width: 5rem; }
   table.mtable .name {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: .8rem;
@@ -1647,24 +1658,35 @@
     background: var(--line);
     overflow: hidden;
   }
-  .np-bar > span {
+  .np-bar .np-fill {
     display: block;
     height: 100%;
     border-radius: 999px;
     background: var(--accent);
+    /* No transition. The fill is written once a second from a wall clock, and a quarter of
+       a second of easing on top of that would be the page animating a number rather than
+       reporting one -- and would still be running when the next poll snapped it. */
   }
-  .np-item.is-software .np-bar > span { background: var(--degraded); }
+  .np-item.is-software .np-bar .np-fill { background: var(--degraded); }
   .np-times {
     display: flex;
     justify-content: space-between;
     gap: .5rem;
     color: var(--muted);
     font-size: .78rem;
+    /* Tabular figures, or the three clocks jitter every second as the digits change width --
+       the same defect as the disk column above, one line at a time instead of one poll. */
     font-variant-numeric: tabular-nums;
   }
+  /* Where it has got to, which is the one of the three somebody is actually reading. */
+  .np-elapsed { color: var(--ink); font-weight: 600; }
+  /* How much is left, and how long the whole thing is. Quiet: they are context for the
+     first, and three equally loud numbers would be no emphasis at all. */
+  .np-left { color: var(--muted); }
+  .np-total { color: var(--muted); }
   /* Paused is a state a person should be able to see without reading: the bar goes quiet
      and the position keeps its place. */
-  .np-item.is-paused .np-bar > span { background: var(--muted); }
+  .np-item.is-paused .np-bar .np-fill { background: var(--muted); }
 
   /* "View all 3 in Plex" — the rail shows a few and says where the rest are. */
   .np-more { font-size: .84rem; color: var(--muted); }
@@ -4055,9 +4077,9 @@ function renderStorageDisks(report) {
       <tr>
         <td class="name">${esc(d.name)}${d.is_source ? ' <span class="tag">PlexOS</span>' : ""}</td>
         <td>${esc(d.model)}</td>
-        <td class="num">${esc(human(d.bytes))}</td>
-        <td class="num">${esc(metricRate(rate && rate.read_per_second))}</td>
-        <td class="num">${esc(metricRate(rate && rate.write_per_second))}</td>
+        <td class="num rate">${esc(human(d.bytes))}</td>
+        <td class="num rate">${esc(metricRate(rate && rate.read_per_second))}</td>
+        <td class="num rate">${esc(metricRate(rate && rate.write_per_second))}</td>
         <td class="dim">${(d.contents || []).length ? esc((d.contents || []).join(", ")) : "nothing on it"}</td>
       </tr>`;
   }).join("");
@@ -5576,17 +5598,17 @@ function renderMetrics(m) {
       <tr>
         <td class="name">${esc(n.name)}</td>
         <td class="dim">${esc(n.operstate || "")}</td>
-        <td class="num">${esc(metricRate(n.rx_per_second))}</td>
-        <td class="num">${esc(metricRate(n.tx_per_second))}</td>
-        <td class="num dim">${esc(metricBytes(n.rx_total))}</td>
-        <td class="num dim">${esc(metricBytes(n.tx_total))}</td>
+        <td class="num rate">${esc(metricRate(n.rx_per_second))}</td>
+        <td class="num rate">${esc(metricRate(n.tx_per_second))}</td>
+        <td class="num rate dim">${esc(metricBytes(n.rx_total))}</td>
+        <td class="num rate dim">${esc(metricBytes(n.tx_total))}</td>
       </tr>`).join("");
 
   const diskRows = (m.disks || []).map(d => `
       <tr>
         <td class="name">${esc(d.name)}</td>
-        <td class="num">${esc(metricRate(d.read_per_second))}</td>
-        <td class="num">${esc(metricRate(d.write_per_second))}</td>
+        <td class="num rate">${esc(metricRate(d.read_per_second))}</td>
+        <td class="num rate">${esc(metricRate(d.write_per_second))}</td>
       </tr>`).join("");
 
   // The sensor is shown beside the type, always, because the type is not unique: a real
@@ -5594,7 +5616,7 @@ function renderMetrics(m) {
   // row labelled only by type is a reading nobody can attribute.
   const temps = (m.temperatures || []).map(t =>
     `<tr><td class="name">${esc(t.zone)}</td><td class="dim">${esc(t.sensor || "")}</td>`
-    + `<td class="num">${metricNum(t.celsius)} °C</td></tr>`).join("");
+    + `<td class="num rate">${metricNum(t.celsius)} °C</td></tr>`).join("");
 
   const notes = (m.notes || []).map(n => `<li>${esc(n)}</li>`).join("");
 
@@ -5888,17 +5910,81 @@ function npSoftwareNote() {
   return null;
 }
 
-/** The progress bar and the two clock faces, or nothing at all when Plex did not say. */
-function npProgress(session) {
-  const position = npClock(session.position_ms);
-  const duration = npClock(session.duration_ms);
-  if (position === null || duration === null || !session.duration_ms) return "";
-  // Clamped, because a position past the end is a thing Plex reports briefly at the end of
-  // an item and a bar wider than its track breaks the card.
-  const through = Math.max(0, Math.min(100, (session.position_ms / session.duration_ms) * 100));
+/**
+ * The progress bar and the three clock faces, or nothing at all when Plex did not say.
+ *
+ * Marked with `data-np` — the index of the session in the last report — so `npTick` can
+ * advance it between polls without rebuilding anything. Not an id: the same session is drawn
+ * twice, once in the rail and once in the Plex view, and two elements sharing an id is a
+ * defect this page has already shipped once.
+ */
+function npProgress(session, index) {
+  if (!session.duration_ms || session.position_ms === null || session.position_ms === undefined) {
+    return "";
+  }
   return `
-    <div class="np-bar"><span style="width:${through.toFixed(1)}%"></span></div>
-    <div class="np-times"><span>${esc(position)}</span><span>${esc(duration)}</span></div>`;
+    <div class="np-bar" data-np="${index}"><span class="np-fill"></span></div>
+    <div class="np-times" data-np="${index}">
+      <span class="np-elapsed"></span><span class="np-left"></span><span class="np-total"></span>
+    </div>`;
+}
+
+/**
+ * Where a session is *now*, rather than where it was when the appliance last answered.
+ *
+ * The poll is every three seconds and the clock face shows seconds, so without this the
+ * numbers sit still and then jump three at a time, which reads as a page that is not
+ * connected to anything. Wall-clock time is added to the last reported position — and only
+ * while Plex says the session is playing, because inventing progress for a paused film is
+ * exactly the kind of thing this console must not do.
+ *
+ * Every poll snaps it back, so the most this can be wrong by is one poll interval, and a
+ * seek corrects itself within the same. The tick is one second and not an animation frame:
+ * on a two-hour film a rail-width bar advances one pixel roughly every eighteen seconds, so
+ * sixty frames a second would compute the same number sixty times and keep the processor
+ * awake to do it. The clock face is what needs a second, and it is the only thing that does.
+ */
+let npState = { sessions: [], at: 0 };
+
+/**
+ * Where a session has got to, `since` milliseconds after the appliance said `position_ms`.
+ *
+ * Pure, and separate from the element it is written into, so it can be run under `node` in a
+ * test — the lesson from the terminal cleaner, which was wrong for the whole life of the
+ * feature because the page's *text* was fine and its *behaviour* was not. A clock that keeps
+ * counting through a pause, or runs past the end of a film, is exactly that kind of defect.
+ */
+function npAdvance(session, since) {
+  const start = Number(session.position_ms) || 0;
+  const duration = Number(session.duration_ms) || 0;
+  const advance = session.state === "playing" ? Math.max(0, since) : 0;
+  // Clamped: a position past the end is something Plex reports briefly as an item finishes,
+  // and a bar wider than its track breaks the card.
+  return Math.max(0, Math.min(duration, start + advance));
+}
+
+function npTick() {
+  const sessions = npState.sessions;
+  if (!sessions.length) return;
+  const since = Math.max(0, performance.now() - npState.at);
+
+  for (const bar of document.querySelectorAll("[data-np]")) {
+    const session = sessions[Number(bar.dataset.np)];
+    if (!session || !session.duration_ms) continue;
+
+    const position = npAdvance(session, since);
+
+    const fill = bar.querySelector(".np-fill");
+    if (fill) {
+      fill.style.width = ((position / session.duration_ms) * 100).toFixed(2) + "%";
+      continue;
+    }
+    const elapsed = bar.querySelector(".np-elapsed");
+    if (!elapsed) continue;
+    elapsed.textContent = npClock(position);
+    bar.querySelector(".np-left").textContent = "−" + npClock(session.duration_ms - position);
+    bar.querySelector(".np-total").textContent = npClock(session.duration_ms);
+  }
 }
 
 /** What is playing, as one line: the film, or the series and the episode. */
@@ -5917,7 +6003,7 @@ function npTitle(session) {
  * fill a gap — a field Plex did not report is a row that is not drawn, so a sparse session
  * produces a shorter card rather than a column of "unknown".
  */
-function npItem(session, detailed) {
+function npItem(session, detailed, index) {
   const verdict = npVerdict(session);
   const video = session.video || {};
   const audio = session.audio || {};
@@ -5959,7 +6045,7 @@ function npItem(session, detailed) {
       ${audioLine}
       <div class="np-verdict ${verdict.tone}"><span class="statedot"></span>${esc(verdict.label)}${note}</div>
       ${software ? `<p class="hint">${software}</p>` : ""}
-      ${npProgress(session)}
+      ${npProgress(session, index)}
       ${detailed ? npDetail(session) : ""}
     </div>`;
 }
@@ -6046,16 +6132,38 @@ let lastNowPlayingRendered = null;
 let lastStreamsRendered = null;
 
 /**
+ * What makes a redraw worth doing.
+ *
+ * Everything except where the film has got to. The position and the transcoder's progress
+ * change on every poll and are the two things `npTick` keeps current by touching three nodes
+ * — so including them here would rebuild both cards wholesale every three seconds to move a
+ * bar a fraction of a pixel. This is a smaller signature than the markup it replaced, and
+ * therefore fewer redraws than before live progress existed, not more.
+ */
+function npSignature(report, locked) {
+  if (locked) return "locked";
+  if (!report || !report.sessions || !report.sessions.length) {
+    return "quiet:" + ((report && report.state) || "none") + ":" + ((report && report.detail) || "");
+  }
+  return JSON.stringify(report.sessions.map(s => [
+    s.id, s.title, s.series, s.episode, s.user, s.player, s.state, s.decision,
+    s.duration_ms, s.video, s.audio, s.source_bitrate_kbps, s.stream_bitrate_kbps,
+    // Not the progress figure, which moves constantly; only whether the transcoder has
+    // changed what it is *doing*, which is what the detail rows say.
+    s.transcode ? [s.transcode.throttled, s.transcode.error, s.transcode.speed > 0] : null,
+  ]));
+}
+
+/**
  * The rail card.
  *
- * Signature-cached like every other polled region here. The signature includes the position,
- * because the bar moving *is* the meaningful change — and nothing anybody can type into or
- * open lives inside the replaced element, which is the rule this page learned the hard way
- * when the process table was rendered into a region on a timer and shut itself twice a
- * second.
+ * Signature-cached like every other polled region here, and nothing anybody can type into or
+ * open lives inside the replaced element — the rule this page learned the hard way when the
+ * process table was rendered into a region on a timer and shut itself twice a second.
  *
- * The bar is not animated between polls. Interpolating would mean the page inventing a
- * position Plex did not report, and the one thing this card must be is believable.
+ * Between redraws `npTick` advances the bar and the clock. That is interpolation, and it is
+ * honest only because it is bounded: it runs solely while Plex says `playing`, every poll
+ * snaps it back to what the appliance reported, and nothing else on the card is invented.
  */
 function renderNowPlaying(report, locked) {
   const body = document.getElementById("np-body");
@@ -6064,18 +6172,17 @@ function renderNowPlaying(report, locked) {
 
   const sessions = (report && report.sessions) || [];
   const shown = sessions.slice(0, NP_RAIL_MAX);
-  const markup = locked ? npLocked()
-    : !sessions.length ? npQuiet(report)
-    : `<div class="np-list">${shown.map(s => npItem(s, false)).join("")}</div>` +
-      (sessions.length > shown.length
-        ? `<p class="np-more">And ${sessions.length - shown.length} more —
-             <button class="linkish" data-goto="plex">view all ${sessions.length} in Plex</button>.</p>`
-        : "");
+  const signature = npSignature(report, locked);
 
-  const signature = markup;
   if (signature !== lastNowPlayingRendered) {
     lastNowPlayingRendered = signature;
-    body.innerHTML = markup;
+    body.innerHTML = locked ? npLocked()
+      : !sessions.length ? npQuiet(report)
+      : `<div class="np-list">${shown.map((s, i) => npItem(s, false, i)).join("")}</div>` +
+        (sessions.length > shown.length
+          ? `<p class="np-more">And ${sessions.length - shown.length} more —
+               <button class="linkish" data-goto="plex">view all ${sessions.length} in Plex</button>.</p>`
+          : "");
   }
   if (count) count.textContent = locked || !sessions.length ? "" : String(sessions.length);
 }
@@ -6087,13 +6194,13 @@ function renderStreams(report, locked) {
   if (!body) return;
 
   const sessions = (report && report.sessions) || [];
-  const markup = locked ? npLocked()
-    : !sessions.length ? npQuiet(report)
-    : `<div class="np-list">${sessions.map(s => npItem(s, true)).join("")}</div>`;
+  const signature = npSignature(report, locked);
 
-  if (markup !== lastStreamsRendered) {
-    lastStreamsRendered = markup;
-    body.innerHTML = markup;
+  if (signature !== lastStreamsRendered) {
+    lastStreamsRendered = signature;
+    body.innerHTML = locked ? npLocked()
+      : !sessions.length ? npQuiet(report)
+      : `<div class="np-list">${sessions.map((s, i) => npItem(s, true, i)).join("")}</div>`;
   }
   if (count) count.textContent = locked || !sessions.length ? "" : String(sessions.length);
 }
@@ -6114,6 +6221,7 @@ async function plexActivityTick() {
   let next = NP_IDLE_MS;
 
   if (!value) {
+    npState = { sessions: [], at: performance.now() };
     renderNowPlaying(null, true);
     renderStreams(null, true);
     next = NP_LOCKED_MS;
@@ -6130,6 +6238,7 @@ async function plexActivityTick() {
       if (response.status === 401 || response.status === 403) {
         // The token in this tab is not this machine's. The locked card is the honest state:
         // there is no credential here that works, which is what "locked" means.
+        npState = { sessions: [], at: performance.now() };
         renderNowPlaying(null, true);
         renderStreams(null, true);
         next = NP_LOCKED_MS;
@@ -6137,8 +6246,13 @@ async function plexActivityTick() {
         throw new Error("HTTP " + response.status);
       } else {
         const report = await response.json();
+        // The moment the reading was taken, so the tick knows how much wall clock to add.
+        // Set before the render, because the render is what puts the elements the tick
+        // writes into on the page.
+        npState = { sessions: report.sessions || [], at: performance.now() };
         renderNowPlaying(report, false);
         renderStreams(report, false);
+        npTick();
         next = report.active > 0 ? NP_ACTIVE_MS : NP_IDLE_MS;
       }
     } catch (error) {
@@ -6149,6 +6263,10 @@ async function plexActivityTick() {
         "The console did not answer the request for what Plex is playing. Remedy: it is " +
         "this page's connection to the appliance rather than Plex, so everything else on " +
         "the page will be showing the same thing." };
+      // Nothing to advance any more: a clock that kept counting while the appliance was
+      // unreachable would be the page telling somebody what is playing on a machine it
+      // cannot reach.
+      npState = { sessions: [], at: performance.now() };
       renderNowPlaying(unreachable, false);
       renderStreams(unreachable, false);
     }
@@ -6407,6 +6525,10 @@ if (!SOLO) {
   // three seconds while something is playing, ten while nothing is, and no request at all
   // while this tab holds no device token.
   plexActivityTick();
+  // And the clock face, which is a second because that is what a clock face is. It asks the
+  // appliance for nothing: it advances the last answer and stops the moment there is not
+  // one, so it costs three property writes per playing stream and no traffic at all.
+  setInterval(npTick, 1000);
 }
 </script>
 </body>
