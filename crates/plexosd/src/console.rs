@@ -269,6 +269,7 @@ pub fn respond(request: &Request, env: &impl Environment, services: &Services) -
         ("POST", crate::http::BROWSER_PAIR_START) => browser_pair_start(request),
         ("POST", crate::http::BROWSER_PAIR_REDEEM) => browser_pair_redeem(&request.body),
         ("POST", crate::http::BROWSER_PAIR_CANCEL) => browser_pair_cancel(&request.body),
+        ("POST", "/api/browser-pair/waiting") => browser_pair_waiting(),
         ("POST", "/api/browser-pair/inspect") => browser_pair_inspect(&request.body),
         ("POST", "/api/browser-pair/approve") => browser_pair_decide(&request.body, true),
         ("POST", "/api/browser-pair/deny") => browser_pair_decide(&request.body, false),
@@ -711,6 +712,34 @@ fn browser_pair_host() -> String {
             .reachable_at;
     crate::dashboard::model::prefer_covered(&mut addresses, crate::tls::covers);
     addresses.first().cloned().unwrap_or_default()
+}
+
+/// Everything waiting for a decision. Authenticated by the gate.
+///
+/// The route that makes browser approval work on a phone at all. Scanning the desktop's QR
+/// code lands in a **new tab**, and a session lives in `sessionStorage`, which belongs to a
+/// tab — so the browser that arrives by scanning never holds the session, in any browser,
+/// on any phone. That is not a defect anywhere; it is what `sessionStorage` is.
+///
+/// So the signed-in browser asks instead. Nothing is scanned and nothing is pasted: the
+/// desktop shows a number, this says who is asking, and the two are compared by eye.
+fn browser_pair_waiting() -> Response {
+    let waiting: Vec<serde_json::Value> = crate::browserpair::waiting()
+        .into_iter()
+        .map(|(id, described)| {
+            serde_json::json!({
+                "request_id": id,
+                "browser": described.browser,
+                "age_seconds": described.age_seconds,
+                "verification": described.verification,
+            })
+        })
+        .collect();
+
+    match json(&serde_json::json!({ "waiting": waiting })) {
+        Ok(body) => Response::json(body),
+        Err(why) => Response::text(500, format!("{why}\n")),
+    }
 }
 
 /// What an administrator is shown before approving. Authenticated by the gate.

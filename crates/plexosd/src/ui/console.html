@@ -3969,6 +3969,28 @@ function takeApprovalRequest() {
 // to the other machine to have the QR shown again.
 let pendingApproval = "";
 
+/**
+ * The approval card, written once.
+ *
+ * Both ways of arriving at a decision draw the same thing -- the fragment somebody scanned,
+ * and the poll a signed-in browser makes -- so this is one function rather than two
+ * templates. Two copies of markup carrying the same ids is the duplicate-id fault this page
+ * already has a test for, and it found this the moment the second copy existed.
+ */
+function renderApproval(described) {
+  approveSay(`
+    <p>A browser is asking to administer this appliance.</p>
+    <p class="hint">It reports itself as — this is what it says, not something MediaLith
+      can check:</p>
+    <p><strong>${esc(described.browser)}</strong></p>
+    <p class="hint">Confirm this number matches the one on that browser's screen:</p>
+    <div class="verify">${esc(described.verification)}</div>
+    <div class="row">
+      <button id="approve-deny" class="ghost">Deny</button>
+      <button id="approve-yes">Authorise</button>
+    </div>`);
+}
+
 function approveSay(html) {
   const card = document.getElementById("approve-card");
   const body = document.getElementById("approve-body");
@@ -4022,17 +4044,7 @@ async function showApproval(id) {
     return;
   }
 
-  approveSay(`
-    <p>A browser is asking to administer this appliance.</p>
-    <p class="hint">It reports itself as — this is what it says, not something MediaLith
-      can check:</p>
-    <p><strong>${esc(described.browser)}</strong></p>
-    <p class="hint">Confirm this number matches the one on that browser's screen:</p>
-    <div class="verify">${esc(described.verification)}</div>
-    <div class="row">
-      <button id="approve-deny" class="ghost">Deny</button>
-      <button id="approve-yes">Authorise</button>
-    </div>`);
+  renderApproval(described);
 }
 
 /** Says yes or no, and never sends anything of this browser's beyond its own credential. */
@@ -4052,6 +4064,7 @@ async function decideApproval(approve) {
     if (!response.ok) throw new Error(text.trim() || response.statusText);
 
     pendingApproval = "";
+    lastWaitingId = "";
     approveSay(approve
       ? `<p><strong>Browser authorised.</strong></p>
          <p class="hint">It has been given a session of its own. This browser is unchanged —
@@ -4093,6 +4106,10 @@ async function bootstrapPairing() {
     say(`<span class="now">Paired</span><div>This browser is administering the appliance.
       It stays signed in until you sign out, close the tab, or leave it alone for an
       hour.</div>`);
+    // Opened, so there is something to see. The only other sign of success is a small badge
+    // in the header, which on a phone is easy to miss entirely -- reported as "it opens and
+    // nothing happens" about a pairing that had in fact worked.
+    openAdmin(true);
   } catch (e) {
     say(`<div>Could not contact MediaLith. Check that this device is on the same
       network as the appliance.</div><div>${esc(String(e))}</div>`, true);
@@ -4108,6 +4125,57 @@ async function bootstrapPairing() {
  * pairing bootstrap can await anything, for the reason both of them exist: this page also
  * reads the hash to choose a view, so a fragment left in place is looked up as a view name.
  */
+// ------------------------------------------------------------------------------------
+// Approving from the browser that is already signed in.
+//
+// Scanning the desktop's QR code cannot work, and the reason is not a bug: a session lives
+// in sessionStorage, sessionStorage belongs to a **tab**, and the tab a phone's camera
+// opens is a brand-new one with nothing in it. The browser that arrives by scanning is
+// therefore never the browser that holds the session -- in any browser, on any phone.
+//
+// So the flow is turned around. This browser, which is signed in, asks the appliance
+// whether anybody is waiting. Nothing is scanned and nothing is pasted; the desktop shows a
+// number and the two are compared by eye.
+// ------------------------------------------------------------------------------------
+let lastWaitingId = "";
+
+async function pollWaiting() {
+  const held = credential();
+  // Only when signed in. An unauthenticated page asking this would collect 401s every few
+  // seconds and learn nothing it is entitled to.
+  if (!held) return;
+  // Not while somebody is looking at a specific request they arrived at by other means.
+  if (pendingApproval) return;
+
+  let waiting;
+  try {
+    const response = await fetch("/api/browser-pair/waiting", {
+      method: "POST", cache: "no-store",
+      headers: { "Authorization": "Bearer " + held, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (!response.ok) return;
+    waiting = (await response.json()).waiting || [];
+  } catch (e) { return; }
+
+  const card = document.getElementById("approve-card");
+  if (!waiting.length) {
+    // Only take the card away if it is showing a request that has since gone. A card
+    // carrying "Browser authorised." is a message somebody is reading.
+    if (card && !card.hidden && lastWaitingId) { card.hidden = true; lastWaitingId = ""; }
+    return;
+  }
+
+  const first = waiting[0];
+  // Redrawn only when the request changes, because this runs on a timer and the buttons
+  // below are what somebody is reaching for.
+  if (first.request_id === lastWaitingId) return;
+  lastWaitingId = first.request_id;
+  pendingApproval = first.request_id;
+
+  renderApproval(first);
+}
+
 async function bootstrapFromUrl() {
   const approval = takeApprovalRequest();
   await bootstrapPairing();
@@ -7010,6 +7078,10 @@ if (SOLO) {
   tick();
   tickSetup();
   tickInstall();
+  // Who is waiting to be let in. Cheap, and only asked at all by a browser that is signed
+  // in -- see pollWaiting for why this is the path that works rather than the QR.
+  pollWaiting();
+  setInterval(pollWaiting, REFRESH_MS);
   setInterval(tick, REFRESH_MS);
   setInterval(tickInstall, REFRESH_MS);
   setInterval(tickSetup, REFRESH_MS);

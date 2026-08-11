@@ -189,6 +189,36 @@ impl Requests {
         })
     }
 
+    /// Every request still waiting for somebody to decide it, newest last.
+    ///
+    /// This exists because scanning the desktop's QR code cannot work, and the reason is
+    /// not a bug anywhere — it is what `sessionStorage` *is*. A session belongs to a tab,
+    /// and a tab opened by a phone's camera is a brand-new one with nothing in it. So the
+    /// browser that arrives by scanning is never the browser that holds the session, in any
+    /// browser, on any phone.
+    ///
+    /// Turning the flow around fixes it completely: the browser that *is* signed in asks
+    /// the appliance whether anybody is waiting, and offers to approve them. Nothing is
+    /// scanned, nothing is pasted, and the desktop's code becomes something to compare
+    /// rather than something to carry.
+    #[must_use]
+    pub fn waiting(&self, now: Instant) -> Vec<(String, Describes)> {
+        self.waiting
+            .iter()
+            .filter(|request| now < request.expires_at && request.status == Status::Pending)
+            .map(|request| {
+                (
+                    request.id.clone(),
+                    Describes {
+                        browser: request.browser.clone(),
+                        age_seconds: now.duration_since(request.created_at).as_secs(),
+                        verification: verification_code(&request.id),
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// The status of a live request.
     #[must_use]
     pub fn status(&self, id: &str, now: Instant) -> Option<Status> {
@@ -430,6 +460,12 @@ pub fn open(user_agent: &str) -> Result<Opened, String> {
              expecting."
         ))
     }
+}
+
+/// Everything waiting for a decision right now.
+#[must_use]
+pub fn waiting() -> Vec<(String, Describes)> {
+    requests().waiting(Instant::now())
 }
 
 /// What an approver should be shown, if the request is live.
@@ -690,6 +726,59 @@ mod tests {
             later
         ));
         assert_eq!(store.live_count(later), 1);
+    }
+
+    #[test]
+    fn an_administrator_can_see_what_is_waiting_without_scanning_anything() {
+        // The route that makes this feature work at all on a phone. A session belongs to a
+        // tab, and the tab a camera opens is a new one with nothing in it -- so the browser
+        // that arrives by scanning is never the browser holding the session. The signed-in
+        // browser has to be able to ask.
+        let t0 = timeline();
+        let mut store = Requests::new();
+        let (id, secret) = opened(&mut store, t0);
+
+        let waiting = store.waiting(t0);
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].0, id);
+        assert_eq!(waiting[0].1.browser, "Chrome on Windows");
+        assert_eq!(waiting[0].1.verification, verification_code(&id));
+
+        // Only things still to be decided. An approved request is the desktop's business
+        // now, and a denied or spent one is nobody's.
+        assert!(store.decide(&id, true, t0));
+        assert!(
+            store.waiting(t0).is_empty(),
+            "approved is no longer waiting"
+        );
+
+        assert!(matches!(
+            store.redeem(&id, &secret, t0, a_session),
+            Outcome::Approved(_)
+        ));
+        assert!(store.waiting(t0).is_empty());
+
+        // And nothing past its five minutes.
+        let mut store = Requests::new();
+        opened(&mut store, t0);
+        assert!(store.waiting(t0 + LIFETIME).is_empty());
+    }
+
+    #[test]
+    fn nothing_waiting_carries_a_secret_an_approver_has_no_business_with() {
+        // This list goes to every signed-in browser on a poll. It must describe, and it
+        // must not hand over anything that could redeem a request -- the desktop's secret
+        // is the whole reason a photograph of the QR is not enough.
+        let t0 = timeline();
+        let mut store = Requests::new();
+        opened(&mut store, t0);
+
+        let said = format!("{:?}", store.waiting(t0));
+        assert!(!said.contains("desktop-secret"), "{said}");
+        assert!(
+            !said.contains(&crate::auth::digest("desktop-secret")),
+            "{said}"
+        );
     }
 
     #[test]
