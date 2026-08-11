@@ -1210,9 +1210,21 @@
     gap: 1rem;
     align-items: start;
   }
-  .ovgrid > #metrics  { grid-column: 1; grid-row: 1 / span 2; margin-bottom: 0; }
+  /* Margins off, on every grid item and on the card inside the one that is a wrapper. The
+     grid's own `gap` is the only spacing here, and anything else is added to it.
+     Two of them were doing damage. The activity card is a `.plex`, which carries
+     `margin: 1.5rem 0`, so it started 24 px below the health card beside it and the two
+     columns visibly did not line up. And `#main` is a wrapper whose card has the standard
+     1rem bottom margin, which stacked on top of the row gap and pushed the snapshot 16 px
+     further from the health card than the health card is from anything else. */
+  .ovgrid > #metrics,
+  .ovgrid > #main,
+  .ovgrid > #snapshot { margin: 0; }
+  .ovgrid > #main > .card { margin-bottom: 0; }
+
+  .ovgrid > #metrics  { grid-column: 1; grid-row: 1 / span 2; }
   .ovgrid > #main     { grid-column: 2; grid-row: 1; }
-  .ovgrid > #snapshot { grid-column: 2; grid-row: 2; margin-bottom: 0; }
+  .ovgrid > #snapshot { grid-column: 2; grid-row: 2; }
 
   .ovgrid.alert > #main     { grid-column: 1 / -1; grid-row: 1; }
   .ovgrid.alert > #metrics  { grid-row: 2 / span 2; }
@@ -1229,7 +1241,6 @@
     .ovgrid.alert > #metrics,
     .ovgrid.alert > #main,
     .ovgrid.alert > #snapshot { grid-column: 1; grid-row: auto; }
-    .ovgrid > #metrics { margin-bottom: 0; }
   }
 
   /* ------------------------------------------------------------------------------------
