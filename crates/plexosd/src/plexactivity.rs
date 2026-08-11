@@ -659,10 +659,23 @@ fn video(
             .and_then(|m| text(m, "videoResolution"))
             .as_deref()
             .and_then(resolution),
-        hardware: hardware(transcode),
-        hardware_detail: transcode.and_then(hardware_detail),
-        full_pipeline: transcode
-            .and_then(|t| t.get("transcodeHwFullPipeline").and_then(Value::as_bool)),
+        // Only a *video* transcode has a hardware verdict. Found on the appliance, on a real
+        // Direct Stream — video copied, audio re-encoded — where the transcode session had
+        // progressed and named no decoder, so the rule below answered `false` about a
+        // picture nothing was decoding. The page does not draw it for a direct stream, so
+        // nothing showed; the field was wrong anyway, and a field that is wrong only where
+        // nothing reads it is one that becomes wrong somewhere that does.
+        hardware: (decision == Decision::Transcode)
+            .then(|| hardware(transcode))
+            .flatten(),
+        hardware_detail: (decision == Decision::Transcode)
+            .then(|| transcode.and_then(hardware_detail))
+            .flatten(),
+        full_pipeline: (decision == Decision::Transcode)
+            .then(|| {
+                transcode.and_then(|t| t.get("transcodeHwFullPipeline").and_then(Value::as_bool))
+            })
+            .flatten(),
     }
 }
 
@@ -1342,6 +1355,40 @@ mod tests {
             "not established is not the same answer as no"
         );
         assert_eq!(session.video.hardware_detail, None);
+    }
+
+    #[test]
+    fn only_a_video_transcode_has_a_hardware_verdict() {
+        // Found on the appliance, on a real Direct Stream: the video was copied and only the
+        // audio re-encoded, the transcode session had progressed, and it named no decoder —
+        // so "has it named hardware" answered `false` about a picture nothing was decoding.
+        //
+        // `SOFTWARE_TRANSCODE` has `audioDecision: "copy"` with the video transcoded, so this
+        // builds the mirror image of it rather than reusing a fixture that is the other case.
+        let direct_stream = SOFTWARE_TRANSCODE
+            .replace(
+                "\"videoDecision\":\"transcode\"",
+                "\"videoDecision\":\"copy\"",
+            )
+            .replace(
+                "\"audioDecision\":\"copy\"",
+                "\"audioDecision\":\"transcode\"",
+            );
+        let session = one(&direct_stream);
+
+        assert_eq!(session.decision, Decision::DirectStream);
+        assert_eq!(session.video.decision, Decision::DirectStream);
+        assert_eq!(
+            session.video.hardware, None,
+            "nothing is decoding the picture, so there is no hardware verdict to give"
+        );
+        assert_eq!(session.video.hardware_detail, None);
+        assert_eq!(session.video.full_pipeline, None);
+        assert_eq!(
+            session.audio.decision,
+            Decision::Transcode,
+            "and the audio, which is what is actually being worked on, still says so"
+        );
     }
 
     #[test]

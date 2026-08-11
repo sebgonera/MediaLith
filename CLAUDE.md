@@ -86,7 +86,7 @@ list is about the system. Check against this before committing; it is short on p
 | `crates/plexos-gpu` | 46 tests, and it has now answered the question it was written for — on four machines, three of which it was wrong about until they were tried. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
 | `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, `reboot(2)`, `sethostname(2)`, PTY allocation for the console terminal, reaping children for PID 1, resolving partitions on a *named disk* rather than by label alone, and `statvfs(3)` — free space is the one thing this appliance reports about itself that is not readable as a file. 100 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
 | `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. It also lets the attached screen go dark after five idle minutes — two escape sequences from `console_codes(4)` written once to `/dev/tty0`, which needs no package and no daemon, because `setterm` is `util-linux` and not in this image. The supervisor role mounts the Plex app image, then keeps the console and a shell running: it reaps orphans, restarts what dies with a widening delay, and never exits. It also asks the boot loader which disk the firmware started, so a two-disk machine mounts the right `/usr` and `/var`. 63 tests. **PID 1 stays alive on the appliance and has restarted both of its services after they were killed.** |
-| `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates, the configuration model actually applied (ADR-0008), and the terminal session (ADR-0014), the updater on the signed manifest, a supervisor that restarts Plex and swaps a newly-installed version in without a reboot, the console's own TLS identity (ADR-0014), the installer and the first-boot flow (ADR-0016), and the activity card — what the machine is doing *now*, which is the only view here about a moment rather than a state. 407 tests, of which two fail on any development host running Plex; see the trap list. **The activity card has never run on the appliance**: its numbers were produced by replaying the appliance's own captured `/proc` and `/sys` through the real code, which is one step short of the machine. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
+| `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates, the configuration model actually applied (ADR-0008), and the terminal session (ADR-0014), the updater on the signed manifest, a supervisor that restarts Plex and swaps a newly-installed version in without a reboot, the console's own TLS identity (ADR-0014), the installer and the first-boot flow (ADR-0016), live Plex activity behind the device token (ADR-0018 — the Plex account token is read from `Preferences.xml` per request, sent to loopback in a header, and has no field in the browser's document it could land in), and the activity card — what the machine is doing *now*, which is the only view here about a moment rather than a state. 407 tests, of which two fail on any development host running Plex; see the trap list. **The activity card has never run on the appliance**: its numbers were produced by replaying the appliance's own captured `/proc` and `/sys` through the real code, which is one step short of the machine. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
 | `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 104 tests. Provisioning now runs end to end **on the appliance**, driven from a browser: download, signature, manifest, build, publish, mount, confine, start. |
 | `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. |
 | `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 47 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree. |
@@ -369,6 +369,11 @@ health verdict, the address, the slot, uptime, the administrator lock, restart a
 down), a sidebar of seven views — Overview, Plex, Storage, Network, System, Events, and
 Terminal under Advanced — and one view showing at a time.
 
+The Overview's rail leads with **Now Playing** (ADR-0018), and the Plex view lists every
+stream in full. Both are blank and **fetch nothing** without the device token: a page that
+downloaded the titles and declined to draw them would have put them in a browser that was
+never entitled to them.
+
 Nothing navigates. Switching is `hidden` on six sections and off one, so the six polls, the
 terminal's scrollback and the typed token all survive a click; `pushState` and `popstate`
 keep the URL and the view agreeing, so `#network` is a link somebody can send and the back
@@ -392,6 +397,7 @@ shell's output cannot be read without one.
 | `/api/status` | Image identity, slot, root hash, whole kernel command line, health checks, TLS fingerprint |
 | `/api/metrics` | What the machine is doing now: processor per core, memory, Plex's own cgroup, GPU clock, temperatures, free space, throughput. Rates, not since-boot totals |
 | `/api/metrics/processes` | What is running. **A `POST`**, so the method-based gate applies: a process list with command lines is not something every reader on the LAN should have |
+| `/api/plex/sessions` | What Plex is playing now: who, on what, and what is happening to the picture and the sound (ADR-0018). **A `POST`** for the same reason and a stronger one — a title, a username and a device name are what somebody in the house is doing this evening |
 | `/api/setup` | The first-boot flow: ordered steps, computed not stored (ADR-0016) |
 | `/api/install` | Disks, refusals, and installing PlexOS onto one (ADR-0016) |
 | `/api/update` | Check and install a signed update; gate verdict; rollback record (ADR-0005/0006) |
@@ -1110,6 +1116,35 @@ and its certificate — sign with the second one.
   to ask the port rather than only its own child. On a machine that has its own Plex the probe
   succeeds, so a clean `cargo test --workspace` is impossible there and CI's green run says
   nothing about it. Not a defect in the code under test; a suite that is not hermetic.
+- **Plex's hardware-transcoding fields are empty until the transcoder actually runs, and
+  empty looks exactly like software.** A session captured seconds after it started reported
+  `transcodeHwRequested: false` and `transcodeHwDecodingTitle: "Intel ()"` — the parentheses
+  hold the API name and are empty. The *same session* moments later reported
+  `transcodeHwDecoding: "vaapi"`, `transcodeHwEncoding: "vaapi"` and
+  `transcodeHwFullPipeline: true`. So the only positive evidence is a named decoder or
+  encoder, and "no evidence" means software **only** once the transcoder has demonstrably
+  produced something (`progress > 0`). Reading the first state as software puts an amber
+  warning on this appliance's whole reason for existing, every time somebody presses play.
+  `Video::hardware` is an `Option` for this, and `None` is a third answer rather than a
+  missing one.
+- **Plex says nothing at all about a Direct Play, so it has to be read out of the silence.**
+  A direct-play session captured from the appliance had no `TranscodeSession` node and no
+  `decision` field anywhere in it — not `"decision": "directplay"`, nothing. The absence is
+  the answer. `Decision::default()` is therefore `Unknown` and not `DirectPlay`, so the best
+  case cannot be arrived at by a field failing to parse.
+- **A transcoding session's `Media` node is the *output*, so the file's own resolution is
+  not in it.** `videoResolution` read `720p` and `container` `mpegts` for a 4K MKV. The
+  source codec is in `TranscodeSession.sourceVideoCodec`; the source resolution and the HDR
+  format exist only in `/library/metadata/<ratingKey>`, which is why `plexactivity` looks
+  them up and caches them. The one place the session *does* carry the source is a display
+  string — `"4K DoVi/HDR10"` — which is composed for people and partly localised, so parsing
+  it would be the fixture-you-imagined trap in a new coat.
+- **A hardware verdict belongs to a video transcode and to nothing else.** Found on the
+  appliance on a real Direct Stream — video copied, audio re-encoded — where the transcode
+  session had progressed and named no decoder, so "has it named hardware" answered `false`
+  about a picture nothing was decoding. The page does not draw it in that state, which is
+  what made it invisible: a field that is wrong only where nothing reads it is a field that
+  becomes wrong somewhere that does.
 - **Break the image, not the manifest, when testing rollback.** Overwriting a data block
   and recomputing only the manifest digest leaves the hash tree and root hash intact, so
   the updater accepts the bundle — correctly, because every check it makes asks whether the

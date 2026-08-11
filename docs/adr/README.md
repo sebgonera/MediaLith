@@ -31,6 +31,7 @@ kind of decision that is embarrassing to get wrong quietly.
 | [0015](0015-discrete-gpu-support.md) | Discrete GPUs, and what NVIDIA would cost | Accepted |
 | [0016](0016-installer.md) | The installer, and the first boot after it | Accepted |
 | [0017](0017-secure-boot-keys.md) | Secure Boot key custody, and who enrols them | Accepted |
+| [0018](0018-live-plex-activity.md) | Live Plex activity, and the credential that makes it possible | Accepted |
 
 ## Template
 
