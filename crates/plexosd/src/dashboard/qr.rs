@@ -151,6 +151,40 @@ impl Symbol {
         (scale >= 1).then_some(scale)
     }
 
+    /// The symbol as one string per row, `1` for dark and `0` for light, quiet zone
+    /// included.
+    ///
+    /// For the browser. The console page draws a QR code too — the desktop half of
+    /// ADR-0019's browser approval — and this is what keeps that from becoming a second QR
+    /// implementation: the appliance encodes, the page paints. A JavaScript encoder would
+    /// mean two implementations of Reed–Solomon over GF(256) in one product, of which
+    /// exactly one is tested.
+    ///
+    /// Text rather than a picture because the page has to style it: it draws the modules
+    /// with the same tokens as everything else on it, in whichever theme the browser is in.
+    /// A PNG would also mean a second encoder, of a different kind.
+    ///
+    /// The quiet zone is included for the same reason [`Self::rows`] draws it: it is part of
+    /// the symbol, not part of the page, and a caller who has to remember to add it is a
+    /// caller who will not.
+    #[must_use]
+    pub fn matrix(&self) -> Vec<String> {
+        let modules = self.drawn_width();
+        (0..modules)
+            .map(|row| {
+                (0..modules)
+                    .map(|column| {
+                        if self.drawn_is_dark(row, column) {
+                            '1'
+                        } else {
+                            '0'
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     /// The symbol as terminal rows, at `scale`.
     ///
     /// Each returned string is one screen row, already carrying the colour changes. They

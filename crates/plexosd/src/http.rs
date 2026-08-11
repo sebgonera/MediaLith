@@ -54,13 +54,49 @@ pub const MAX_BODY: usize = 64 * 1024;
 /// Without this a single half-open connection holds a thread forever.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The one mutating route that does not require a credential, because it issues one.
+/// The mutating routes that do not require a credential, because they are how one is
+/// obtained.
 ///
-/// A constant, and it lives here rather than in `console` next to the other route strings,
-/// because [`refusal`] is what has to agree with the router about it. Two spellings of a
+/// Constants, and they live here rather than in `console` next to the other route strings,
+/// because [`refusal`] is what has to agree with the router about them. Two spellings of a
 /// path — one in the gate, one in the table — is how a route ends up either unreachable or
 /// quietly unauthenticated, and only one of those two mistakes announces itself.
+///
+/// Spending a pairing code from the machine's own screen (ADR-0019).
 pub const PAIR_ROUTE: &str = "/api/pair";
+
+/// Asking to be approved by a browser that is already an administrator (ADR-0019).
+pub const BROWSER_PAIR_START: &str = "/api/browser-pair/start";
+/// Collecting the session that approval produced — needs a secret only the asking browser
+/// has, which is what stands in for a credential.
+pub const BROWSER_PAIR_REDEEM: &str = "/api/browser-pair/redeem";
+/// Withdrawing a request, on the same terms.
+pub const BROWSER_PAIR_CANCEL: &str = "/api/browser-pair/cancel";
+
+/// Every route the gate lets past, in one list.
+///
+/// A list rather than a chain of conditions, and matched **exactly** rather than by prefix.
+/// This suite already pins that `/api/pair/` and `/api/paired` do not inherit the
+/// exemption; a prefix match here would quietly make `/api/browser-pair/anything` an
+/// unauthenticated corner of the API, and an unauthenticated route is not something that
+/// announces itself afterwards.
+///
+/// What keeps the list defensible is that none of these grants anything on its own:
+///
+/// - `PAIR_ROUTE` spends a code only somebody at the machine's screen could have caused to
+///   exist.
+/// - `BROWSER_PAIR_START` creates a request that does nothing until an authenticated
+///   administrator approves it. Anybody on the network may ask; asking is not being let in.
+/// - `BROWSER_PAIR_REDEEM` and `BROWSER_PAIR_CANCEL` require a 256-bit secret that was
+///   returned exactly once, to the browser that asked. Possession of it proves ownership of
+///   a request and nothing else — in particular it is not a bearer credential, and no other
+///   route accepts it.
+const OPEN_ROUTES: &[&str] = &[
+    PAIR_ROUTE,
+    BROWSER_PAIR_START,
+    BROWSER_PAIR_REDEEM,
+    BROWSER_PAIR_CANCEL,
+];
 
 /// A parsed request. Only what the routes actually use.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -483,15 +519,11 @@ pub fn refusal(request: &Request, credential: &crate::auth::Credential) -> Optio
         return None;
     }
 
-    // The one route that cannot require a credential, because it is how a browser gets
-    // one. Named here rather than reasoned about in the handler, so that the whole of the
-    // exception is visible in the function that grants every other route's access.
-    //
-    // What keeps it narrow is that it grants nothing on its own: it spends a pairing code
-    // that only somebody at the machine's own screen can have caused to exist (ADR-0019),
-    // and refuses when there is none. An appliance nobody has pressed P on answers every
-    // request to this route the same way.
-    if request.path == PAIR_ROUTE {
+    // The routes that cannot require a credential, because they are how a browser gets one.
+    // Listed in one place rather than reasoned about in each handler, so that the whole of
+    // the exception is visible in the function that grants every other route's access. See
+    // OPEN_ROUTES for why each of them grants nothing on its own.
+    if OPEN_ROUTES.contains(&request.path.as_str()) {
         return None;
     }
 
@@ -820,11 +852,12 @@ mod tests {
     }
 
     #[test]
-    fn pairing_is_the_only_mutating_route_that_needs_no_credential() {
-        // The exemption has to be exactly one path. A prefix match, or a second spelling
-        // in the router, would make this an unauthenticated corner of the API rather than
-        // one door -- and an unauthenticated route is not something that announces itself
-        // afterwards.
+    fn only_the_routes_that_hand_out_credentials_need_no_credential() {
+        // The exemption has to be an exact list. A prefix match, or a second spelling in
+        // the router, would make this an unauthenticated corner of the API rather than a
+        // few named doors -- and an unauthenticated route is not something that announces
+        // itself afterwards. The approval half of browser pairing sits under the same path
+        // prefix as the open half, which is what makes that distinction load-bearing.
         let handler = |request: &Request| Response::text(200, request.path.clone());
         let claimed = crate::auth::Credential::Set(crate::auth::fingerprint(TOKEN));
 
@@ -835,16 +868,28 @@ mod tests {
             body: Vec::new(),
         };
 
-        assert_eq!(
-            route(&anonymous(PAIR_ROUTE), &claimed, &handler).status,
-            200
-        );
+        for open in OPEN_ROUTES {
+            assert_eq!(
+                route(&anonymous(open), &claimed, &handler).status,
+                200,
+                "{open} is how a browser obtains a credential"
+            );
+        }
 
         for path in [
             "/api/pair/",
             "/api/pairs",
             "/api/pair/extra",
             "/api/paired",
+            // The approval side of browser pairing. These decide whether somebody else is
+            // let in, so they are exactly the routes that must NOT be open -- and they sit
+            // under the same path prefix as three that are, which is why the list above is
+            // matched exactly rather than by prefix.
+            "/api/browser-pair/approve",
+            "/api/browser-pair/deny",
+            "/api/browser-pair/inspect",
+            "/api/browser-pair/",
+            "/api/browser-pair/start/extra",
             "/api/terminal",
             "/api/token",
             "/api/power",

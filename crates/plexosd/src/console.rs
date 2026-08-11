@@ -262,6 +262,17 @@ pub fn respond(request: &Request, env: &impl Environment, services: &Services) -
         // The session a pairing produced: is it still good, and end it.
         ("POST", "/api/session") => session_route(request),
 
+        // One browser approving another (ADR-0019). The first three carry no credential --
+        // `http::refusal` names them -- because they are how a browser obtains one; the
+        // last three decide whether somebody else is let in, so the gate has already
+        // demanded an administrator before they are reached.
+        ("POST", crate::http::BROWSER_PAIR_START) => browser_pair_start(request),
+        ("POST", crate::http::BROWSER_PAIR_REDEEM) => browser_pair_redeem(&request.body),
+        ("POST", crate::http::BROWSER_PAIR_CANCEL) => browser_pair_cancel(&request.body),
+        ("POST", "/api/browser-pair/inspect") => browser_pair_inspect(&request.body),
+        ("POST", "/api/browser-pair/approve") => browser_pair_decide(&request.body, true),
+        ("POST", "/api/browser-pair/deny") => browser_pair_decide(&request.body, false),
+
         // The three questions above the interface list: a resolver, a route, and a name
         // that actually resolves. Its own route rather than a field on /api/status
         // because the name lookup blocks for seconds, and the status page polls -- the
@@ -628,6 +639,188 @@ fn session_route(request: &Request) -> Response {
             format!("{other:?} is not a session action. Remedy: one of check, sign-out.\n"),
         ),
     }
+}
+
+/// One field out of a small JSON body.
+fn field(body: &[u8], name: &str) -> Option<String> {
+    /// Longer than any value these routes take. A 256-bit value is 64 hex characters; the
+    /// slack is for punctuation a client might send, not for anything this issues.
+    const LONGEST: usize = 128;
+
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()?
+        .get(name)?
+        .as_str()
+        .filter(|value| value.len() <= LONGEST)
+        .map(ToOwned::to_owned)
+}
+
+/// Asks to be approved by a browser that is already an administrator (ADR-0019).
+///
+/// Unauthenticated, and that is safe because asking is not being let in: this creates a
+/// request that does nothing at all until an authenticated administrator approves it. What
+/// it costs an attacker who floods it is one of sixteen slots for five minutes, which is
+/// why the store refuses rather than evicting.
+///
+/// The reply carries the desktop's secret, and that is the only time it exists anywhere but
+/// in the browser that asked. It is deliberately **not** in the QR: the whole two-value
+/// design is that photographing the screen is not enough.
+fn browser_pair_start(request: &Request) -> Response {
+    let agent = request.header("User-Agent").unwrap_or_default();
+
+    let opened = match crate::browserpair::open(agent) {
+        Ok(opened) => opened,
+        // 503 rather than 400: nothing about the request was wrong, the appliance is simply
+        // full, and the message says how long that lasts.
+        Err(why) => return Response::text(503, format!("{why}\n")),
+    };
+
+    // The address is chosen the same way the physical console chooses it, through the facts
+    // the whole daemon shares -- so the two QR codes on two screens never name different
+    // ways to reach one machine.
+    let url = format!("https://{}/#approve={}", browser_pair_host(), opened.id);
+
+    let matrix = match crate::dashboard::qr::Symbol::encode(&url) {
+        Ok(symbol) => symbol.matrix(),
+        Err(why) => return Response::text(500, format!("{why}\n")),
+    };
+
+    match json(&serde_json::json!({
+        "request_id": opened.id,
+        "desktop_secret": opened.secret,
+        "verification": opened.verification,
+        "expires_in": crate::browserpair::LIFETIME.as_secs(),
+        "url": url,
+        "qr": matrix,
+    })) {
+        Ok(body) => Response::json(body),
+        Err(why) => Response::text(500, format!("{why}\n")),
+    }
+}
+
+/// The address to put in the desktop's QR code.
+///
+/// The same answer the attached screen gives, arrived at the same way: the addresses this
+/// machine reports as reachable, with the ones its certificate names first. Two screens
+/// naming two different ways to reach one appliance is the shape of fault that gets
+/// diagnosed as "pairing does not work".
+fn browser_pair_host() -> String {
+    let mut addresses =
+        crate::status::Status::gather_with(&System, plexos_gpu::report::Report::generate(&System))
+            .network
+            .reachable_at;
+    crate::dashboard::model::prefer_covered(&mut addresses, crate::tls::covers);
+    addresses.first().cloned().unwrap_or_default()
+}
+
+/// What an administrator is shown before approving. Authenticated by the gate.
+fn browser_pair_inspect(body: &[u8]) -> Response {
+    let Some(id) = field(body, "request_id") else {
+        return Response::text(400, "the body must carry a `request_id` field.\n");
+    };
+
+    match crate::browserpair::describe(&id) {
+        Some(describes) => match json(&describes) {
+            Ok(body) => Response::json(body),
+            Err(why) => Response::text(500, format!("{why}\n")),
+        },
+        None => Response::text(
+            404,
+            "no browser is waiting under that request. Remedy: it has either expired -- \
+             they last five minutes -- or been dealt with already. Ask the other browser \
+             to show a new code.\n",
+        ),
+    }
+}
+
+/// Approves or refuses a waiting browser. Authenticated by the gate.
+///
+/// **No session token crosses this route in either direction.** What an administrator sends
+/// is a sentence about a request; what comes back is whether it was still there to decide.
+/// The session the desktop eventually receives is minted by the appliance, when the desktop
+/// redeems, out of the same store every other session comes from.
+///
+/// The gate accepts either credential, so a browser holding the recovery device code may
+/// approve as well as one holding a session. That follows from ADR-0013 rather than being
+/// decided here: the recovery code already authorises installing an operating system and
+/// opening a root shell, so withholding "may let another browser in" from it would be a
+/// distinction with nothing behind it.
+fn browser_pair_decide(body: &[u8], approve: bool) -> Response {
+    let Some(id) = field(body, "request_id") else {
+        return Response::text(400, "the body must carry a `request_id` field.\n");
+    };
+
+    if crate::browserpair::decide(&id, approve) {
+        println!(
+            "plexosd: an administrator {} a waiting browser",
+            if approve { "approved" } else { "refused" }
+        );
+        return Response::json(format!("{{\"approved\":{approve}}}"));
+    }
+
+    Response::text(
+        409,
+        "that request is no longer waiting to be decided: it has expired, or it was \
+         already approved, refused or used. Remedy: ask the other browser to show a new \
+         code.\n",
+    )
+}
+
+/// Collects the session an approval produced.
+///
+/// Unauthenticated in the ordinary sense and not open: it needs the 256-bit secret returned
+/// once to the browser that asked. That secret proves ownership of a request and nothing
+/// else — it is not a bearer credential and no other route will look at it.
+///
+/// This is also the desktop's polling route, which is why "not yet" is an ordinary 200 with
+/// a status in it rather than an error: a browser asking every two seconds should not be
+/// reading failures while it waits.
+fn browser_pair_redeem(body: &[u8]) -> Response {
+    let (Some(id), Some(secret)) = (field(body, "request_id"), field(body, "desktop_secret"))
+    else {
+        return Response::text(
+            400,
+            "the body must carry `request_id` and `desktop_secret`.\n",
+        );
+    };
+
+    let answer = match crate::browserpair::redeem(&id, &secret) {
+        crate::browserpair::Outcome::Pending => serde_json::json!({"status": "pending"}),
+        crate::browserpair::Outcome::Denied => serde_json::json!({"status": "denied"}),
+        // One answer for expired, unknown and wrong-secret alike. Distinguishing them would
+        // tell whoever photographed a screen that they hold half of what they need.
+        crate::browserpair::Outcome::Refused => serde_json::json!({"status": "refused"}),
+        crate::browserpair::Outcome::Approved(session) => {
+            println!("plexosd: a browser approved by an administrator was let in");
+            serde_json::json!({
+                "status": "approved",
+                "session_token": session,
+                "expires_in": crate::session::ABSOLUTE_LIFETIME.as_secs(),
+                "idle_timeout": crate::session::IDLE_TIMEOUT.as_secs(),
+            })
+        }
+    };
+
+    match json(&answer) {
+        Ok(body) => Response::json(body),
+        Err(why) => Response::text(500, format!("{why}\n")),
+    }
+}
+
+/// Withdraws a request. Needs the secret, so only the browser that asked can do it.
+fn browser_pair_cancel(body: &[u8]) -> Response {
+    let (Some(id), Some(secret)) = (field(body, "request_id"), field(body, "desktop_secret"))
+    else {
+        return Response::text(
+            400,
+            "the body must carry `request_id` and `desktop_secret`.\n",
+        );
+    };
+
+    // Whether it was there or not, the caller's desired state is the state they are in, so
+    // this is not an error either way.
+    let cancelled = crate::browserpair::cancel(&id, &secret);
+    Response::json(format!("{{\"cancelled\":{cancelled}}}"))
 }
 
 /// The settings routes: read, write, and confirm an address change.
@@ -1772,6 +1965,254 @@ mod tests {
         let response = respond_test(&request, &Fixture::new());
         assert_eq!(response.status, 200);
         assert!(String::from_utf8_lossy(&response.body).contains("\"signed_out\":false"));
+    }
+
+    /// `POST /api/browser-pair/start`, as an unauthenticated desktop would send it.
+    fn browser_pair_start_as(agent: &str) -> serde_json::Value {
+        let mut request = post(crate::http::BROWSER_PAIR_START, "{}");
+        request
+            .headers
+            .push(("User-Agent".to_owned(), agent.to_owned()));
+        let response = respond_test(&request, &Fixture::new());
+        assert_eq!(response.status, 200);
+        serde_json::from_slice(&response.body).expect("json")
+    }
+
+    fn browser_pair_post(path: &str, body: &str) -> (u16, serde_json::Value) {
+        let response = respond_test(&post(path, body), &Fixture::new());
+        let parsed = serde_json::from_slice(&response.body).unwrap_or_else(
+            |_| serde_json::json!({"body": String::from_utf8_lossy(&response.body)}),
+        );
+        (response.status, parsed)
+    }
+
+    #[test]
+    fn the_desktops_qr_carries_the_request_and_never_the_secret() {
+        // The whole two-value design, asserted where it can actually be got wrong. The id
+        // is on a monitor for anybody to photograph; the secret is the thing that makes the
+        // photograph worthless, and it must appear nowhere in what is drawn.
+        let _serialised = crate::browserpair::test_lock();
+        let opened = browser_pair_start_as("Mozilla/5.0 (Windows NT 10.0) Chrome/120");
+
+        let url = opened["url"].as_str().expect("a url");
+        let id = opened["request_id"].as_str().expect("an id");
+        let secret = opened["desktop_secret"].as_str().expect("a secret");
+
+        assert!(url.contains(&format!("#approve={id}")), "{url}");
+        assert!(
+            !url.contains(secret),
+            "the secret must not be in the QR: {url}"
+        );
+        assert!(!url.contains('?'), "never a query parameter: {url}");
+        assert_ne!(id, secret);
+
+        // And nothing else that authenticates anything is in there either.
+        for forbidden in ["session_token", "device-token", "Bearer"] {
+            assert!(!url.contains(forbidden), "{forbidden} in {url}");
+        }
+
+        // The matrix is the appliance's own encoder, so the page paints rather than
+        // encodes -- one implementation of ISO/IEC 18004 in this product, not two.
+        let rows = opened["qr"].as_array().expect("a matrix");
+        assert!(rows.len() >= 29, "a symbol, {} rows", rows.len());
+        for row in rows {
+            let row = row.as_str().expect("a row of 1s and 0s");
+            assert_eq!(row.len(), rows.len(), "square");
+            assert!(row.bytes().all(|b| b == b'0' || b == b'1'), "{row}");
+        }
+    }
+
+    #[test]
+    fn a_waiting_browser_gets_nothing_until_an_administrator_says_yes() {
+        // The state an attacker most wants to shortcut, through the routes rather than the
+        // store: the desktop has asked, holds its own secret, and is still nobody.
+        let _serialised = crate::browserpair::test_lock();
+        let opened = browser_pair_start_as("Chrome/120");
+        let id = opened["request_id"].as_str().unwrap();
+        let secret = opened["desktop_secret"].as_str().unwrap();
+
+        let body = format!(r#"{{"request_id":"{id}","desktop_secret":"{secret}"}}"#);
+        let (status, answer) = browser_pair_post(crate::http::BROWSER_PAIR_REDEEM, &body);
+        assert_eq!(status, 200, "polling is not an error");
+        assert_eq!(answer["status"], "pending");
+        assert!(
+            answer["session_token"].is_null(),
+            "no token before approval"
+        );
+    }
+
+    #[test]
+    fn approval_lets_the_desktop_collect_a_session_of_its_own_exactly_once() {
+        let _serialised = crate::browserpair::test_lock();
+        let opened = browser_pair_start_as("Chrome/120");
+        let id = opened["request_id"].as_str().unwrap().to_owned();
+        let secret = opened["desktop_secret"].as_str().unwrap().to_owned();
+
+        let (status, _) = browser_pair_post(
+            "/api/browser-pair/approve",
+            &format!(r#"{{"request_id":"{id}"}}"#),
+        );
+        assert_eq!(status, 200);
+
+        let redeem = format!(r#"{{"request_id":"{id}","desktop_secret":"{secret}"}}"#);
+        let (status, answer) = browser_pair_post(crate::http::BROWSER_PAIR_REDEEM, &redeem);
+        assert_eq!(status, 200);
+        assert_eq!(answer["status"], "approved");
+
+        let session = answer["session_token"].as_str().expect("a session");
+        assert_eq!(session.len(), crate::session::TOKEN_BYTES * 2);
+        // An ordinary session with the ordinary deadlines, not a second kind of credential.
+        assert_eq!(
+            answer["expires_in"],
+            serde_json::json!(crate::session::ABSOLUTE_LIFETIME.as_secs())
+        );
+
+        // And it really opens doors, which is the only test of a credential that matters.
+        let claimed = crate::auth::Credential::Set(crate::auth::fingerprint("4K7QM2XR9T8BHVWP"));
+        assert_eq!(
+            crate::auth::authenticate(session, &claimed),
+            Some(crate::auth::Principal::AdminSession)
+        );
+
+        // Replay: the same approved request, the same correct secret, and nothing.
+        let (_, again) = browser_pair_post(crate::http::BROWSER_PAIR_REDEEM, &redeem);
+        assert_eq!(again["status"], "refused");
+        assert!(again["session_token"].is_null());
+
+        assert!(crate::session::revoke(session), "cleanup: it was live");
+    }
+
+    #[test]
+    fn the_session_the_desktop_gets_is_not_the_one_the_approver_holds() {
+        // The principle this feature is built around: the phone is not a relay. There is no
+        // path by which its token could reach the desktop, and this is what says so at the
+        // boundary where somebody might one day add one.
+        let _serialised = crate::browserpair::test_lock();
+        let approver = crate::session::issue().expect("/dev/urandom");
+
+        let opened = browser_pair_start_as("Chrome/120");
+        let id = opened["request_id"].as_str().unwrap().to_owned();
+        let secret = opened["desktop_secret"].as_str().unwrap().to_owned();
+
+        // The approver's own request carries its session in a header, and the reply says
+        // nothing about it.
+        let mut approve = post(
+            "/api/browser-pair/approve",
+            &format!(r#"{{"request_id":"{id}"}}"#),
+        );
+        approve
+            .headers
+            .push(("Authorization".to_owned(), format!("Bearer {approver}")));
+        let response = respond_test(&approve, &Fixture::new());
+        let said = String::from_utf8_lossy(&response.body);
+        assert!(
+            !said.contains(&approver),
+            "the approver's token came back: {said}"
+        );
+
+        let (_, answer) = browser_pair_post(
+            crate::http::BROWSER_PAIR_REDEEM,
+            &format!(r#"{{"request_id":"{id}","desktop_secret":"{secret}"}}"#),
+        );
+        let desktop = answer["session_token"].as_str().expect("a session");
+        assert_ne!(
+            desktop, approver,
+            "the desktop was handed the phone's session"
+        );
+
+        // Two independent sessions: ending one leaves the other.
+        assert!(crate::session::revoke(&approver));
+        let claimed = crate::auth::Credential::Set(crate::auth::fingerprint("4K7QM2XR9T8BHVWP"));
+        assert!(
+            crate::auth::authenticate(desktop, &claimed).is_some(),
+            "signing the phone out must not sign the desktop out"
+        );
+        assert!(crate::session::revoke(desktop), "cleanup");
+    }
+
+    #[test]
+    fn a_refusal_reaches_the_desktop_rather_than_leaving_it_waiting() {
+        // Somebody tapped Deny. The desktop should say so within a poll, not sit on
+        // "waiting for approval" for the remaining four minutes.
+        let _serialised = crate::browserpair::test_lock();
+        let opened = browser_pair_start_as("Chrome/120");
+        let id = opened["request_id"].as_str().unwrap().to_owned();
+        let secret = opened["desktop_secret"].as_str().unwrap().to_owned();
+
+        browser_pair_post(
+            "/api/browser-pair/deny",
+            &format!(r#"{{"request_id":"{id}"}}"#),
+        );
+
+        let (_, answer) = browser_pair_post(
+            crate::http::BROWSER_PAIR_REDEEM,
+            &format!(r#"{{"request_id":"{id}","desktop_secret":"{secret}"}}"#),
+        );
+        assert_eq!(answer["status"], "denied");
+        assert!(answer["session_token"].is_null());
+
+        // And a refusal cannot be turned into an approval afterwards.
+        let (status, _) = browser_pair_post(
+            "/api/browser-pair/approve",
+            &format!(r#"{{"request_id":"{id}"}}"#),
+        );
+        assert_eq!(status, 409);
+    }
+
+    #[test]
+    fn cancelling_needs_the_secret_so_a_passer_by_cannot_stop_somebody_pairing() {
+        // The id is on a monitor. If cancelling took only the id, anybody on the network
+        // who read one off a screen could stop that pairing, repeatedly.
+        let _serialised = crate::browserpair::test_lock();
+        let opened = browser_pair_start_as("Chrome/120");
+        let id = opened["request_id"].as_str().unwrap().to_owned();
+        let secret = opened["desktop_secret"].as_str().unwrap().to_owned();
+
+        let (_, answer) = browser_pair_post(
+            crate::http::BROWSER_PAIR_CANCEL,
+            &format!(r#"{{"request_id":"{id}","desktop_secret":"read-off-the-screen"}}"#),
+        );
+        assert_eq!(answer["cancelled"], serde_json::json!(false));
+
+        // Still there for the browser that owns it.
+        let (_, answer) = browser_pair_post(
+            crate::http::BROWSER_PAIR_CANCEL,
+            &format!(r#"{{"request_id":"{id}","desktop_secret":"{secret}"}}"#),
+        );
+        assert_eq!(answer["cancelled"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn an_administrator_is_shown_what_is_asking_and_the_number_to_compare() {
+        let _serialised = crate::browserpair::test_lock();
+        let opened =
+            browser_pair_start_as("Mozilla/5.0 (Windows NT 10.0; Win64) Chrome/120 Safari/537");
+        let id = opened["request_id"].as_str().unwrap().to_owned();
+
+        let (status, described) = browser_pair_post(
+            "/api/browser-pair/inspect",
+            &format!(r#"{{"request_id":"{id}"}}"#),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(described["browser"], "Chrome on Windows");
+        // The same four digits both screens show, derived from the request rather than
+        // reported by either of them.
+        assert_eq!(described["verification"], opened["verification"]);
+
+        // And nothing that could be mistaken for a credential.
+        let said = described.to_string();
+        assert!(!said.contains("secret"), "{said}");
+        assert!(!said.contains("session"), "{said}");
+    }
+
+    #[test]
+    fn inspecting_something_that_is_not_waiting_says_so_without_a_hint() {
+        let _serialised = crate::browserpair::test_lock();
+        let (status, _) = browser_pair_post(
+            "/api/browser-pair/inspect",
+            r#"{"request_id":"nothing-by-that-name"}"#,
+        );
+        assert_eq!(status, 404);
     }
 
     #[test]
