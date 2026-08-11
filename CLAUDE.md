@@ -362,6 +362,27 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
 
 An index, so nothing here has to be rediscovered by reading the tree.
 
+**The console page** — one file, `crates/plexosd/src/ui/console.html`, embedded with
+`include_str!`. No framework, no build step, no external anything. Since the redesign it is
+an application shell rather than a long page: a sticky header (what the machine is, the
+health verdict, the address, the slot, uptime, the administrator lock, restart and shut
+down), a sidebar of seven views — Overview, Plex, Storage, Network, System, Events, and
+Terminal under Advanced — and one view showing at a time.
+
+Nothing navigates. Switching is `hidden` on six sections and off one, so the six polls, the
+terminal's scrollback and the typed token all survive a click; `pushState` and `popstate`
+keep the URL and the view agreeing, so `#network` is a link somebody can send and the back
+button works. The device token is behind the lock in the header rather than in a card at the
+top of the page, and **ADR-0013 is untouched by that**: same field, `sessionStorage` only,
+same `Authorization: Bearer` header. Light/Dark/System is kept in `localStorage`, because it
+is a property of the browser looking rather than of the machine being looked at.
+
+The rules the page is built around, each of which has cost a fault: nothing anybody types
+into may live inside a region a poll replaces; anything with state a person set — an open
+disclosure, a table they asked for — may not either; a failure must be shown in the section
+whose button caused it, and must open that section if it is folded; and a `GET` stays
+readable without a credential so a broken machine can still be diagnosed.
+
 **Console API** — HTTPS only, port 443; port 80 answers a 308. `GET` needs no credential,
 every `POST` needs the device token (ADR-0013), and the terminal is *all* `POST` so a root
 shell's output cannot be read without one.
@@ -865,6 +886,45 @@ and its certificate — sign with the second one.
   thing". `no_id_is_given_to_two_elements` and `the_script_declares_no_function_twice` ask
   it; note that only the `const` flavour of this is a parse error, which is why
   `the_pages_script_parses` could not see the `function` one.
+- **CSS specificity is the console's silent failure mode, and it has now cost four
+  faults in one afternoon.** All four passed every test in this repository, because every
+  test here reads the page as *text* and in all four cases the text was right. Only a
+  rendered page shows them.
+  - `#view-overview { display: flex }` beats `.view[hidden] { display: none }`, because an
+    id outranks any number of classes. So the Overview stayed on screen underneath every
+    other view, with the sticky header floating halfway down a page of summary cards. **An
+    id in a layout rule needs the state in the selector**: `#view-overview:not([hidden])`.
+    Already recorded once on `#terminal.folded`, and walked into again.
+  - `.navitem` is one class and loses to `button:not(.ghost)`, which is an element and a
+    class — so the sidebar rendered as seven solid blue buttons, which is exactly what the
+    base rule guarantees a button looks like. `button.navitem`, placed *after* the base
+    rule, wins on equal specificity plus source order **without naming where the button
+    is**, which is the property `buttons_are_styled_without_naming_where_they_are` exists
+    to keep.
+  - The same again for `.linkish`, and the colour was the half that was missed: a
+    cross-reference inside a muted paragraph rendered white on nearly-white and could not
+    be seen at all.
+  - Two media queries both apply on a phone, because a phone is narrower than a tablet. The
+    tablet rail hides nav labels with `button.navitem .label`; the phone rule bringing them
+    back was written `.navitem .label`, one class less specific, so it lost however far
+    down the sheet it sat. The drawer opened to a column of seven unlabelled icons — a
+    rail, not a drawer, and the whole point of a drawer is that there is room for words.
+- **A page wider than its window is cropped in a screenshot, which looks exactly like a
+  page that fits.** "No horizontal scrolling" cannot be checked by looking. The System view
+  was 54 px wider than a 390 px window from one `white-space: nowrap` pill, and six
+  screenshots of that view had already been read as fine. Measure it in the browser —
+  `documentElement.scrollWidth` against `clientWidth`, per view — and have the probe **name
+  the widest element that sticks out**, because "something overflows" is not something
+  anybody can act on. `tools/preview-console.py` serves the page; a few injected lines do
+  the rest.
+- **A rename applied to a file rather than to an identifier rewrites string literals with
+  it.** `metricLevel` returned `warn-metricLevel` and `bad-metricLevel` while the stylesheet
+  defined `.meter.warn-level` and `.meter.bad-level`, so **no meter on the activity card had
+  ever left the accent colour**: a `/var` at 96% full drew exactly like one at 6%, which is
+  the one reading that card exists to make loud. Both halves stayed internally consistent,
+  so nothing reading the page as text could see it. The test that catches it takes the class
+  names from the function *by running it* and looks each one up in the stylesheet — which is
+  the general shape for any pair of files that have to agree on a name.
 - **`\b` is a backspace only inside a character class, and the terminal was deleting the
   last character of every word.** `body.replace(/[^\n\b]\b/g, "")` was meant to say "drop a
   character that a backspace erased". The `\b` *inside* the class is `\x08`, so the first

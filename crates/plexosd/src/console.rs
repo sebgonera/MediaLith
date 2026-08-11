@@ -1997,6 +1997,175 @@ mod tests {
         );
     }
 
+    /// The page's one script block, which most of these tests want.
+    fn page_script() -> &'static str {
+        PAGE.split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has exactly one script block")
+    }
+
+    /// The page's one style block.
+    fn page_style() -> &'static str {
+        PAGE.split_once("<style>")
+            .and_then(|(_, rest)| rest.split_once("</style>"))
+            .map(|(body, _)| body)
+            .expect("the page has exactly one style block")
+    }
+
+    #[test]
+    fn every_view_the_sidebar_offers_is_a_section_that_exists() {
+        // The console is seven views behind a sidebar, and the two halves are written in two
+        // places: `VIEWS` in the script, `data-view` on the buttons, and `data-view` on the
+        // sections. A name in one and not the others is a menu item that does nothing, or a
+        // section nothing can reach -- and neither throws, because the switch is a loop over
+        // elements that simply does not find one.
+        let script = page_script();
+        let declared = script
+            .split_once("const VIEWS = [")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(list, _)| list)
+            .expect("the views are declared in one place");
+        let views: Vec<&str> = declared
+            .split(',')
+            .map(|name| name.trim().trim_matches('"'))
+            .filter(|name| !name.is_empty())
+            .collect();
+        assert!(views.len() >= 7, "seven views were designed: {views:?}");
+
+        for view in &views {
+            assert!(
+                PAGE.contains(&format!("<section class=\"view\" data-view=\"{view}\"")),
+                "{view} is offered by the sidebar and there is no section for it"
+            );
+            assert!(
+                PAGE.contains(&format!("class=\"navitem\" data-view=\"{view}\"")),
+                "{view} is a section with nothing in the sidebar that reaches it"
+            );
+        }
+
+        // And the reverse: a button naming a view the script does not know about switches to
+        // nothing at all, silently.
+        for (index, _) in PAGE.match_indices("class=\"navitem\" data-view=\"") {
+            let rest = &PAGE[index + "class=\"navitem\" data-view=\"".len()..];
+            let (name, _) = rest.split_once('"').expect("a closed attribute");
+            assert!(
+                views.contains(&name),
+                "the sidebar offers {name:?}, which is not one of {views:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn switching_views_never_leaves_the_page() {
+        // The console is a page people leave open for hours on a second screen, and every
+        // poll, the terminal's scrollback and the typed token live in it. A navigation item
+        // that was an anchor with an href would throw all of that away on every click -- and
+        // would look to a keyboard and a screen reader like something that loads a document,
+        // which it must not, because nothing here does.
+        let script = page_script();
+        assert!(
+            !PAGE.contains("<a class=\"navitem\""),
+            "a view is switched, not navigated to"
+        );
+        assert!(
+            PAGE.contains("<button class=\"navitem\""),
+            "and the control is a button, which is what it behaves like"
+        );
+        // The address bar still moves, so a link to a view can be sent and the back button
+        // steps between them.
+        assert!(
+            script.contains("history.pushState"),
+            "the URL has to follow the view, or #network is not a link anybody can send"
+        );
+        assert!(
+            script.contains("popstate"),
+            "and the view has to follow the URL, or the back button does nothing"
+        );
+    }
+
+    #[test]
+    fn the_token_is_behind_a_lock_and_nothing_about_it_moved() {
+        // The device token card was the first and largest thing on this page. It is a
+        // popover behind a lock in the header now, and this is the test that the *redesign*
+        // did not quietly become a change to ADR-0013: the token is still typed into the
+        // same field, still kept in sessionStorage and nowhere else, and still sent as an
+        // Authorization header.
+        assert!(
+            PAGE.contains("id=\"token-card\" hidden"),
+            "the card starts hidden, so a dashboard does not open with a credential box on it"
+        );
+        assert!(
+            PAGE.contains("id=\"admin-lock\""),
+            "and there is a control in the header that opens it"
+        );
+
+        let script = page_script();
+        assert!(
+            script.contains("sessionStorage.getItem(TOKEN_KEY)")
+                && script.contains("sessionStorage.setItem(TOKEN_KEY"),
+            "the token lives in sessionStorage, which is cleared when the tab closes"
+        );
+        assert!(
+            !script.contains("localStorage.setItem(TOKEN_KEY")
+                && !script.contains("localStorage.getItem(TOKEN_KEY"),
+            "and never in localStorage, which outlives the tab"
+        );
+        // Locking is a thing this browser does, not a thing the appliance is told. Rotating
+        // is the other button and it is the one that reaches the machine.
+        let lock = script
+            .split_once("function lockAdmin()")
+            .map(|(_, rest)| rest)
+            .expect("locking is a named function");
+        let lock = &lock[..lock.find("\n}").unwrap_or(lock.len())];
+        assert!(
+            lock.contains("sessionStorage.removeItem(TOKEN_KEY)"),
+            "locking forgets the token in this tab: {lock}"
+        );
+        assert!(
+            !lock.contains("fetch("),
+            "and asks the appliance for nothing -- rotating is the button that does that: {lock}"
+        );
+    }
+
+    #[test]
+    fn the_theme_is_this_browsers_business_and_has_three_states() {
+        // Three, not two: light, dark, and the default -- no choice made, so the operating
+        // system decides. The third is the one that gets dropped, and dropping it means a
+        // machine set to dark shows a light console until somebody finds the control.
+        let style = page_style();
+        assert!(
+            style.contains("@media (prefers-color-scheme: dark)"),
+            "the system's preference has to be honoured when nobody has chosen"
+        );
+        assert!(
+            style.contains(":root:not([data-theme=\"light\"])"),
+            "and the media query must be guarded, or an explicit light choice loses to a \
+             dark operating system"
+        );
+        assert!(
+            style.contains(":root[data-theme=\"dark\"]"),
+            "and an explicit dark choice must win on a light one, which the media query \
+             cannot express"
+        );
+
+        // Stored in the browser and not on the appliance. Two people on two screens must not
+        // fight over it, and this console must not grow server state for a colour.
+        let script = page_script();
+        assert!(
+            script.contains("localStorage.setItem(THEME_KEY")
+                && script.contains("localStorage.removeItem(THEME_KEY"),
+            "the choice is kept locally, and choosing 'system' removes it rather than \
+             storing a third value that a future default could not change"
+        );
+        for value in ["\"system\"", "\"light\"", "\"dark\""] {
+            assert!(
+                PAGE.contains(&format!("<option value={value}")),
+                "the selector offers {value}"
+            );
+        }
+    }
+
     #[test]
     fn the_cards_that_fold_are_the_ones_a_running_appliance_rarely_opens() {
         // Six cards fold. Five start closed, and the terminal is the exception because it
