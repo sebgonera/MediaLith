@@ -111,16 +111,34 @@
      a specificity conflict is visible at all. */
   #terminal.folded > :not(.bar) { display: none; }
 
+  /* Sticky, because this page is long — the activity card, the terminal and the installer
+     each take a screen — and the two things worth having always to hand are what the machine
+     is and how to stop it. `z-index` is above the cards but below nothing else on the page;
+     the background must be opaque or content scrolls through it. */
   header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
     display: flex;
     flex-wrap: wrap;
-    align-items: baseline;
-    gap: .75rem;
-    padding: 1.75rem 0 1.25rem;
+    align-items: center;
+    gap: .5rem .75rem;
+    padding: .8rem 0 .7rem;
+    background: var(--bg);
     border-bottom: 1px solid var(--line);
   }
-  header h1 { margin: 0; font-size: 1.4rem; letter-spacing: -.01em; }
-  header .version { color: var(--muted); font-size: .9rem; }
+  header h1 { margin: 0; font-size: 1.25rem; letter-spacing: -.01em; }
+  header .version { color: var(--muted); font-size: .85rem; }
+  /* The right-hand group: pushed over, and kept together when the header wraps on a narrow
+     screen so the controls never end up split across two lines. */
+  header .aside {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: .5rem;
+  }
+  header .aside button { padding: .4rem .7rem; font-size: .85rem; }
 
   .badge {
     font-size: .75rem;
@@ -276,8 +294,8 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: .9rem;
   }
-  /* Buttons are styled once, further down, by `.card button` — not here per card kind. See
-     the comment on that rule for what enumerating the kinds cost. */
+  /* Buttons are styled once, further down, on the element itself. See the comment on that
+     rule for what naming a container cost, twice. */
   .plex .hint { color: var(--muted); font-size: .9rem; margin: .4rem 0 0; }
   .plex .visit {
     display: inline-block;
@@ -344,9 +362,6 @@
     outline-offset: -1px;
     border-color: var(--accent);
   }
-  /* Buttons: see `.card button` further down. The only thing a form needs of its own is a
-     lighter weight on the secondary control, so the primary one reads as the primary one. */
-  .card button.ghost { font-weight: 500; }
 
   /* ------------------------------------------------------------------
      The terminal.
@@ -677,19 +692,6 @@
   .failed { border-color: var(--unavailable); color: var(--unavailable); }
 
   /* Power. Deliberately quiet: it is needed rarely and its mistake is expensive. */
-  .power { margin: 1.5rem 0; }
-  .power .row { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .6rem; }
-  .power button {
-    padding: .5rem 1rem;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--card);
-    color: var(--ink);
-    font: inherit;
-    cursor: pointer;
-  }
-  .power button:hover { border-color: var(--unavailable); color: var(--unavailable); }
-  .power button[disabled] { opacity: .55; cursor: default; }
 
   /* --------------------------------------------------------------------------------
      Style refresh.
@@ -726,18 +728,17 @@
   .hero.unavailable { background: linear-gradient(var(--unavailable-soft), var(--card) 60%); }
   .hero h2 { font-size: 1.65rem; letter-spacing: -.02em; }
 
-  /* One button treatment for the page, keyed on **`.card`** rather than on which kind of
-     card it is. It was written three times first — in .plex, in .form and in .power — which
-     is why the same control looked slightly different depending on where it was; that was
-     noticed and the shared half was factored out, but the selectors stayed enumerated. So
-     the fourth case was never covered: the network card is a plain `<div class="card">`, and
-     its "Diagnose the network" button matched none of the three rules and therefore had **no
-     styling at all** — a raw operating-system button in the middle of a designed page. It
-     shipped that way and was reported from a machine.
-     Enumerating the variants was the defect. `.card button` cannot leave a card out.
-     .power keeps its own hover, because stopping the machine should not look like every
-     other button on the page. */
-  .card button {
+  /* One button treatment for the page, on the **element**, with no container named at all.
+     This has now been narrowed twice by the same mistake. It began as three rules — `.plex
+     button`, `.form button`, `.power button` — so the network card, a plain
+     `<div class="card">`, matched none of them and its button had *no styling*: a raw
+     operating-system control in the middle of a designed page, which shipped and was
+     reported from a machine. That was fixed to `.card button`, which then left out the next
+     button added outside a card — the power controls in the header.
+     A rule about how buttons look should not know where buttons are. `.danger` carries the
+     one distinction worth keeping: stopping the machine must not look like every other
+     control on the page. */
+  button {
     border: 1px solid var(--accent);
     border-radius: var(--radius-sm);
     padding: .58rem .95rem;
@@ -748,23 +749,30 @@
     transition: background-color .12s ease, border-color .12s ease,
                 box-shadow .12s ease, transform .06s ease;
   }
-  .card:not(.power) button:not(.ghost) {
+  button:not(.ghost) {
     background: var(--accent);
     border-color: var(--accent);
     color: var(--accent-ink);
   }
-  .card:not(.power) button:not(.ghost):hover { filter: brightness(1.07); }
-  .card button.ghost, .power button {
+  button:not(.ghost):hover { filter: brightness(1.07); }
+  button.ghost {
     background: var(--card);
     color: var(--ink);
     border: 1px solid var(--line);
+    font-weight: 500;
   }
-  .card button.ghost:hover {
+  button.ghost:hover {
     border-color: var(--accent);
     color: var(--accent);
   }
-  .card button:active { transform: translateY(1px); }
-  .card button[disabled] {
+  /* Shutting down and restarting. Quiet until pointed at, then unmistakably not the accent:
+     these two are the only controls on the page that end the session they are pressed in. */
+  button.danger:hover {
+    border-color: var(--unavailable);
+    color: var(--unavailable);
+  }
+  button:active { transform: translateY(1px); }
+  button[disabled] {
     opacity: .55;
     cursor: default;
     box-shadow: none;
@@ -824,7 +832,19 @@
     <span class="version" id="version"></span>
     <span class="badge" id="slot" hidden></span>
     <span class="badge" id="gate" hidden></span>
+    <span class="aside">
+      <span class="badge" id="uptime"></span>
+      <button id="restart" class="ghost danger">Restart</button>
+      <button id="shutdown" class="ghost danger">Shut down</button>
+    </span>
   </header>
+
+  <!-- The power card's one paragraph used to carry both the warning and any failure. The
+       warning has moved into the confirmation, which is where somebody actually reads it, and
+       this is what is left: a place for the answer when stopping the machine does not work.
+       Hidden until there is something to say, because an empty banner under a sticky header
+       is a permanent bite out of the page. -->
+  <p class="warn" id="power-note" hidden></p>
 
   <section class="card plex" id="token-card">
     <h3>Device token</h3>
@@ -875,15 +895,20 @@
          first figures arrive a couple of seconds after this page opens.</p>
     </div>
 
+    <!-- The paragraph that used to explain why this needs a token is gone from the page. The
+         reason has not changed and is still written down where it belongs — on
+         `metrics_route` in console.rs — but a standing explanation of a thing that has not
+         gone wrong yet is clutter, and the one moment it matters is covered: pressing this
+         without a token says so, and says where to put one. -->
     <div class="panel" id="procs-panel">
       <h4>Processes</h4>
-      <p class="hint">Not shown by default, and not on a GET: a list of what is running with
-         its command lines is closer to what the terminal exposes than to a health reading,
-         so it needs the device token.</p>
       <div class="row">
-        <button id="procs-load" class="ghost">Show what is running</button>
+        <button id="procs-load" class="ghost">Show Processes</button>
+        <button id="procs-refresh" class="ghost" hidden>Refresh</button>
       </div>
-      <div id="procs"></div>
+      <!-- `hidden` from the start, so "is the list showing" is one fact from the first paint
+           rather than "empty now, hidden later". -->
+      <div id="procs" hidden></div>
     </div>
 
     <!-- Written once; the poll replaces the contents of the list and never the details
@@ -918,18 +943,7 @@
     <p class="empty">Loading…</p>
   </section>
 
-  <section class="card power" id="power">
-    <h3>Power</h3>
-    <p class="hint" id="power-note">Stopping this way closes Plex's database and flushes
-       the disk first. Holding the power button does neither.</p>
-    <div class="row">
-      <button id="shutdown">Shut down</button>
-      <button id="restart">Restart</button>
-    </div>
-  </section>
-
   <footer>
-    <span id="uptime"></span>
     <span id="refreshed"></span>
   </footer>
 </div>
@@ -1114,7 +1128,15 @@ function esc(value) {
     .replaceAll('"', "&quot;");
 }
 
-/** "3 days, 4 h 12 min" — a duration a person reads, not a second count. */
+/**
+ * "3 days 4 h" — a duration a person reads, not a second count.
+ *
+ * The duration and nothing else. It used to return "Up " in front of it while its own comment
+ * described only the duration, and both callers then added a label of their own: the header
+ * badge read "UP UP 18 MIN" and the activity tile was labelled "Up" above a value of "Up 1 h
+ * 21 min". A function that names itself in its own output cannot be composed, which is what
+ * both of those were trying to do.
+ */
 function humanUptime(seconds) {
   if (seconds === null || seconds === undefined) return "";
   const d = Math.floor(seconds / 86400);
@@ -1124,7 +1146,7 @@ function humanUptime(seconds) {
   if (d) parts.push(d + (d === 1 ? " day" : " days"));
   if (h) parts.push(h + " h");
   if (!d) parts.push(m + " min");
-  return "Up " + parts.join(" ");
+  return parts.join(" ");
 }
 
 function gpuSection(gpu) {
@@ -1182,6 +1204,10 @@ function healthCard(status) {
 // would vanish a second later. Held here and re-inserted, which is cheaper than making
 // the poll aware of a card that answers to a button rather than to the poll.
 let lastNetdiag = "";
+// And whether it is on show. Every part of this page that can be opened can be shut again;
+// the diagnosis was the second exception after the process list, and it was worse, because
+// its output is long and sat under the network card for the rest of the session.
+let netdiagShown = false;
 
 function networkCard(net) {
   const rows = (net.interfaces || [])
@@ -1207,8 +1233,15 @@ function networkCard(net) {
         <!-- Ghost, because it reads and changes nothing. The accent is for the controls that
              do something to the machine, and a diagnostic wearing it competed with them. -->
         <button id="netdiag-run" class="ghost">Diagnose the network</button>
+        ${netdiagShown && lastNetdiag ? `<button id="netdiag-hide" class="ghost">Hide</button>` : ""}
       </div>
-      <div id="netdiag">${lastNetdiag}</div>
+      <!-- Whether the diagnosis is on show is a variable rather than this element's state,
+           because the whole card is rebuilt from its template on every status poll: ten
+           seconds later the DOM is a different DOM. Same reason lastNetdiag exists at all.
+           (No backticks in this comment. It sits inside a template literal, so one would end
+           the literal and take the entire page's script with it — which is exactly what
+           happened when this comment was first written.) -->
+      <div id="netdiag">${netdiagShown ? lastNetdiag : ""}</div>
     </div>`;
 }
 
@@ -1220,6 +1253,7 @@ async function runNetworkDiagnosis() {
   if (!out) return;
 
   if (button) { button.disabled = true; button.textContent = "Diagnosing…"; }
+  netdiagShown = true;
   lastNetdiag = `<div class="progress"><span class="now">Looking up a name…</span>
     <div>A resolver that is not answering takes a few seconds to give up.</div></div>`;
   out.innerHTML = lastNetdiag;
@@ -2072,9 +2106,15 @@ function render(status) {
     document.getElementById("net-trial").before(host);
   }
 
-  document.getElementById("uptime").textContent = humanUptime(status.uptime_seconds);
+  // In the sticky header now, as a badge, so "how long has this been up" is answerable
+  // without scrolling to the bottom of a page that is several screens long. The footer keeps
+  // the refresh time, which is about this page rather than about the machine.
+  const uptime = document.getElementById("uptime");
+  const since = humanUptime(status.uptime_seconds);
+  uptime.textContent = since ? "up " + since : "";
+  uptime.hidden = !since;
   document.getElementById("refreshed").textContent =
-    " · refreshed " + new Date().toLocaleTimeString();
+    "refreshed " + new Date().toLocaleTimeString();
 }
 
 function renderError(error) {
@@ -3246,11 +3286,39 @@ function renderProcesses(report) {
       </table>
     </div>${omitted}`;
 
-  // The list stays where it was put now that this panel is outside the redrawn region, so
-  // the control that fetched it becomes the one that fetches it again. Percentages need two
-  // readings, so the first list has none and a second press is what fills them in.
-  const button = document.getElementById("procs-load");
-  if (button) button.textContent = "Refresh the list";
+  // Refreshing is a second control rather than a relabelled first one, because the first one
+  // now has a job of its own: putting the list away. Percentages need two readings, so the
+  // first list has none and pressing Refresh is what fills them in.
+  showProcesses(true);
+}
+
+/**
+ * Shows or hides the process list.
+ *
+ * Anything on this page that can be opened can be shut again — this list was the one
+ * exception, and once it was up there was no way back to a page without it. The state is the
+ * element's own `hidden`, not a variable: this panel is outside the region the poll redraws,
+ * so its DOM is the only thing that has to agree with itself.
+ */
+function showProcesses(shown) {
+  document.getElementById("procs").hidden = !shown;
+  document.getElementById("procs-refresh").hidden = !shown;
+  document.getElementById("procs-load").textContent =
+    shown ? "Hide Processes" : "Show Processes";
+}
+
+/** The one control: fetch it the first time, then put it away and bring it back. */
+function toggleProcesses() {
+  const host = document.getElementById("procs");
+  if (host.hidden || !host.innerHTML.trim()) {
+    if (host.innerHTML.trim()) {
+      showProcesses(true);
+    } else {
+      loadProcesses();
+    }
+  } else {
+    showProcesses(false);
+  }
 }
 
 /** Asks for the process list, which needs the token. */
@@ -3260,6 +3328,7 @@ async function loadProcesses() {
   if (!value) {
     host.innerHTML = `<p class="hint">The device token is needed for this. Enter it in the
       Device token box at the top of this page.</p>`;
+    showProcesses(true);
     return;
   }
   try {
@@ -3273,6 +3342,7 @@ async function loadProcesses() {
     renderProcesses(await response.json());
   } catch (error) {
     host.innerHTML = `<p class="hint">${esc(error.message || error)}</p>`;
+    showProcesses(true);
   }
 }
 
@@ -3303,16 +3373,28 @@ async function metricsTick() {
   metricsTimer = setTimeout(metricsTick, METRICS_MS);
 }
 
+/** Says something in the banner under the header, and makes it visible. */
+function powerNote(message) {
+  const note = document.getElementById("power-note");
+  note.textContent = message;
+  note.hidden = !message;
+}
+
 /** Stops or restarts the appliance, once. */
 async function power(action, label) {
   const value = token();
-  const note = document.getElementById("power-note");
   if (!value) {
-    note.textContent = "The device token is needed to " + label.toLowerCase() +
-      ". Enter it in the Device token box at the top of this page.";
+    powerNote("The device token is needed to " + label.toLowerCase() +
+      ". Enter it in the Device token box at the top of this page.");
     return;
   }
-  if (!confirm(label + " this machine now?")) return;
+  // The warning that used to sit in the power card, now in the confirmation — which is the
+  // moment somebody is deciding, rather than a paragraph they scrolled past earlier. These
+  // two controls live in a sticky header now, always a centimetre from the pointer, so the
+  // question they ask should be worth reading.
+  if (!confirm(label + " this machine now?\n\n" +
+      "This closes Plex's database and flushes the disk first. Holding the power button " +
+      "does neither.")) return;
 
   // Both are disabled for good: whatever happens next, this page is about to stop being
   // connected to anything, and a second press would go nowhere.
@@ -3327,7 +3409,7 @@ async function power(action, label) {
       body: JSON.stringify({ action }),
     });
     if (!response.ok) {
-      note.textContent = await response.text();
+      powerNote(await response.text());
       document.getElementById("shutdown").disabled = false;
       document.getElementById("restart").disabled = false;
       return;
@@ -3336,12 +3418,12 @@ async function power(action, label) {
     // The machine going away mid-request looks exactly like this, so it is not reported
     // as a failure -- saying "could not shut down" to somebody watching the fans stop
     // would be worse than saying nothing.
-    note.textContent = label + " requested. This page will stop responding.";
+    powerNote(label + " requested. This page will stop responding.");
     return;
   }
-  note.textContent = action === "off"
+  powerNote(action === "off"
     ? "Shutting down. Wait for the machine to go quiet before cutting power."
-    : "Restarting. This page will come back on its own once the console is up.";
+    : "Restarting. This page will come back on its own once the console is up.");
 }
 
 // Delegated rather than bound to the button: render() replaces the button element on
@@ -3358,8 +3440,15 @@ document.addEventListener("click", event => {
     toggleFold(head.parentElement);
     return;
   }
-  if (event.target && event.target.id === "procs-load") loadProcesses();
+  if (event.target && event.target.id === "procs-load") toggleProcesses();
+  if (event.target && event.target.id === "procs-refresh") loadProcesses();
   if (event.target && event.target.id === "netdiag-run") runNetworkDiagnosis();
+  if (event.target && event.target.id === "netdiag-hide") {
+    netdiagShown = false;
+    const out = document.getElementById("netdiag");
+    if (out) out.innerHTML = "";
+    event.target.remove();
+  }
   if (event.target && event.target.id === "settings-save") saveSettings();
   if (event.target && event.target.id === "token-rotate") rotateToken();
   if (event.target && event.target.id === "net-confirm") confirmNetwork();

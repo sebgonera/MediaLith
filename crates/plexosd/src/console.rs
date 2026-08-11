@@ -2690,15 +2690,96 @@ mod tests {
     }
 
     #[test]
-    fn a_button_is_styled_by_being_in_a_card_rather_than_by_which_card() {
-        // The network card is a plain `<div class="card">`, and the button styling was written
-        // as `.plex button`, `.form button` and `.power button` — three selectors that between
-        // them missed it. So "Diagnose the network" had *no* styling at all: a raw
-        // operating-system button in the middle of a designed page, which shipped and was
-        // reported by somebody looking at it.
+    fn every_view_that_can_be_opened_can_be_shut_again() {
+        // Asked for as a rule rather than as a bug: "every section that can be expanded must
+        // also be able to go back to collapsed". Two on this page could not.
         //
-        // Enumerating the variants was the defect, so this pins the general selector rather
-        // than the button that exposed it.
+        // The process list, once fetched, had no control that put it away — and it is long.
+        // The network diagnosis was worse: its output sat under the network card for the rest
+        // of the session, and because that card is rebuilt from its template every ten
+        // seconds, the state had to move into a variable rather than the element.
+        //
+        // The folding cards and the notes `<details>` already satisfy this, which is why they
+        // are not listed here; what this guards is the two that were added without it.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+
+        assert!(
+            PAGE.contains("Show Processes") && PAGE.contains("Hide Processes"),
+            "the process list's control has to say both things, or it only ever opens"
+        );
+        assert!(
+            script.contains("function showProcesses("),
+            "and hiding is a function rather than a relabel, so both directions exist"
+        );
+
+        assert!(
+            PAGE.contains("id=\"netdiag-hide\""),
+            "the network diagnosis needs a way back to a page without it"
+        );
+        assert!(
+            script.contains("netdiagShown"),
+            "and it must be a variable, because that card is rebuilt every status poll and an \
+             element's own state does not survive being replaced"
+        );
+    }
+
+    #[test]
+    fn the_header_carries_what_is_wanted_without_scrolling() {
+        // The page is several screens long — the activity card, the terminal and the installer
+        // each take one — so the header is sticky and holds the three things worth having to
+        // hand: what this machine is, how long it has been up, and how to stop it. The power
+        // controls moved out of a card at the very bottom, which on a long page meant
+        // scrolling past everything to restart a machine.
+        let head = PAGE
+            .split_once("<header>")
+            .and_then(|(_, rest)| rest.split_once("</header>"))
+            .map(|(body, _)| body)
+            .expect("the page has one header");
+
+        for id in ["product", "version", "uptime", "restart", "shutdown"] {
+            assert!(
+                head.contains(&format!("id=\"{id}\"")),
+                "{id} belongs in the header: {head}"
+            );
+        }
+
+        let style = PAGE
+            .split_once("<style>")
+            .and_then(|(_, rest)| rest.split_once("</style>"))
+            .map(|(body, _)| body)
+            .expect("the page has one style block");
+        assert!(
+            style.contains("position: sticky"),
+            "and the header sticks, or none of the above is reachable from further down"
+        );
+
+        // The two controls that end the session they are pressed in are marked as such, since
+        // they now sit a centimetre from the pointer at all times.
+        assert!(
+            head.matches("danger").count() >= 2,
+            "both power controls are marked dangerous: {head}"
+        );
+        assert!(
+            !PAGE.contains("class=\"card power\""),
+            "and the card they came from is gone rather than left empty"
+        );
+    }
+
+    #[test]
+    fn buttons_are_styled_without_naming_where_they_are() {
+        // This has been narrowed by the same mistake twice. First the base rules were
+        // `.plex button`, `.form button` and `.power button`, so the network card — a plain
+        // `<div class="card">` — matched none of them and its button had *no* styling: a raw
+        // operating-system control in a designed page, which shipped and was reported by
+        // somebody looking at it. That was fixed to `.card button`, which then missed the next
+        // button added outside a card, in the header.
+        //
+        // So the assertion is not about which container is named. It is that **none is**: a
+        // rule about how a button looks should not know where buttons are.
         let style = PAGE
             .split_once("<style>")
             .and_then(|(_, rest)| rest.split_once("</style>"))
@@ -2706,15 +2787,19 @@ mod tests {
             .expect("the page has one style block");
 
         assert!(
-            style.contains(".card button {"),
-            "buttons must be styled by being inside a card, or the next card of a new kind \
-             gets unstyled controls"
+            style.contains("\n  button {"),
+            "the button base must be on the element, so a button added anywhere is styled"
         );
-        for enumerated in [".plex button {", ".form button {"] {
+        for scoped in [
+            ".plex button {",
+            ".form button {",
+            ".power button {",
+            ".card button {",
+        ] {
             assert!(
-                !style.contains(enumerated),
-                "{enumerated} is a base rule keyed on one kind of card, which is what left \
-                 the network card's button unstyled"
+                !style.contains(scoped),
+                "{scoped} scopes the base rule to a container, and every time that has been \
+                 done a button outside it has shipped unstyled"
             );
         }
     }
