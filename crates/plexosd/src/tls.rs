@@ -200,6 +200,41 @@ pub fn fingerprint() -> Option<String> {
     FINGERPRINT.get().cloned()
 }
 
+/// The names the certificate in force actually covers.
+static COVERS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Records what the certificate was issued for.
+pub fn remember_names(names: &[String]) {
+    let _ = COVERS.set(names.to_vec());
+}
+
+/// Whether the certificate in force names `address`.
+///
+/// This exists because of something a machine did rather than something anybody predicted.
+/// The reference laptop has a wired adapter and a wireless one, and their DHCP leases
+/// arrive in that order — but the wireless lease landed *after* the certificate was issued,
+/// so `/api/status` listed `192.168.2.190` first among the addresses somebody could type
+/// while the certificate named only `192.168.2.102`.
+///
+/// Nothing was broken by that on its own: a self-signed certificate produces a warning
+/// either way. What it broke is the one check that makes a self-signed certificate mean
+/// anything — comparing the fingerprint at `/api/status` against what the browser shows —
+/// because the two would be about different addresses.
+///
+/// Before there was a QR code this was invisible, because a person typing an address types
+/// the one they were told. A QR code chooses for them, so it has to choose one the
+/// certificate can vouch for.
+///
+/// An empty set means nothing has been issued yet, and everything is treated as covered:
+/// refusing every address because the answer is not known would turn "no TLS yet" into "no
+/// pairing ever".
+#[must_use]
+pub fn covers(address: &str) -> bool {
+    COVERS
+        .get()
+        .is_none_or(|names| names.is_empty() || names.iter().any(|name| name == address))
+}
+
 /// Writes key material with permissions set before any bytes reach the disk.
 fn write_private(path: &Path, der: &[u8]) -> io::Result<()> {
     use std::io::Write as _;

@@ -1522,11 +1522,13 @@ fn identity_for(
     addresses: &[String],
     log: &mut dyn FnMut(&str),
 ) -> io::Result<std::sync::Arc<rustls::ServerConfig>> {
-    let identity = crate::tls::load_or_create(
-        std::path::Path::new(plexos_types::paths::TLS_DIR),
-        &crate::tls::names_for(addresses, &hostname()),
-    )?;
+    let names = crate::tls::names_for(addresses, &hostname());
+    let identity =
+        crate::tls::load_or_create(std::path::Path::new(plexos_types::paths::TLS_DIR), &names)?;
     crate::tls::remember(&identity.fingerprint);
+    // What it was issued for, so the pairing QR can point at an address this certificate
+    // vouches for rather than at whichever one sysfs happened to list first.
+    crate::tls::remember_names(&names);
 
     // On the attached screen, which is the only place a fingerprint can be compared
     // against what a browser shows before the first connection. ADR-0014 called that

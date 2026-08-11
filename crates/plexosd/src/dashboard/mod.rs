@@ -428,8 +428,33 @@ fn advance(state: &mut State, facts: &Facts) {
 ///   code would be in the request line, in the browser's history and in the address bar
 ///   over somebody's shoulder.
 fn pairing_url(facts: &Facts, secret: &str) -> String {
-    let address = facts.address().unwrap_or("");
-    format!("https://{address}/#pair={secret}")
+    format!("https://{}/#pair={secret}", pairing_address(facts))
+}
+
+/// The address to put in the QR code.
+///
+/// The first of `reachable_at` **that this console's certificate names**, and the
+/// qualification came off a machine rather than out of a design. The reference laptop has a
+/// wired adapter and a wireless one; the wireless lease arrived after the certificate was
+/// issued, so the first address somebody would be sent to was one the certificate did not
+/// cover. Both addresses reach the same console, so nothing failed -- but the fingerprint
+/// at `/api/status` and the certificate a browser was shown would have been about different
+/// addresses, which is the one comparison that makes a self-signed certificate mean
+/// anything.
+///
+/// This is not a second opinion about which interface is primary: the order is still
+/// `reachable_at`'s, which is what the console page uses and what `/api/status` reports. It
+/// only skips addresses this daemon's own certificate cannot vouch for.
+///
+/// Falling back to the first address when none is covered is deliberate. A QR code to an
+/// address that warns is worth more than no QR code at all, and the alternative would make
+/// a machine unpairable because of a certificate detail nobody at the screen can see.
+fn pairing_address(facts: &Facts) -> &str {
+    facts
+        .addresses
+        .iter()
+        .find(|address| crate::tls::covers(address))
+        .map_or_else(|| facts.address().unwrap_or(""), String::as_str)
 }
 
 #[cfg(test)]
@@ -466,6 +491,46 @@ mod tests {
         let url = pairing_url(&facts_at(Some("192.168.2.102")), "ABC123");
         assert_eq!(url, "https://192.168.2.102/#pair=ABC123");
         assert!(!url.contains('?'), "never a query parameter: {url}");
+    }
+
+    #[test]
+    fn the_qr_skips_an_address_this_consoles_certificate_cannot_vouch_for() {
+        // Found on the reference laptop within a minute of the first pairing. It has a
+        // wired adapter and a wireless one; the wireless lease arrived *after* the
+        // certificate was issued, so `reachable_at` led with 192.168.2.190 while the
+        // certificate named only 192.168.2.102. Both reach the same console, so nothing
+        // failed -- but the fingerprint at /api/status and the certificate a browser was
+        // shown would have been about different addresses, which is the one comparison
+        // that makes a self-signed certificate mean anything.
+        //
+        // Invisible before there was a QR code, because a person typing an address types
+        // the one they were told. A QR code chooses for them.
+        crate::tls::remember_names(&["192.168.2.102".to_owned(), "127.0.0.1".to_owned()]);
+        // The store is a OnceLock, so this test is only asking what it thinks it is asking
+        // if its own call is the one that won. Asserted rather than assumed: a global set
+        // by whichever test ran first is the shape that produces a pass on the wrong
+        // question, which is worse than a failure.
+        assert!(crate::tls::covers("192.168.2.102"));
+        assert!(!crate::tls::covers("192.168.2.190"));
+
+        let two_addresses = Facts {
+            addresses: vec!["192.168.2.190".to_owned(), "192.168.2.102".to_owned()],
+            ..facts_at(Some("192.168.2.190"))
+        };
+        assert_eq!(
+            pairing_address(&two_addresses),
+            "192.168.2.102",
+            "the QR points at the address the certificate names, not the first one listed"
+        );
+
+        // And when none of them is covered, a QR that warns beats no QR at all: the
+        // alternative makes a machine unpairable over a certificate detail nobody standing
+        // at the screen can see.
+        let uncovered = Facts {
+            addresses: vec!["10.0.0.5".to_owned()],
+            ..facts_at(Some("10.0.0.5"))
+        };
+        assert_eq!(pairing_address(&uncovered), "10.0.0.5");
     }
 
     #[test]
