@@ -218,7 +218,10 @@ impl Facts {
         report: plexos_gpu::report::Report,
         gpu: Transcoding,
     ) -> Self {
-        let status = crate::status::Status::gather_with(env, report);
+        let mut status = crate::status::Status::gather_with(env, report);
+        // Before the facts are derived, because the interface named beside the address is
+        // looked up from whichever address comes first.
+        prefer_covered(&mut status.network.reachable_at, crate::tls::covers);
         Self::from_status(&status, gpu, &crate::rollback::last_for)
     }
 
@@ -322,6 +325,28 @@ impl Facts {
     pub fn address(&self) -> Option<&str> {
         self.addresses.first().map(String::as_str)
     }
+}
+
+/// Moves the addresses this console's certificate names to the front.
+///
+/// A stable partition rather than a sort: the order `reachable_at` came in is the console
+/// page's order and `/api/status`'s order, and this is not a second opinion about which
+/// interface is primary. It only says that between two addresses that both reach this
+/// machine, the one the certificate can vouch for is the one to put in front of somebody.
+///
+/// The reference laptop is why. It has a wired adapter and a wireless one, and the wireless
+/// lease arrived *after* the certificate was issued -- so the screen said
+/// `https://192.168.2.190` while the certificate named only `192.168.2.102`. Both reach the
+/// console. What breaks is the fingerprint check at `/api/status`, which is the only thing
+/// that makes a self-signed certificate mean anything, because the two would be about
+/// different addresses.
+///
+/// Nothing is dropped. An appliance whose certificate names none of its addresses still
+/// shows one, because an address that warns is worth more than no address at all.
+pub fn prefer_covered(addresses: &mut Vec<String>, covered: impl Fn(&str) -> bool) {
+    let (named, rest): (Vec<String>, Vec<String>) =
+        addresses.iter().cloned().partition(|a| covered(a));
+    *addresses = named.into_iter().chain(rest).collect();
 }
 
 /// A duration, in the coarsest unit that still says something.
@@ -557,6 +582,28 @@ mod tests {
         );
         assert_eq!(facts.verdict, Verdict::Working, "still working");
         assert_eq!(facts.transcoding, Transcoding::Unknown);
+    }
+
+    #[test]
+    fn the_address_the_certificate_names_is_the_one_put_in_front_of_somebody() {
+        // Found on the reference laptop: two adapters, and the wireless lease arrived after
+        // the certificate was issued, so the screen offered an address the certificate did
+        // not name. Both reach the console; what breaks is the fingerprint comparison,
+        // which is the only thing that makes a self-signed certificate mean anything.
+        let mut addresses = vec!["192.168.2.190".to_owned(), "192.168.2.102".to_owned()];
+        prefer_covered(&mut addresses, |a| a == "192.168.2.102");
+        assert_eq!(addresses, vec!["192.168.2.102", "192.168.2.190"]);
+
+        // Stable, so this stays "which of these does the certificate name" rather than
+        // becoming a second opinion about which interface is primary.
+        let mut three = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        prefer_covered(&mut three, |a| a != "a");
+        assert_eq!(three, vec!["b", "c", "a"]);
+
+        // And nothing is ever dropped: an address that warns beats no address at all.
+        let mut none_covered = vec!["10.0.0.5".to_owned()];
+        prefer_covered(&mut none_covered, |_| false);
+        assert_eq!(none_covered, vec!["10.0.0.5"]);
     }
 
     #[test]

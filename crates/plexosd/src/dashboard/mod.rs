@@ -159,6 +159,11 @@ pub fn run(first_boot_code: Option<String>, log: &mut dyn FnMut(&str)) {
         size.0, size.1
     ));
 
+    // After the size is reported and before anything is drawn: from here the screen is a
+    // dashboard rather than a log, and the kernel is the one writer left that does not
+    // know that.
+    quieten_the_kernel(log);
+
     let keys = read_keys(&screen);
     draw(&screen, size, first_boot_code, &keys, log);
 }
@@ -428,33 +433,38 @@ fn advance(state: &mut State, facts: &Facts) {
 ///   code would be in the request line, in the browser's history and in the address bar
 ///   over somebody's shoulder.
 fn pairing_url(facts: &Facts, secret: &str) -> String {
-    format!("https://{}/#pair={secret}", pairing_address(facts))
+    // `facts.address()` and not a choice made here. Which address to put in front of
+    // somebody is decided once, in `Facts::gather`, and the screen prints the same one it
+    // encodes -- a QR and a printed URL that disagree is a machine contradicting itself.
+    format!("https://{}/#pair={secret}", facts.address().unwrap_or(""))
 }
 
-/// The address to put in the QR code.
+/// Lowers how much the kernel prints to the screen, once there is a screen worth keeping.
 ///
-/// The first of `reachable_at` **that this console's certificate names**, and the
-/// qualification came off a machine rather than out of a design. The reference laptop has a
-/// wired adapter and a wireless one; the wireless lease arrived after the certificate was
-/// issued, so the first address somebody would be sent to was one the certificate did not
-/// cover. Both addresses reach the same console, so nothing failed -- but the fingerprint
-/// at `/api/status` and the certificate a browser was shown would have been about different
-/// addresses, which is the one comparison that makes a self-signed certificate mean
-/// anything.
+/// `console=tty0` puts kernel messages on the foreground virtual terminal, which is this
+/// one, and at the default level that includes every USB device that is plugged in or
+/// wakes up. On the reference laptop a fingerprint reader re-enumerating wrote eight lines
+/// across the dashboard within thirty seconds of boot.
 ///
-/// This is not a second opinion about which interface is primary: the order is still
-/// `reachable_at`'s, which is what the console page uses and what `/api/status` reports. It
-/// only skips addresses this daemon's own certificate cannot vouch for.
+/// Warnings and errors still appear, which is the level worth having: this screen is also
+/// where somebody looks when the machine is unwell. Nothing is lost either way -- the ring
+/// buffer keeps everything, and `dmesg` on the second terminal reads it.
 ///
-/// Falling back to the first address when none is covered is deliberate. A QR code to an
-/// address that warns is worth more than no QR code at all, and the alternative would make
-/// a machine unpairable because of a certificate detail nobody at the screen can see.
-fn pairing_address(facts: &Facts) -> &str {
-    facts
-        .addresses
-        .iter()
-        .find(|address| crate::tls::covers(address))
-        .map_or_else(|| facts.address().unwrap_or(""), String::as_str)
+/// Done here rather than on the kernel command line deliberately. The command line lives
+/// inside a signed UKI, so a change costs a rebuild, and it would apply from the first
+/// instant of boot -- silencing exactly the messages somebody needs when a boot goes wrong.
+/// This happens when the dashboard starts, which is to say once the boot has gone right.
+fn quieten_the_kernel(log: &mut dyn FnMut(&str)) {
+    /// Print `KERN_WARNING` and worse. The default is 7, which is everything but debug.
+    const WARNINGS_AND_WORSE: &str = "4\n";
+
+    match std::fs::write("/proc/sys/kernel/printk", WARNINGS_AND_WORSE) {
+        Ok(()) => log("kernel messages below warning level will stay off this screen"),
+        Err(error) => log(&format!(
+            "could not quieten kernel messages: {error}. Harmless: the dashboard repaints \
+             over them. Remedy: echo 4 > /proc/sys/kernel/printk"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -491,46 +501,6 @@ mod tests {
         let url = pairing_url(&facts_at(Some("192.168.2.102")), "ABC123");
         assert_eq!(url, "https://192.168.2.102/#pair=ABC123");
         assert!(!url.contains('?'), "never a query parameter: {url}");
-    }
-
-    #[test]
-    fn the_qr_skips_an_address_this_consoles_certificate_cannot_vouch_for() {
-        // Found on the reference laptop within a minute of the first pairing. It has a
-        // wired adapter and a wireless one; the wireless lease arrived *after* the
-        // certificate was issued, so `reachable_at` led with 192.168.2.190 while the
-        // certificate named only 192.168.2.102. Both reach the same console, so nothing
-        // failed -- but the fingerprint at /api/status and the certificate a browser was
-        // shown would have been about different addresses, which is the one comparison
-        // that makes a self-signed certificate mean anything.
-        //
-        // Invisible before there was a QR code, because a person typing an address types
-        // the one they were told. A QR code chooses for them.
-        crate::tls::remember_names(&["192.168.2.102".to_owned(), "127.0.0.1".to_owned()]);
-        // The store is a OnceLock, so this test is only asking what it thinks it is asking
-        // if its own call is the one that won. Asserted rather than assumed: a global set
-        // by whichever test ran first is the shape that produces a pass on the wrong
-        // question, which is worse than a failure.
-        assert!(crate::tls::covers("192.168.2.102"));
-        assert!(!crate::tls::covers("192.168.2.190"));
-
-        let two_addresses = Facts {
-            addresses: vec!["192.168.2.190".to_owned(), "192.168.2.102".to_owned()],
-            ..facts_at(Some("192.168.2.190"))
-        };
-        assert_eq!(
-            pairing_address(&two_addresses),
-            "192.168.2.102",
-            "the QR points at the address the certificate names, not the first one listed"
-        );
-
-        // And when none of them is covered, a QR that warns beats no QR at all: the
-        // alternative makes a machine unpairable over a certificate detail nobody standing
-        // at the screen can see.
-        let uncovered = Facts {
-            addresses: vec!["10.0.0.5".to_owned()],
-            ..facts_at(Some("10.0.0.5"))
-        };
-        assert_eq!(pairing_address(&uncovered), "10.0.0.5");
     }
 
     #[test]
