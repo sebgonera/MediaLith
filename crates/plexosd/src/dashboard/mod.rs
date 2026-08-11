@@ -210,9 +210,13 @@ fn draw(
         }
     };
 
-    let mut gpu = Transcoding::Unknown;
-    let mut gpu_read: Option<Instant> = None;
-    let mut facts = Facts::gather(&plexos_gpu::env::System, gpu);
+    // The report is kept, not just the verdict it produced: `Status` wants one, and
+    // generating a second would put `vainfo` back on the three-second path this cache
+    // exists to keep it off.
+    let mut report = plexos_gpu::report::Report::generate(&plexos_gpu::env::System);
+    let mut gpu = Transcoding::of(&report);
+    let mut gpu_read = Instant::now();
+    let mut facts = Facts::gather(&plexos_gpu::env::System, report.clone(), gpu);
     let mut facts_read = Instant::now();
 
     let mut state = State {
@@ -248,14 +252,13 @@ fn draw(
             painted = None;
         }
 
-        if gpu_read.is_none_or(|read| read.elapsed() >= GPU_EVERY) {
-            gpu = Transcoding::of(&plexos_gpu::report::Report::generate(
-                &plexos_gpu::env::System,
-            ));
-            gpu_read = Some(Instant::now());
+        if gpu_read.elapsed() >= GPU_EVERY {
+            report = plexos_gpu::report::Report::generate(&plexos_gpu::env::System);
+            gpu = Transcoding::of(&report);
+            gpu_read = Instant::now();
         }
         if facts_read.elapsed() >= FACTS_EVERY {
-            facts = Facts::gather(&plexos_gpu::env::System, gpu);
+            facts = Facts::gather(&plexos_gpu::env::System, report.clone(), gpu);
             facts_read = Instant::now();
         }
 

@@ -207,9 +207,18 @@ impl Facts {
     /// `gpu` is passed in rather than generated here because generating it runs `vainfo`,
     /// and this is called every few seconds for the life of the appliance. What the GPU can
     /// do does not change between two frames of a dashboard; it changes across a reboot.
+    ///
+    /// The *report* is passed too, for the same reason and more sharply: without it
+    /// [`crate::status::Status::gather`] would generate one on every call, so a dashboard
+    /// drawing a screen nobody is looking at would run `vainfo` twenty times a minute on a
+    /// machine whose whole purpose is to have a spare core for transcoding.
     #[must_use]
-    pub fn gather(env: &impl Environment, gpu: Transcoding) -> Self {
-        let status = crate::status::Status::gather(env);
+    pub fn gather(
+        env: &impl Environment,
+        report: plexos_gpu::report::Report,
+        gpu: Transcoding,
+    ) -> Self {
+        let status = crate::status::Status::gather_with(env, report);
         Self::from_status(&status, gpu, &crate::rollback::last_for)
     }
 

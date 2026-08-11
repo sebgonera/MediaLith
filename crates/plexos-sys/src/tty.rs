@@ -105,9 +105,13 @@ impl std::fmt::Debug for Settings {
 /// - **`IXON` off** so Ctrl+S does not silently stop the screen updating. That failure
 ///   looks exactly like a frozen appliance and is undone by a keystroke nobody knows to
 ///   press.
-/// - **`OPOST` off** so the bytes written are the bytes that arrive. With it on, `\n`
-///   becomes a carriage return and a line feed, which is convenient for lines and wrong
-///   for anything positioning a cursor.
+/// - **`OPOST` left alone**, which is a decision and not an omission. Turning it off is
+///   the textbook half of "raw mode" and would be wrong here: this terminal is not solely
+///   the caller's. PID 1 writes its service lines to `/dev/console`, which is the
+///   foreground virtual terminal, which is the one the dashboard draws on — and without
+///   `ONLCR` those lines staircase down the screen, each starting where the last ended.
+///   A drawing that positions its own cursor does not care either way, so the setting that
+///   helps somebody else and costs nothing is the one to keep.
 /// - **`VMIN` 1, `VTIME` 0** so a read blocks until exactly one key arrives. The reader is
 ///   a thread of its own, so blocking is what it is for; a timeout here would be a poll
 ///   loop burning a core to find out that nobody is standing at the machine.
@@ -131,7 +135,6 @@ pub fn raw(terminal: &File) -> io::Result<Settings> {
     raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ECHONL);
     raw.c_lflag &= !(libc::ISIG | libc::IEXTEN);
     raw.c_iflag &= !(libc::IXON | libc::ICRNL | libc::INLCR | libc::IGNCR | libc::ISTRIP);
-    raw.c_oflag &= !libc::OPOST;
     raw.c_cc[libc::VMIN] = 1;
     raw.c_cc[libc::VTIME] = 0;
 
@@ -249,13 +252,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn output_processing_is_left_alone_because_this_terminal_is_shared() {
+        // The textbook half of "raw mode" turns OPOST off, and it would be wrong here.
+        // PID 1 writes its service lines to /dev/console, which is the foreground virtual
+        // terminal, which is the one the dashboard draws on -- and without ONLCR those
+        // lines staircase down the screen, each starting where the last ended. A drawing
+        // that positions its own cursor does not care either way.
+        //
+        // Asserted rather than commented, because the next person to read `raw` will see a
+        // function called "raw" that does not do the thing raw mode is famous for.
+        let Some((terminal, _controller)) = a_terminal() else {
+            println!("skip: no pty available on this host");
+            return;
+        };
+
+        let before = current_oflag(&terminal);
+        assert!(
+            before & libc::OPOST != 0,
+            "a fresh pty post-processes output"
+        );
+        let _saved = raw(&terminal).expect("a pty accepts termios");
+        assert_eq!(
+            current_oflag(&terminal) & libc::OPOST,
+            libc::OPOST,
+            "somebody else's newlines still have to work"
+        );
+    }
+
+    fn current_oflag(terminal: &File) -> libc::tcflag_t {
+        settings_of(terminal).c_oflag
+    }
+
     fn current_lflag(terminal: &File) -> libc::tcflag_t {
+        settings_of(terminal).c_lflag
+    }
+
+    fn settings_of(terminal: &File) -> libc::termios {
         let mut settings = std::mem::MaybeUninit::<libc::termios>::uninit();
         // SAFETY: the descriptor is open and the local is the right type and outlives the
         // call; it is read only after tcgetattr reports success.
         let result = unsafe { libc::tcgetattr(terminal.as_raw_fd(), settings.as_mut_ptr()) };
         assert!(result >= 0, "reading a pty's settings must work");
         // SAFETY: tcgetattr succeeded, so the value is initialised.
-        unsafe { settings.assume_init() }.c_lflag
+        unsafe { settings.assume_init() }
     }
 }
