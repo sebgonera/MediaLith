@@ -712,6 +712,30 @@
      display size wrapped mid-phrase. */
   .tile .v.words { font-size: 1.1rem; }
 
+  /* The second row: capacities and conditions, which change slowly and are read differently
+     from the five above them. Smaller, denser, and visibly a second rank -- an eleven-tile
+     grid at one weight gave the eye no reason to land anywhere. */
+  .tiles.secondary { grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); margin-top: .55rem; }
+  .tiles.secondary .tile { padding: .5rem .6rem .55rem; background: transparent; box-shadow: none; }
+  .tiles.secondary .tile .v { font-size: 1.15rem; }
+  .tiles.secondary .tile .v.words { font-size: .95rem; }
+  .tiles.secondary .tile .k { font-size: .72rem; }
+  .tiles.secondary .tile .sub { font-size: .7rem; }
+
+  #metrics > details {
+    margin-top: .9rem;
+    padding-top: .8rem;
+    border-top: 1px solid var(--line);
+    font-size: .88rem;
+  }
+  #metrics > details > summary {
+    cursor: pointer;
+    color: var(--muted);
+    font-size: .82rem;
+    font-weight: 600;
+  }
+  #metrics > details .panel:first-child { margin-top: .6rem; border-top: 0; padding-top: 0; }
+
   /* A meter, not a bar chart: one ratio against a limit. The fill carries severity and
      the track is a lighter step of the same colour, so the state reads across the whole
      width rather than only where the fill reaches. Square at the baseline and rounded at
@@ -1046,6 +1070,22 @@
   footer { border-top: 1px solid var(--line); padding-top: 1rem; }
 
   /* ------------------------------------------------------------------------------------
+     The Overview's order, and the one case where it changes.
+
+     Normally: the four cards, then what the machine is doing, then the health verdict. On a
+     machine where something is actually wrong that last one is the answer to the question
+     somebody opened this page with, and leaving it under a thousand pixels of activity
+     tables files the answer behind the evidence. So `#main` moves up when it has something
+     to report -- through `order`, so the markup keeps one honest reading order for anything
+     that does not do layout.
+     ------------------------------------------------------------------------------------ */
+  #view-overview { display: flex; flex-direction: column; }
+  #view-overview > .summary { order: 1; }
+  #view-overview > #metrics { order: 3; }
+  #view-overview > #main { order: 4; }
+  #view-overview > #main.problems { order: 2; }
+
+  /* ------------------------------------------------------------------------------------
      The four cards at the top of the Overview.
 
      Each answers one question in one glance, and the answer is a *state* before it is a
@@ -1229,6 +1269,28 @@
     cursor: pointer;
   }
   .linkish:hover { filter: brightness(1.1); }
+
+  /* Everything is fine, said in one line. */
+  .allwell {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    flex-wrap: wrap;
+    border-left: 4px solid var(--ready);
+  }
+  .allwell .dot {
+    flex: 0 0 auto;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--ready);
+    box-shadow: 0 0 0 4px var(--ready-soft);
+  }
+  .allwell > div { flex: 1 1 20rem; min-width: 0; }
+  .allwell .hint { display: block; color: var(--muted); font-size: .88rem; }
+  .allwell #health-toggle { margin-left: auto; }
+  /* The list, when it is asked for, goes under the row rather than beside it. */
+  .allwell .checks, .allwell .findings { flex: 1 0 100%; margin-top: .4rem; }
 
   /* A statement the page makes about itself rather than about the machine: "there is no
      source for this yet". Quiet, and never dressed as a failure. */
@@ -1534,6 +1596,20 @@
             <p class="empty">Measuring… a rate is the difference between two readings, so the
                first figures arrive a couple of seconds after this page opens.</p>
           </div>
+
+          <!-- Outside the redrawn region, for the same reason the process table and the notes
+               are: this holds a `<details>` whose open state belongs to whoever opened it, and
+               a poll twice a second would shut it. Only the contents are replaced, and only
+               when they have actually changed.
+
+               What is in here is everything that is true of the machine rather than of what it
+               is doing: sixteen per-core meters, interface counters, disk rates, every thermal
+               zone, and the context-switch rate. All of it was on the front of this card and
+               all of it competed with the four figures somebody actually opens this to read. -->
+          <details id="metrics-detail" hidden>
+            <summary>Per core, interfaces, disks and temperatures</summary>
+            <div id="metrics-detail-body"></div>
+          </details>
 
           <div class="panel" id="procs-panel">
             <h4>Processes</h4>
@@ -3072,6 +3148,22 @@ function renderSummary() {
 // ------------------------------------------------------------------------------------
 let healthOpen = false;
 
+/// Whether anything on this machine is actually wrong.
+///
+/// One function, because two places ask -- the section's own headline and the rule that
+/// decides where the section sits -- and a page that moved a card to the top and then wrote
+/// "Nothing is wrong" into it would be worse than one that never moved it.
+///
+/// `info` is deliberately not a problem. It is how the GPU report says something worth
+/// knowing about a machine that is working, and promoting it here would teach people to
+/// ignore the colour, which is the one thing on this page that must keep meaning something.
+function healthHasProblems(status) {
+  const findings = ((status.gpu || {}).findings) || [];
+  const checks = (status.health && status.health.checks) || [];
+  return checks.some(c => c.status === "fail")
+    || findings.some(f => f.severity === "critical" || f.severity === "warning");
+}
+
 function healthSection(status) {
   const gpu = status.gpu || {};
   const findings = gpu.findings || [];
@@ -3127,16 +3219,34 @@ function healthSection(status) {
         ${f.remedy ? `<span class="remedy">${esc(f.remedy)}</span>` : ""}
       </li>`).join("")}</ul>` : ""}`;
 
+  const toggle = `
+    <button id="health-toggle" class="ghost" aria-expanded="${healthOpen ? "true" : "false"}">
+      ${healthOpen ? "Hide" : "Show"} all ${checks.length} checks${quiet.length ? ` and ${quiet.length} ${quiet.length === 1 ? "note" : "notes"}` : ""}
+    </button>`;
+
+  // A working machine gets one line. The hero -- a coloured panel with a heading in it -- is
+  // for a machine with something to say, and spending it on "Nothing is wrong" made the
+  // largest, loudest thing on the Overview the thing that carries the least information.
+  // The colour still says it, in a strip and a word.
+  if (level === "ready") {
+    return `
+      <section class="card allwell">
+        <span class="dot" aria-hidden="true"></span>
+        <div>
+          <strong>${esc(headline)}.</strong>
+          <span class="hint">${lead}</span>
+        </div>
+        ${toggle}
+        ${detail}
+      </section>`;
+  }
+
   return `
     <section class="hero ${esc(level)}">
       <h2>${esc(headline)}</h2>
       <p class="lead">${lead}</p>
       ${failures || wrong ? `<ul class="findings">${failures}${wrong}</ul>` : ""}
-      <div class="row">
-        <button id="health-toggle" class="ghost" aria-expanded="${healthOpen ? "true" : "false"}">
-          ${healthOpen ? "Hide" : "Show"} all ${checks.length} checks${quiet.length ? ` and ${quiet.length} notes` : ""}
-        </button>
-      </div>
+      <div class="row">${toggle}</div>
       ${detail}
     </section>`;
 }
@@ -3389,7 +3499,11 @@ function render(status) {
   // wrong; the inventory and the identity move to the views they belong to. Three regions
   // rather than one, each replaced wholesale on its own -- which is the same arrangement as
   // before and not a new hazard, because none of the three holds anything anybody types.
-  document.getElementById("main").innerHTML = healthSection(status);
+  const overview = document.getElementById("main");
+  overview.innerHTML = healthSection(status);
+  // Moves this region above the activity card when it has something to report. The class is
+  // set from the same data the section was just built from, so the two cannot disagree.
+  overview.classList.toggle("problems", healthHasProblems(status));
   document.getElementById("sys-body").innerHTML = systemSection(status);
   document.getElementById("net-body").innerHTML = networkCard(status.network || {});
 
@@ -4469,7 +4583,13 @@ function renderMetrics(m) {
   const hottest = (m.temperatures || []).reduce(
     (worst, t) => (worst === null || t.celsius > worst.celsius ? t : worst), null);
 
-  const tiles = [
+  // Two rows, and the split is the point rather than the layout. The first five are what is
+  // happening *now* -- the processor, the memory, what Plex is doing with each, and whether
+  // the graphics part is awake. The second five are capacities and conditions, which change
+  // slowly and are read differently. They were one undifferentiated grid of eleven, in which
+  // "context switches per second" sat at the same weight as "is Plex transcoding", and the
+  // eye had no reason to land anywhere.
+  const primary = [
     metricTile("Processor", metricNum(cpu.busy_percent), "%",
       cores ? `${cores} cores` + (cpu.iowait_percent > 1 ? ` · ${metricNum(cpu.iowait_percent)}% waiting on disk` : "") : "",
       metricMeter(cpu.busy_percent) + metricSpark(metricsHistory.cpu, 100)),
@@ -4503,7 +4623,9 @@ function renderMetrics(m) {
           // part can sit at its ceiling doing very little.
           metricMeter(m.gpu.max_frequency_mhz ? (m.gpu.frequency_mhz / m.gpu.max_frequency_mhz) * 100 : null, 101, 102))
       : metricTile("Graphics clock", "—", "", "not reported by this driver", ""),
+  ].join("");
 
+  const secondary = [
     varFs
       ? metricTile("Free on /var", metricBytes(varFs.available), "",
           `${metricNum(varFs.percent_used, 0)}% of ${metricBytes(varFs.total)} used`,
@@ -4524,10 +4646,11 @@ function renderMetrics(m) {
     metricTile("Load average", metricNum(m.load && m.load.one, 2), "",
       m.load ? `${metricNum(m.load.five, 2)} at 5 min · ${metricNum(m.load.fifteen, 2)} at 15 · ${m.load.total} processes` : ""),
 
+    // The context-switch rate used to be this tile's subtitle. It is a number for somebody
+    // who already suspects something, not a number anybody reads to find out whether their
+    // appliance is well, so it is in the detail below with the rest of its kind.
     metricTile("Up", humanUptime(m.uptime_seconds) || "—", "",
-      m.context_switches_per_second !== null && m.context_switches_per_second !== undefined
-        ? `${Math.round(m.context_switches_per_second).toLocaleString()} context switches/s`
-        : ""),
+      m.load ? `${m.load.running} of ${m.load.total} runnable` : ""),
   ].join("");
 
   const coreRows = (cpu.cores || []).map((value, index) => `
@@ -4565,25 +4688,45 @@ function renderMetrics(m) {
   const notes = (m.notes || []).map(n => `<li>${esc(n)}</li>`).join("");
 
   document.getElementById("metrics-body").innerHTML = `
-    <div class="tiles">${tiles}</div>
+    <div class="tiles">${primary}</div>
+    <div class="tiles secondary">${secondary}</div>`;
 
+  // Everything below, into the disclosure outside the redrawn region. Written only when it
+  // has changed, for the reason the notes are: replacing a table somebody is reading moves
+  // their selection, which is the same rudeness as redrawing a field being typed into.
+  const detail = `
     ${coreRows ? `<div class="panel"><h4>Per core</h4><div class="cores">${coreRows}</div></div>` : ""}
 
     ${netRows ? `<div class="panel"><h4>Network</h4>
-      <table class="mtable">
+      <div class="scroll"><table class="mtable">
         <thead><tr><th>Interface</th><th>State</th><th class="num">In</th><th class="num">Out</th>
           <th class="num">In total</th><th class="num">Out total</th></tr></thead>
         <tbody>${netRows}</tbody>
-      </table></div>` : ""}
+      </table></div></div>` : ""}
 
     ${diskRows ? `<div class="panel"><h4>Disk</h4>
-      <table class="mtable">
+      <div class="scroll"><table class="mtable">
         <thead><tr><th>Device</th><th class="num">Read</th><th class="num">Write</th></tr></thead>
         <tbody>${diskRows}</tbody>
-      </table></div>` : ""}
+      </table></div></div>` : ""}
 
     ${temps ? `<div class="panel"><h4>Temperatures</h4>
-      <table class="mtable"><tbody>${temps}</tbody></table></div>` : ""}`;
+      <div class="scroll"><table class="mtable"><tbody>${temps}</tbody></table></div></div>` : ""}
+
+    <div class="panel"><h4>Scheduler</h4>
+      <p class="hint">${m.context_switches_per_second === null || m.context_switches_per_second === undefined
+        ? "The context-switch rate was not measured."
+        : `${esc(Math.round(m.context_switches_per_second).toLocaleString())} context switches per second.
+           A figure for somebody who already suspects something, which is why it is in here
+           rather than beside the processor.`}</p></div>`;
+
+  const detailHost = document.getElementById("metrics-detail");
+  const detailBody = document.getElementById("metrics-detail-body");
+  if (detailBody.dataset.rendered !== detail) {
+    detailBody.dataset.rendered = detail;
+    detailBody.innerHTML = detail;
+  }
+  detailHost.hidden = false;
 
   // The notes live outside the redrawn region, so only their contents are replaced — and
   // only when they have actually changed. Rewriting the list on every poll would be

@@ -2784,6 +2784,14 @@ mod tests {
             "procs",
             "metrics-notes",
             "metrics-notes-list",
+            // Added by the redesign, and the third thing to need this arrangement. The
+            // per-core meters, the interface counters, the disk rates and the thermal zones
+            // moved off the front of the card into a `<details>` -- so the card leads with
+            // the five figures somebody opens it for instead of eleven at one weight. That
+            // disclosure has exactly the state the two above have, and putting it inside the
+            // redrawn region would have reproduced their defect a third time.
+            "metrics-detail",
+            "metrics-detail-body",
         ] {
             assert!(
                 PAGE.contains(&format!("id=\"{id}\"")),
@@ -2798,7 +2806,16 @@ mod tests {
             .expect("the poll redraws the body");
         let written = &written[..written.find("`;").unwrap_or(written.len())];
 
-        for forbidden in ["id=\"procs", "<details", "metrics-notes"] {
+        for forbidden in [
+            "id=\"procs",
+            "<details",
+            "metrics-notes",
+            "metrics-detail",
+            // The tables themselves. They are the *contents* of the disclosure now, written
+            // into it only when they have changed -- so their appearance inside the poll's
+            // own template would mean the move had been undone.
+            "<table",
+        ] {
             assert!(
                 !written.contains(forbidden),
                 "the redrawn region must not contain {forbidden}: anything with state a \
