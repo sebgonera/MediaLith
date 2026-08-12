@@ -134,6 +134,24 @@ CONFIG_USB_STORAGE=y
 # measure rather than a requirement -- but booting an appliance image from a USB
 # stick is a first-class case here, not a curiosity.
 CONFIG_USB_UAS=y
+# Intel VMD, and this is the one absence on the list that costs a machine outright.
+#
+# VMD is a secondary PCI host bridge: with it enabled in firmware -- which is the factory
+# setting on a great many Dell, HP, Lenovo and NUC-class machines, usually labelled "RAID"
+# or "Intel RST" rather than VMD -- the NVMe drives disappear from the ordinary PCI bus and
+# appear behind the bridge instead. A kernel without this driver does not see a slow disk
+# or a degraded one; it sees no disk at all, on a machine whose firmware setup screen lists
+# the drive by model. The installer then reports nothing to install onto and the remedy it
+# offers -- attach a disk -- is one nobody can act on, because the disk is attached.
+#
+# Built in for the same reason as NVMe and AHCI above: this is the path to the root
+# filesystem, and there is no initramfs module to rescue a kernel that cannot reach it.
+#
+# What this is not: RAID. Intel RST RAID *volumes* are a separate thing that needs md
+# metadata handling and userspace this image does not carry. A disk that is a member of an
+# RST RAID volume stays unsupported. What this buys is the far commoner case -- a single
+# NVMe drive behind VMD because that is how the machine shipped.
+CONFIG_VMD=y
 
 # --- Graphics and transcoding ----------------------------------------------
 # i915 covers Gen9.5 (Whiskey Lake UHD 620, the reference machine). xe is the newer
@@ -153,6 +171,26 @@ CONFIG_PCI=y
 CONFIG_USB_SUPPORT=y
 CONFIG_USB_XHCI_HCD=y
 CONFIG_USB_RTL8152=y
+# The other USB Ethernet families, and r8152 alone was a one-adapter list.
+#
+# USB_RTL8152 covers the adapter attached to the reference laptop and nothing else. ASIX
+# AX88179/178A is the other chip in the great majority of USB 3 gigabit adapters sold, and
+# CDC Ethernet with its NCM successor is the class protocol -- what a dock, a phone
+# tethering, and most adapters that are not Realtek or ASIX actually speak.
+#
+# USB_USBNET is the framework all three sit on and it was off, which is why none of the
+# three appeared in .config at all: a symbol whose dependency is unmet is not reported as
+# refused, it is simply absent, and grepping for it finds nothing either way.
+#
+# Built in rather than modular for the reason the note at the end of this file gives: on a
+# machine with no built-in Ethernet the USB adapter *is* the network, and it has to be
+# there when plexosd brings links up during boot rather than after something loads a
+# module. CDCETHER and CDC_NCM are `default y` once the framework is on; they are named
+# anyway, because a default is a thing that changes without telling anybody.
+CONFIG_USB_USBNET=y
+CONFIG_USB_NET_AX88179_178A=y
+CONFIG_USB_NET_CDCETHER=y
+CONFIG_USB_NET_CDC_NCM=y
 CONFIG_IWLWIFI=y
 CONFIG_IWLMVM=y
 CONFIG_CFG80211=y
@@ -166,12 +204,47 @@ CONFIG_INET=y
 CONFIG_IPV6=y
 CONFIG_TCP_CONG_BBR=y
 
+# --- Virtual machines ------------------------------------------------------
+# QEMU, Proxmox and anything else built on virtio. All four were already `=y` when this
+# section was written -- they come from the architecture default config, which is exactly
+# why they are named here. An option nothing in this file states is an option a kernel bump
+# or a defconfig change can turn into `=m` without a word, and a virtio disk that became a
+# module is a machine that does not boot at all. Pinning them costs nothing and makes the
+# state a decision rather than an inheritance.
+#
+# Both disk transports, because which one a hypervisor offers is the hypervisor's choice
+# and not the guest's: Proxmox defaults to virtio-scsi and plain QEMU invocations usually
+# say virtio-blk.
+CONFIG_VIRTIO_PCI=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_SCSI_VIRTIO=y
+CONFIG_VIRTIO_NET=y
+
 # --- Sharing ---------------------------------------------------------------
 # ksmbd rather than Samba: in-kernel, and materially faster for large sequential
 # reads, which is the entire access pattern of a media library (ARCHITECTURE.md).
 CONFIG_SMB_SERVER=y
 CONFIG_NFSD=y
 CONFIG_NFSD_V4=y
+
+# And the *client*, which is a different thing that was missing while its server sat here
+# looking like it.
+#
+# The library on this appliance is expected to live on a NAS, and `plexosd::shares` mounts
+# it: `Kind::Smb.fstype()` returns `smb3`, which is the filesystem type this option
+# registers. Without CONFIG_CIFS the kernel has never heard of `smb3`, so every SMB mount
+# fails with ENODEV -- on an appliance whose console offers an "Add a share" form with SMB
+# in it, whose share code is tested, and whose kernel already carries an SMB *server*. Two
+# adjacent symbols, opposite directions, and the one that was set is the one this feature
+# does not use.
+#
+# Built in with the rest of the filesystems. Modular would mean nothing loads it, which is
+# the same absence wearing a `.ko`.
+#
+# The `select`s it pulls in are the SMB3 crypto -- CMAC, CCM, GCM, AES and the rest -- and
+# they are not optional: they are how signing and encryption work, and a server that
+# requires either is the ordinary configuration now rather than a hardened one.
+CONFIG_CIFS=y
 
 # --- Process isolation -----------------------------------------------------
 # Plex runs unprivileged and confined (ADR-0007).
