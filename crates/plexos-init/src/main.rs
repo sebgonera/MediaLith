@@ -274,6 +274,30 @@ fn main() -> ExitCode {
         }
     }
 
+    // The processor, before anything is asked of it that it might not be able to do.
+    //
+    // This is placed here rather than anywhere later for one reason: every program
+    // this image runs after this point is a *Buildroot* binary, compiled by a
+    // different toolchain against a CPU baseline chosen in the defconfig. If that
+    // baseline is ever above what the machine has, the first such program dies of
+    // SIGILL — and the kernel then reports `Attempted to kill init` about a program
+    // that was perfectly fine, which is a sentence that sends whoever reads it in
+    // entirely the wrong direction. Nothing external has run yet, so this is the last
+    // moment at which a diagnostic can still be printed by something that is known to
+    // execute.
+    //
+    // It refuses nothing today: `plexos_sys::cpu::REQUIRED` is empty, because the
+    // image genuinely needs nothing above the x86-64 baseline. The summary is printed
+    // anyway, so a machine that fails for some *other* reason is still a machine whose
+    // processor is named in the log.
+    let cpu = plexos_sys::cpu::detect();
+    if let Some(refusal) = cpu.refusal() {
+        return fail(&refusal);
+    }
+    if execute::is_pid_one() || dry_run {
+        eprintln!("plexos-init: cpu: {}", cpu.summary());
+    }
+
     // /proc has to exist before the command line can be read, and mounting it is a
     // step in the plan the command line produces. The first real boot panicked here
     // with "could not read /proc/cmdline: No such file or directory". So bootstrap it

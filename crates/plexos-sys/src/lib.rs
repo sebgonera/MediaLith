@@ -45,6 +45,7 @@
 //! of that logic would be two things to get wrong.
 
 pub mod clock;
+pub mod cpu;
 pub mod device;
 pub mod dm;
 pub mod fs;
