@@ -64,6 +64,86 @@
        beside the sidebar, so the space above the cap reads as margin rather than as a void on
        the right. */
     --view-max: 90rem;
+
+    /* ----------------------------------------------------------------------------------
+       THE DESIGN SYSTEM.
+
+       Everything above this line is colour, and it was already a system. Everything below
+       was not: the page carried 50 distinct `padding` values, 21 `gap`s and 31 font sizes
+       for what are, semantically, about six paddings, four gaps and eight type roles. That
+       is what made one card sit 14 px left of its neighbour and two buttons in a row stand
+       at different heights — not a wrong value anywhere, but no agreed value anywhere.
+
+       The rule for adding to this block: a token earns its place by naming a *role*, not a
+       measurement. `--pad-card` is a role. `--space-18px` would not be. If a rule needs a
+       number this block does not have, the question to ask first is which existing role it
+       is an instance of.
+       ---------------------------------------------------------------------------------- */
+
+    /* Spacing. A 4 px grid, because every value on the page was already within a hair of
+       one and the eye reads the regularity even where it cannot name it. */
+    --s-1: .25rem;   /*  4 */
+    --s-2: .5rem;    /*  8 */
+    --s-3: .75rem;   /* 12 */
+    --s-4: 1rem;     /* 16 */
+    --s-5: 1.5rem;   /* 24 */
+    --s-6: 2rem;     /* 32 */
+    --s-7: 3rem;     /* 48 */
+
+    /* Spacing, by role. These are what rules should reach for; the scale above is what
+       these are built from. */
+    --pad-page: var(--s-5);      /* the view's own inset from the shell */
+    --gap-section: var(--s-4);   /* between one card and the next, down a page */
+    --gap-card: var(--s-4);      /* between cards side by side in a grid */
+    --pad-card: 1.25rem;         /* inside an ordinary card */
+    --pad-card-sm: .875rem;      /* inside a compact one: metric tiles, inset panels */
+    --gap-inline: var(--s-2);    /* between things on one line that belong together */
+    --gap-control: var(--s-3);   /* between adjacent controls in a row */
+
+    /* Type, by role. Eight, and the page had thirty-one sizes. `--t-num` is the one that
+       exists for a reason other than hierarchy: a figure somebody reads at a glance is a
+       different object from the words around it, and giving it its own token is what stops
+       the next tile inventing a thirty-second size. */
+    --t-title: 1.4rem;      /* the view's h2, once per page */
+    --t-lede: .95rem;       /* the sentence under it, once per page */
+    --t-eyebrow: .72rem;    /* a card's h3: small, tracked, upper case */
+    --t-card: 1rem;         /* a heading inside a card */
+    --t-body: .9rem;        /* ordinary prose */
+    --t-meta: .82rem;       /* secondary and supporting text */
+    --t-micro: .74rem;      /* labels on tiles, table headers, chips */
+    --t-num: 1.5rem;        /* a figure meant to be read before the words beside it */
+
+    --track-eyebrow: .1em;  /* the tracking that makes an eyebrow read as a label */
+
+    /* Surfaces, named by what sits on them rather than by their colour, so a rule says what
+       it means and follows the theme without knowing which one is in force. */
+    --surface-page: var(--bg);
+    --surface-chrome: var(--shell);
+    --surface-card: var(--card);
+    --surface-raised: var(--raised);
+    /* A well inside a card — a table body, a metric tile, a terminal's chrome. The page
+       background is already a step below the card in both themes, which is exactly the
+       relationship an inset wants, so this is the same value under a different name and
+       the name is the point. */
+    --surface-inset: var(--bg);
+    --surface-screen: var(--screen);
+
+    /* Borders, by role. Four, and the fourth is the only one that may ever be red. */
+    --border: var(--line);
+    --border-active: var(--accent);
+    --border-warn: var(--degraded);
+    --border-danger: var(--unavailable);
+
+    --radius-xs: 6px;
+    --radius-pill: 999px;
+
+    /* One height for everything a person clicks or types into. Buttons stood at 2.3rem and
+       inputs at 2.2rem, which is invisible alone and unmistakable the moment they share a
+       row — and they share a row on six of the seven views. */
+    --control-h: 2.375rem;
+    --control-h-sm: 1.9rem;
+    --pad-control: 0 .95rem;
+    --pad-control-sm: 0 .6rem;
   }
 
   /* Roughly a 1900 px window and up: the extra room is worth spending, but only to 1600. */
@@ -406,22 +486,31 @@
     align-items: start;
   }
 
+  /* THE CARD, declared once.
+     It used to be declared twice — here with `border-radius: 10px; padding: 1rem 1.1rem`,
+     and again six hundred lines further down with `padding: 1.15rem 1.25rem`. The second
+     won, the first was dead, and no rule anywhere said which was intended. That is the
+     shape this whole pass exists to remove: not a wrong value, but two values with equal
+     claim and nothing to decide between them. */
   .card {
-    background: var(--card);
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    padding: 1rem 1.1rem;
+    background: var(--surface-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--pad-card);
     /* A grid item's floor is its content, not zero, so one long unbroken line inside a
        card widens the whole track and pushes the page sideways. Everything here already
        wraps, which is why it has never happened -- and the terminal is a box whose whole
        job is to hold lines nothing may wrap. */
     min-width: 0;
   }
+  /* The eyebrow. One treatment, so a card's heading is recognisable as a heading before it
+     is read — which is what lets the rest of a card be dense without becoming soup. */
   .card h3 {
-    margin: 0 0 .75rem;
-    font-size: .78rem;
+    margin: 0 0 var(--s-3);
+    font-size: var(--t-eyebrow);
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: .08em;
+    letter-spacing: var(--track-eyebrow);
     color: var(--muted);
   }
 
@@ -1047,8 +1136,6 @@
     border-radius: var(--radius);
     box-shadow: var(--shadow);
   }
-  .card { padding: 1.15rem 1.25rem; }
-  .card h3 { font-size: .72rem; letter-spacing: .1em; margin-bottom: .85rem; }
 
   /* The hero carries the verdict, so it is tinted by its own state rather than being a
      white box with a coloured stripe down one edge. */
@@ -1067,38 +1154,86 @@
      button added outside a card — the power controls in the header.
      A rule about how buttons look should not know where buttons are. `.danger` carries the
      one distinction worth keeping: stopping the machine must not look like every other
-     control on the page. */
+     control on the page.
+
+     FOUR TIERS, and no fifth. A local context normally has exactly one of the first.
+
+       primary      a bare `<button>`     the one action this context is for
+       secondary    `.ghost`              ordinary actions, any number of them
+       quiet        `.quiet` / `.linkish` utility: reveal, refresh, copy, cancel
+       destructive  `.danger`             ends a session, erases, or stops the machine
+
+     `.ghost` keeps its name rather than becoming `.secondary`: it is spelled in the markup
+     and in some two hundred places in the script, and a rename over that surface buys a
+     better word at the price of exactly the hazard this project has already paid for twice.
+     The hierarchy is what had to be made real, not the vocabulary. */
   button {
-    border: 1px solid var(--accent);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--gap-inline);
+    min-height: var(--control-h);
+    padding: var(--pad-control);
+    border: 1px solid var(--border-active);
     border-radius: var(--radius-sm);
-    padding: .58rem .95rem;
     font: inherit;
+    font-size: var(--t-body);
     font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
     cursor: pointer;
     box-shadow: var(--shadow-sm);
-    transition: background-color .12s ease, border-color .12s ease,
+    transition: background-color .12s ease, border-color .12s ease, color .12s ease,
                 box-shadow .12s ease, transform .06s ease;
   }
-  button:not(.ghost) {
+  /* Every button carries an icon at the same size or none at all. Left of the label,
+     always: an icon that changes sides between two buttons in one row is a row that reads
+     as two designs. */
+  button > svg { flex: 0 0 auto; width: 1rem; height: 1rem; }
+
+  /* ONE `:not()` holding a list, and never a chain of three.
+     `:not(.ghost):not(.quiet):not(.linkish)` scores (0,3,1); `:not(.ghost, .quiet,
+     .linkish)` takes the specificity of its most specific argument and scores (0,1,1) --
+     the same as the plain `button:not(.ghost)` this replaced, which is what lets
+     `button.navitem` below go on winning on source order.
+     Written the other way for one render, the sidebar came back as seven solid blue
+     buttons: the exact regression the trap list already records, reproduced by raising a
+     specificity nobody was watching. A tier added here must keep this selector at one
+     class's worth of weight. */
+  button:not(.ghost, .quiet, .linkish) {
     background: var(--accent);
     border-color: var(--accent);
     color: var(--accent-ink);
   }
-  button:not(.ghost):hover { filter: brightness(1.07); }
+  button:not(.ghost, .quiet, .linkish):hover { filter: brightness(1.07); }
+
   button.ghost {
-    background: var(--card);
+    background: var(--surface-card);
     color: var(--ink);
-    border: 1px solid var(--line);
+    border: 1px solid var(--border);
     font-weight: 500;
+    box-shadow: var(--shadow-sm);
   }
   button.ghost:hover {
-    border-color: var(--accent);
+    border-color: var(--border-active);
     color: var(--accent);
   }
+
+  /* Utility. No border, no shadow, no weight — it has to be findable without competing,
+     because the contexts it appears in already have something more important in them. */
+  button.quiet {
+    background: none;
+    border: 1px solid transparent;
+    box-shadow: none;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  button.quiet:hover { color: var(--ink); background: var(--surface-inset); }
+
   /* Shutting down and restarting. Quiet until pointed at, then unmistakably not the accent:
      these two are the only controls on the page that end the session they are pressed in. */
   button.danger:hover {
-    border-color: var(--unavailable);
+    border-color: var(--border-danger);
     color: var(--unavailable);
   }
   button:active { transform: translateY(1px); }
@@ -1109,6 +1244,9 @@
     transform: none;
     filter: none;
   }
+  /* A control that is working. The word changes in the script; this is what stops the
+     button from also looking pressable while it does. */
+  button[aria-busy="true"] { opacity: .7; cursor: progress; }
 
   /* ------------------------------------------------------------------------------------
      A navigation item is a button, not a link with an href this page then has to cancel:
@@ -1171,11 +1309,26 @@
     border-radius: var(--radius-sm);
   }
 
-  input[type="text"], input[type="password"], input[type="number"], select {
+  /* Every control a person clicks or types into stands the same height, so a row holding a
+     field and a button is a row rather than two things that happen to be adjacent. Buttons
+     were 2.3rem and fields 2.2rem: invisible on their own and unmistakable side by side,
+     which is the state six of the seven views are in. */
+  input[type="text"], input[type="password"], input[type="number"], select, textarea {
+    min-height: var(--control-h);
+    padding: 0 .7rem;
+    border: 1px solid var(--border);
     border-radius: var(--radius-sm);
-    background: var(--card);
+    background: var(--surface-card);
     color: var(--ink);
+    font: inherit;
+    font-size: var(--t-body);
   }
+  textarea { padding: .5rem .7rem; line-height: 1.5; }
+  input:hover, select:hover { border-color: var(--muted); }
+  input[disabled], select[disabled] { opacity: .55; cursor: default; }
+  /* A field that is refusing what is in it. Never colour alone — the message beside it is
+     what carries the reason. */
+  input[aria-invalid="true"] { border-color: var(--border-danger); }
 
   /* Tinted pills. A grey outline made every state look like the same state, and the
      colour is what a person reads before the word beside it. */
@@ -1640,7 +1793,8 @@
   /* The edge is the verdict, the same device the summary and health cards use. Direct play
      is the cheap case and reads as good; a hardware transcode is this appliance doing its
      job, so it reads as good too. Software transcode is amber and *only* amber -- it is a
-     client asking for something this machine has to work harder at, not a fault. */
+     client asking for something this machine has to work harder at, not a fault.
+
      The names are prefixed rather than plain -- `is-software` and not `software` -- because
      this page already carries a `.warn` that draws a bordered amber box, and a verdict
      labelled with it would have come out as a box instead of a word. A class name is a
