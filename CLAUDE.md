@@ -89,7 +89,7 @@ list is about the system. Check against this before committing; it is short on p
 | `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates, the configuration model actually applied (ADR-0008), and the terminal session (ADR-0014), the updater on the signed manifest, a supervisor that restarts Plex and swaps a newly-installed version in without a reboot, the console's own TLS identity (ADR-0014), the installer and the first-boot flow (ADR-0016), live Plex activity behind the device token (ADR-0018 — the Plex account token is read from `Preferences.xml` per request, sent to loopback in a header, and has no field in the browser's document it could land in), and the activity card — what the machine is doing *now*, which is the only view here about a moment rather than a state. 407 tests, of which two fail on any development host running Plex; see the trap list. **The activity card has never run on the appliance**: its numbers were produced by replaying the appliance's own captured `/proc` and `/sys` through the real code, which is one step short of the machine. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
 | `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 104 tests. Provisioning now runs end to end **on the appliance**, driven from a browser: download, signature, manifest, build, publish, mount, confine, start. |
 | `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. |
-| `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 47 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree. |
+| `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 91 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree — including stage 7, which asserts that **every shipped `.ko` is one `plexos_init::nvidia::MODULES` names**, and stage 7b, which asserts the kernel config contract against the `.config` the kernel was actually built with rather than against the fragment that asked for it. |
 | Installer, updater, first-boot wizard | Not started. |
 
 **MediaLith is installed on the reference laptop's internal disk and boots from it.** Its own
@@ -500,6 +500,26 @@ and its certificate — sign with the second one.
   the defconfig, always re-run kconfig and check the options actually survived. Four
   were being dropped at one point, and the result was a uClibc toolchain that Plex
   cannot run on.
+- **An option whose dependency is unmet is not in `.config` at all — not as `=y`, not as
+  `is not set`.** The sharper form of the trap above, and it defeats the obvious check.
+  Grepping for `CONFIG_USB_NET_AX88179_178A` in a built kernel's `.config` returned
+  *nothing*, because `CONFIG_USB_USBNET` was off and everything depending on it is simply
+  not emitted. So the natural test — "is it `=y`, or is it `is not set`?" — has a third
+  answer that reads like a typo in the grep, and three USB Ethernet drivers were absent
+  for the life of the project without ever appearing as refused. Check for the *absence*
+  explicitly, and when a symbol is missing look for the gate above it rather than for a
+  misspelling. `post-image-test.sh` stage 7b prints `(absent from .config)` as its own
+  outcome for this reason.
+- **Turning `CONFIG_MODULES` on changes the default answer for every tristate symbol in
+  the tree, not only for the driver that motivated it.** kconfig gains a third answer and
+  takes it: eleven options became `=m` on the next build, producing eight `.ko` files, in
+  an image with no udev, no kmod and no modprobe — so each was a feature that compiled,
+  installed, passed every test and never happened on a machine. One of them,
+  `X86_PKG_TEMP_THERMAL`, publishes the only thermal zone reporting the processor die, so
+  the activity card reported a chassis sensor as the processor with nothing failing and
+  nothing logged. The rule was written down at the time and half-applied — `efivarfs` was
+  pinned and the note said to check the rest. `find output/target -name '*.ko'` answers it
+  in a second and nobody ran it for a release. Stage 7 runs it now.
 - **The same trap again, in the kernel fragment, and it hid for months behind evidence
   pointing somewhere else.** `CONFIG_FONT_TER16x32` and `CONFIG_FONT_TER10x18`
   `depends on !SPARC && FONTS`, and `CONFIG_FONTS` was never set — so both were dropped
