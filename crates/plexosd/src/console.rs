@@ -1512,7 +1512,7 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
 
     // After the network, so the first frame already carries the address a browser should
     // be pointed at; before `serve_tls`, which never returns.
-    spawn_dashboard(first_boot_code);
+    spawn_dashboard(first_boot_code, &plex);
 
     let uploading_job = std::sync::Arc::clone(&job);
     let uploading_plex = std::sync::Arc::clone(&plex);
@@ -1611,10 +1611,14 @@ fn update_report(
 ///
 /// Its failure is a machine with no monitor, which is most of them. It is logged and the
 /// appliance carries on, because it always has.
-fn spawn_dashboard(first_boot_code: Option<String>) {
+fn spawn_dashboard(first_boot_code: Option<String>, plex: &std::sync::Arc<crate::plex::Handle>) {
+    // The same handle the console's own power route uses, and that is the point rather than
+    // an economy: `stop_now` asks it to stop Plex, and a second handle would be a second
+    // opinion about whether Plex is running.
+    let plex = std::sync::Arc::clone(plex);
     std::thread::spawn(move || {
         let mut log = |line: &str| println!("plexosd: dashboard: {line}");
-        crate::dashboard::run(first_boot_code, &mut log);
+        crate::dashboard::run(first_boot_code, &plex, &mut log);
     });
 }
 

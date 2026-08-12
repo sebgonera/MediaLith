@@ -22,7 +22,9 @@
 //! colours, photographed for a forum post as often as it is looked at, and read by whoever
 //! is standing in the room.
 
-use super::model::{Facts, Mark, Verdict, coarse};
+use plexos_sys::power::Action;
+
+use super::model::{Facts, Mark, Plex, Verdict, coarse};
 use super::qr::Symbol;
 
 /// What the attached screen is showing.
@@ -52,6 +54,25 @@ pub enum Screen {
     Details,
     /// What the keys do.
     Help,
+    /// The two ways to stop the machine, with the cursor on one of them.
+    Power {
+        /// Which one the cursor is on.
+        choice: Action,
+    },
+    /// The chosen one, asked about once more before it happens.
+    ///
+    /// A separate screen rather than a line on the one above, because this screen stands in
+    /// a room and anybody who walks past it can press a key. One keystroke between a
+    /// dashboard and a media server going dark is not a margin.
+    PowerConfirm {
+        /// What is about to happen.
+        choice: Action,
+    },
+    /// It has been asked for, and this is the last frame this screen will draw.
+    PowerGoing {
+        /// What is happening.
+        choice: Action,
+    },
 }
 
 /// How wide the laid-out content is, whatever the screen's own width.
@@ -137,6 +158,9 @@ pub fn frame(screen: &Screen, facts: &Facts, rows: usize, columns: usize) -> Str
         }
         Screen::Details => details(facts),
         Screen::Help => help(),
+        Screen::Power { choice } => power(*choice, facts),
+        Screen::PowerConfirm { choice } => power_confirm(*choice, facts),
+        Screen::PowerGoing { choice } => power_going(*choice),
     };
 
     place(&lines, rows, columns)
@@ -281,6 +305,7 @@ fn footer(can_pair: bool) -> Line {
         keys.push("P  Pair a browser");
     }
     keys.push("D  Details");
+    keys.push("O  Power");
     keys.push("?  Help");
     let text = keys.join("     ");
     Line::drawn(
@@ -596,6 +621,165 @@ fn details(facts: &Facts) -> Vec<Line> {
     lines
 }
 
+/// The word for an action, in the imperative a menu uses.
+fn stop_word(choice: Action) -> &'static str {
+    match choice {
+        Action::Restart => "Restart",
+        Action::Off => "Shut down",
+    }
+}
+
+/// What that action leaves behind, which is the difference somebody is choosing between.
+fn stop_outcome(choice: Action) -> &'static str {
+    match choice {
+        Action::Restart => "The machine goes down and comes back on its own.",
+        Action::Off => "The machine goes down and stays down until the power button.",
+    }
+}
+
+/// One row of a menu: a cursor, or the space where a cursor would be.
+///
+/// The space matters. A selected row that gains a character the others do not have shifts
+/// two columns left every time the cursor moves, and a list that jitters as somebody
+/// arrows down it reads as a fault in the screen.
+fn menu_row(selected: bool, label: &str) -> Line {
+    if selected {
+        Line::drawn(
+            format!("{}{}>  {label}{}", sgr::BOLD, sgr::CYAN, sgr::RESET),
+            label.chars().count() + 3,
+        )
+    } else {
+        Line::plain(format!("   {label}"))
+    }
+}
+
+/// Choosing between the two ways to stop.
+///
+/// Both are always listed and the cursor names one, rather than a screen per action reached
+/// by its own key. Somebody standing here wants the machine to stop; which of the two they
+/// want is the question, and a menu asks it in one place.
+fn power(choice: Action, facts: &Facts) -> Vec<Line> {
+    let mut lines = vec![
+        Line::drawn(format!("{}POWER{}", sgr::BOLD, sgr::RESET), 5),
+        Line::blank(),
+        Line::blank(),
+    ];
+
+    for option in [Action::Restart, Action::Off] {
+        lines.push(menu_row(option == choice, stop_word(option)));
+    }
+
+    lines.push(Line::blank());
+    lines.push(Line::blank());
+    // The consequence of whichever row the cursor is on, written out rather than left to
+    // the two words above. "Restart" and "Shut down" are not equally obvious to everybody,
+    // and this is the last screen before a media server goes dark.
+    lines.push(Line::plain(stop_outcome(choice)));
+
+    // Only when there is something to interrupt. A machine with Plex stopped has nothing to
+    // warn about, and a warning that is always there is one nobody reads.
+    if facts.plex == Plex::Running {
+        lines.push(Line::blank());
+        lines.push(Line::drawn(
+            format!(
+                "{}Plex is running. Anything being watched right now will stop.{}",
+                sgr::YELLOW,
+                sgr::RESET
+            ),
+            59,
+        ));
+    }
+
+    lines.push(Line::blank());
+    lines.push(Line::blank());
+    lines.push(Line::drawn(
+        format!(
+            "{}Up/Down  choose      Enter  continue      ESC  cancel{}",
+            sgr::DIM,
+            sgr::RESET
+        ),
+        53,
+    ));
+    lines
+}
+
+/// The one question that has to be answered with a named key.
+///
+/// Not Enter. Enter is what got somebody here, so a screen that also took Enter would turn
+/// two presses of one key into a shutdown — and this screen lives in a room where a person
+/// leaning on the desk is a keystroke.
+fn power_confirm(choice: Action, facts: &Facts) -> Vec<Line> {
+    let question = match choice {
+        Action::Restart => "Restart this machine?",
+        Action::Off => "Shut this machine down?",
+    };
+
+    let mut lines = vec![
+        Line::drawn(
+            format!("{}{}{question}{}", sgr::BOLD, sgr::YELLOW, sgr::RESET),
+            question.chars().count(),
+        ),
+        Line::blank(),
+        Line::blank(),
+    ];
+
+    // What the appliance does for them, which is the reason to use this rather than the
+    // power button. Somebody who does not know that this stops Plex and flushes the disk
+    // has no reason to prefer a menu to five seconds of holding a button.
+    lines.push(Line::plain(
+        "Plex is stopped cleanly and everything on disk is flushed first.",
+    ));
+    if facts.plex == Plex::Running {
+        lines.push(Line::plain(
+            "Anyone watching something right now will be cut off.",
+        ));
+    }
+
+    lines.push(Line::blank());
+    lines.push(Line::blank());
+    let press = format!("Press Y to {}", stop_word(choice).to_lowercase());
+    lines.push(Line::drawn(
+        format!("{}{press}{}", sgr::BOLD, sgr::RESET),
+        press.chars().count(),
+    ));
+    lines.push(Line::blank());
+    lines.push(Line::drawn(
+        format!("{}ESC  no, go back{}", sgr::DIM, sgr::RESET),
+        16,
+    ));
+    lines
+}
+
+/// The last frame. Painted before the sequence starts, deliberately.
+///
+/// `stop_now` does not return, and stopping Plex and remounting `/var` takes seconds — so a
+/// screen that started the work first would sit on a menu for the whole of it and then go
+/// black, which reads as a machine that ignored the key and then crashed.
+fn power_going(choice: Action) -> Vec<Line> {
+    let said = match choice {
+        Action::Restart => "Restarting...",
+        Action::Off => "Shutting down...",
+    };
+    vec![
+        Line::drawn(
+            format!("{}{}{said}{}", sgr::BOLD, sgr::CYAN, sgr::RESET),
+            said.chars().count(),
+        ),
+        Line::blank(),
+        Line::blank(),
+        Line::plain("Stopping Plex and flushing the disk."),
+        Line::blank(),
+        Line::drawn(
+            format!(
+                "{}This screen goes blank when it is safe to cut the power.{}",
+                sgr::DIM,
+                sgr::RESET
+            ),
+            55,
+        ),
+    ]
+}
+
 fn help() -> Vec<Line> {
     let mut lines = vec![
         Line::drawn(format!("{}HELP{}", sgr::BOLD, sgr::RESET), 4),
@@ -603,6 +787,7 @@ fn help() -> Vec<Line> {
     ];
     lines.push(Line::field("P", "Show a QR code that signs a browser in"));
     lines.push(Line::field("D", "Everything this screen knows"));
+    lines.push(Line::field("O", "Restart or shut this machine down"));
     lines.push(Line::field("?", "This page"));
     lines.push(Line::field("ESC", "Back to the dashboard"));
     lines.push(Line::blank());
@@ -680,6 +865,125 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn the_power_menu_names_the_outcome_of_the_row_the_cursor_is_on() {
+        // Two words are not a choice. "Restart" and "Shut down" are not equally obvious to
+        // everybody, and this is the last screen before a media server goes dark -- so the
+        // consequence of whichever row is selected is written out underneath it.
+        let restart = visible(&frame(
+            &Screen::Power {
+                choice: Action::Restart,
+            },
+            &working(),
+            101,
+            360,
+        ));
+        assert!(restart.contains("comes back on its own"), "{restart}");
+        assert!(
+            !restart.contains("stays down"),
+            "the other row's outcome is not also shown: {restart}"
+        );
+
+        let off = visible(&frame(
+            &Screen::Power {
+                choice: Action::Off,
+            },
+            &working(),
+            101,
+            360,
+        ));
+        assert!(off.contains("stays down"), "{off}");
+
+        // Both rows are always listed, whichever is selected. A menu that shows only the
+        // row under the cursor is not a menu.
+        for seen in [&restart, &off] {
+            assert!(seen.contains("Restart"), "{seen}");
+            assert!(seen.contains("Shut down"), "{seen}");
+        }
+    }
+
+    #[test]
+    fn the_confirmation_asks_for_a_key_that_is_not_the_one_that_opened_it() {
+        // Enter is what got somebody to this screen. A confirmation that also took Enter
+        // would turn two presses of one key into a shutdown, on a screen that sits in a
+        // room where a person leaning on a desk is a keystroke.
+        let seen = visible(&frame(
+            &Screen::PowerConfirm {
+                choice: Action::Off,
+            },
+            &working(),
+            101,
+            360,
+        ));
+        assert!(seen.contains("Press Y to shut down"), "{seen}");
+        assert!(
+            !seen.contains("Enter"),
+            "the screen must not offer the key that brought somebody here: {seen}"
+        );
+        // And the reason to use this rather than the power button, which is the whole
+        // difference between the two and is invisible unless it is said.
+        assert!(seen.contains("flushed"), "{seen}");
+    }
+
+    #[test]
+    fn a_running_plex_is_warned_about_and_a_stopped_one_is_not() {
+        // A warning that is always there is one nobody reads. This one is derived from the
+        // health check that already runs, so it cannot be true of a machine where it is not.
+        let stopped = Facts {
+            plex: Plex::Stopped,
+            ..working()
+        };
+        for screen in [
+            Screen::Power {
+                choice: Action::Off,
+            },
+            Screen::PowerConfirm {
+                choice: Action::Off,
+            },
+        ] {
+            let running = visible(&frame(&screen, &working(), 101, 360));
+            let quiet = visible(&frame(&screen, &stopped, 101, 360));
+            assert!(
+                running.contains("watch"),
+                "a running Plex is not warned about in {screen:?}:\n{running}"
+            );
+            assert!(
+                !quiet.contains("watch"),
+                "a stopped Plex is warned about anyway in {screen:?}:\n{quiet}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_last_frame_says_what_is_happening_and_that_the_screen_will_go_dark() {
+        // Painted before the sequence starts. Stopping Plex and flushing a disk takes
+        // seconds, and a screen that went black with no explanation is indistinguishable
+        // from one that crashed.
+        let seen = visible(&frame(
+            &Screen::PowerGoing {
+                choice: Action::Restart,
+            },
+            &working(),
+            101,
+            360,
+        ));
+        assert!(seen.contains("Restarting"), "{seen}");
+        assert!(seen.contains("blank"), "{seen}");
+    }
+
+    #[test]
+    fn the_cursor_does_not_move_the_rows_it_is_not_on() {
+        // A selected row that gains a character the others do not have shifts the list every
+        // time the cursor moves, and a menu that jitters as somebody arrows down it reads as
+        // a fault in the screen rather than as a selection.
+        let selected = menu_row(true, "Restart");
+        let not = menu_row(false, "Restart");
+        assert_eq!(
+            selected.width, not.width,
+            "the cursor is drawn in space the row already had"
+        );
     }
 
     #[test]
@@ -982,15 +1286,9 @@ mod tests {
             ..working()
         };
 
-        for (screen, facts) in [
-            (Screen::Dashboard, &long),
-            (Screen::Details, &long),
-            (Screen::Help, &long),
-            (Screen::PairingExpired, &long),
-            (Screen::Paired, &long),
-        ] {
+        for screen in every_screen() {
             for (rows, columns) in [(101_usize, 360_usize), (25, 80), (43, 132)] {
-                for line in visible(&frame(&screen, facts, rows, columns)).lines() {
+                for line in visible(&frame(&screen, &long, rows, columns)).lines() {
                     assert!(
                         line.chars().count() <= columns,
                         "{screen:?} at {rows}x{columns} painted {} columns: {line:?}",
@@ -998,6 +1296,77 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// One of every screen this file can draw.
+    ///
+    /// The list is written out, and then *checked against the type* by a match the compiler
+    /// insists is exhaustive — so adding a variant to [`Screen`] stops this file compiling
+    /// until the new screen is in here. A list that enumerates the kinds of a thing is a list
+    /// that misses one, and this repository has paid for that in the stylesheet twice; the
+    /// difference here is that the miss can be made into a build failure rather than a
+    /// property nobody thought to assert.
+    fn every_screen() -> Vec<Screen> {
+        let all = vec![
+            Screen::Dashboard,
+            Screen::Pairing {
+                url: "https://192.168.2.102/#pair=4K7QM2XR9T8BHVWPQ2M4X6Z8AB".to_owned(),
+                seconds_left: 277,
+            },
+            Screen::PairingExpired,
+            Screen::Paired,
+            Screen::FirstBoot {
+                url: None,
+                recovery_code: "4K7Q-M2XR-9T8B-HVWP".to_owned(),
+            },
+            Screen::Details,
+            Screen::Help,
+            Screen::Power {
+                choice: Action::Restart,
+            },
+            Screen::PowerConfirm {
+                choice: Action::Off,
+            },
+            Screen::PowerGoing {
+                choice: Action::Off,
+            },
+        ];
+
+        // Nothing is asserted here and nothing needs to be: the value of this loop is that it
+        // does not compile when `Screen` grows a variant no arm names.
+        for screen in &all {
+            match screen {
+                Screen::Dashboard
+                | Screen::Pairing { .. }
+                | Screen::PairingExpired
+                | Screen::Paired
+                | Screen::FirstBoot { .. }
+                | Screen::Details
+                | Screen::Help
+                | Screen::Power { .. }
+                | Screen::PowerConfirm { .. }
+                | Screen::PowerGoing { .. } => {}
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn every_screen_offers_a_way_off_itself() {
+        // A screen with nothing to press is a machine somebody has to power-cycle to leave.
+        // The two exceptions are the ones that are *about* not going back: the last frame
+        // before the machine stops, and the first-boot screen, which says "press any key".
+        for screen in every_screen() {
+            let seen = visible(&frame(&screen, &working(), 101, 360));
+            let has_a_way_out = seen.contains("ESC")
+                || seen.contains("Press any key")
+                || seen.contains("Press P")
+                || seen.contains("Press Y");
+            assert!(
+                has_a_way_out || matches!(screen, Screen::PowerGoing { .. }),
+                "{screen:?} leaves somebody standing at it:\n{seen}"
+            );
         }
     }
 

@@ -124,7 +124,11 @@ const FALLBACK: (usize, usize) = (24, 80);
 /// Returns when the screen cannot be opened, which is an ordinary outcome on a headless
 /// machine and must not be a fault: everything else about the appliance works without a
 /// monitor, and always has.
-pub fn run(first_boot_code: Option<String>, log: &mut dyn FnMut(&str)) {
+pub fn run(
+    first_boot_code: Option<String>,
+    plex: &std::sync::Arc<crate::plex::Handle>,
+    log: &mut dyn FnMut(&str),
+) {
     let screen = match std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -170,7 +174,7 @@ pub fn run(first_boot_code: Option<String>, log: &mut dyn FnMut(&str)) {
     quieten_the_kernel(log);
 
     let keys = read_keys(&screen);
-    draw(&screen, size, first_boot_code, &keys, log);
+    draw(&screen, size, first_boot_code, plex, &keys, log);
 }
 
 /// What a keystroke means, once the escape sequences have been put back together.
@@ -313,6 +317,16 @@ struct State {
     first_boot_code: Option<String>,
     /// Whether the first-boot screen has already made its one unasked-for offer.
     first_boot_offered: bool,
+    /// Set when somebody has confirmed a restart or a shutdown, and cleared when it starts.
+    ///
+    /// The keyboard handler records the decision and **does not act on it**. Two reasons,
+    /// and the second is the one that matters. The screen is painted before the machine
+    /// begins to stop, so somebody who pressed the key sees that it was taken rather than
+    /// watching a menu for the several seconds it takes to stop Plex and flush a disk. And
+    /// [`handle`] stays a pure function of a keystroke and a state, which is what lets every
+    /// path through it be a test — a handler that called `power::schedule` would be one no
+    /// test could exercise without restarting the machine running the suite.
+    going: Option<plexos_sys::power::Action>,
 }
 
 /// The loop: read keys, re-read the machine, paint when it changed.
@@ -320,6 +334,7 @@ fn draw(
     screen: &std::fs::File,
     (rows, columns): (usize, usize),
     first_boot_code: Option<String>,
+    plex: &std::sync::Arc<crate::plex::Handle>,
     keys: &mpsc::Receiver<u8>,
     log: &mut dyn FnMut(&str),
 ) {
@@ -354,6 +369,7 @@ fn draw(
         notice_until: None,
         first_boot_code,
         first_boot_offered: false,
+        going: None,
     };
 
     // Bytes that have arrived and are not yet a whole key. Never more than a few, because
@@ -410,6 +426,18 @@ fn draw(
             }
         }
 
+        // After the paint and not before it: the frame saying "Restarting..." has to be on
+        // the screen before the machine begins to stop, because stopping Plex and flushing
+        // the disk takes seconds and a screen still showing a menu through all of it reads
+        // as a key that was ignored by a machine that then died.
+        //
+        // `take` so it happens once. `schedule` does not return in the sense that matters --
+        // the thread it spawns ends in `reboot(2)` -- but a loop that asked twice would put
+        // two shutdown sequences on the same Plex.
+        if let Some(action) = state.going.take() {
+            crate::power::schedule(action, plex);
+        }
+
         std::thread::sleep(TICK);
     }
 }
@@ -433,6 +461,19 @@ fn handle(key: Key, state: &mut State, facts: &Facts, log: &mut dyn FnMut(&str))
         return;
     }
 
+    // The screen decides before the key does, because some screens spend keys the dashboard
+    // has other meanings for. `Y` is a letter on the dashboard and an answer on a
+    // confirmation, and a handler that read the key first would have to know about every
+    // screen in the same `match`.
+    match state.screen {
+        Screen::Power { choice } => return power_key(key, choice, state),
+        Screen::PowerConfirm { choice } => return confirm_key(key, choice, state, log),
+        // Nothing is offered, because there is nothing left to offer: the machine is on its
+        // way down and a key that appeared to cancel it would be lying.
+        Screen::PowerGoing { .. } => return,
+        _ => {}
+    }
+
     match key {
         Key::Char(b'p' | b'P') => {
             // Only where there is an address to put in it. A QR code pointing at nothing
@@ -449,6 +490,14 @@ fn handle(key: Key, state: &mut State, facts: &Facts, log: &mut dyn FnMut(&str))
             }
         }
         Key::Char(b'd' | b'D') => state.screen = Screen::Details,
+        Key::Char(b'o' | b'O') => {
+            // Restart first. It is the one somebody standing at a misbehaving appliance
+            // wants, and it is the one that leaves the machine reachable afterwards -- so
+            // the row under the cursor when the screen opens is the recoverable one.
+            state.screen = Screen::Power {
+                choice: plexos_sys::power::Action::Restart,
+            };
+        }
         Key::Char(b'?' | b'/' | b'h' | b'H') => state.screen = Screen::Help,
         // Escape on its own, and never the first byte of an arrow: pressing Up used to
         // cancel a pairing offer, because the three bytes of the arrow arrived one at a
@@ -460,6 +509,62 @@ fn handle(key: Key, state: &mut State, facts: &Facts, log: &mut dyn FnMut(&str))
             }
             state.notice_until = None;
             state.screen = Screen::Dashboard;
+        }
+        _ => {}
+    }
+}
+
+/// The power menu: move the cursor, or take the row it is on.
+fn power_key(key: Key, choice: plexos_sys::power::Action, state: &mut State) {
+    use plexos_sys::power::Action;
+
+    match key {
+        // Two rows, so either arrow is the other one. Wrapping rather than stopping at the
+        // ends: a list of two where Up does nothing on the first row is a list that appears
+        // not to respond to half the presses.
+        Key::Up | Key::Down => {
+            state.screen = Screen::Power {
+                choice: match choice {
+                    Action::Restart => Action::Off,
+                    Action::Off => Action::Restart,
+                },
+            };
+        }
+        Key::Char(b'\r' | b'\n') => state.screen = Screen::PowerConfirm { choice },
+        Key::Escape | Key::Char(b'q' | b'Q') => state.screen = Screen::Dashboard,
+        _ => {}
+    }
+}
+
+/// The confirmation: one named key, and everything else goes back.
+///
+/// Deliberately not Enter. Enter is what opened this screen, so accepting it here would make
+/// two presses of one key into a shutdown — on a screen that sits in a room where somebody
+/// leaning on a desk is a keystroke.
+fn confirm_key(
+    key: Key,
+    choice: plexos_sys::power::Action,
+    state: &mut State,
+    log: &mut dyn FnMut(&str),
+) {
+    match key {
+        Key::Char(b'y' | b'Y') => {
+            // Recorded, not done. The draw loop paints this frame and then starts the
+            // sequence, so the screen says what is happening before the machine begins to
+            // stop -- and this function stays testable, which a call to `power::schedule`
+            // would not be.
+            state.going = Some(choice);
+            state.screen = Screen::PowerGoing { choice };
+            log(&format!(
+                "{} asked for at the machine's own screen",
+                choice.describe()
+            ));
+        }
+        // Back to the menu rather than to the dashboard. Somebody who answered "no" to
+        // shutting down may well have meant restart, and making them press O again to find
+        // out is the machine being pedantic about a keystroke.
+        Key::Escape | Key::Char(b'n' | b'N' | b'q' | b'Q') => {
+            state.screen = Screen::Power { choice };
         }
         _ => {}
     }
@@ -797,6 +902,7 @@ mod tests {
             notice_until: None,
             first_boot_code: None,
             first_boot_offered: true,
+            going: None,
         };
 
         handle(Key::Char(b'P'), &mut state, &facts_at(None), &mut silent());
@@ -892,6 +998,7 @@ mod tests {
             notice_until: None,
             first_boot_code: None,
             first_boot_offered: true,
+            going: None,
         };
 
         handle(Key::Char(b'p'), &mut state, &facts, &mut silent());
@@ -927,6 +1034,7 @@ mod tests {
             notice_until: None,
             first_boot_code: None,
             first_boot_offered: true,
+            going: None,
         };
         crate::pairing::consume(&secret).expect("the browser spends it");
         advance(&mut state, &facts);
@@ -957,6 +1065,7 @@ mod tests {
             notice_until: None,
             first_boot_code: Some("4K7QM2XR9T8BHVWP".to_owned()),
             first_boot_offered: false,
+            going: None,
         };
 
         handle(Key::Char(b'x'), &mut state, &facts, &mut silent());
@@ -985,6 +1094,7 @@ mod tests {
             notice_until: None,
             first_boot_code: Some("4K7QM2XR9T8BHVWP".to_owned()),
             first_boot_offered: false,
+            going: None,
         };
 
         // No cable yet: nothing is offered, and the screen says what it is waiting for.
@@ -1028,6 +1138,7 @@ mod tests {
             notice_until: None,
             first_boot_code: Some("4K7QM2XR9T8BHVWP".to_owned()),
             first_boot_offered: false,
+            going: None,
         };
 
         advance(&mut state, &facts);
@@ -1045,6 +1156,7 @@ mod tests {
             notice_until: None,
             first_boot_code: None,
             first_boot_offered: true,
+            going: None,
         };
 
         handle(Key::Char(b'd'), &mut state, &facts, &mut silent());
@@ -1056,6 +1168,180 @@ mod tests {
         assert_eq!(state.screen, Screen::Help);
         handle(Key::Escape, &mut state, &facts, &mut silent());
         assert_eq!(state.screen, Screen::Dashboard);
+    }
+
+    /// The dashboard, with nothing pending.
+    fn at_dashboard() -> State {
+        State {
+            screen: Screen::Dashboard,
+            notice_until: None,
+            first_boot_code: None,
+            first_boot_offered: true,
+            going: None,
+        }
+    }
+
+    #[test]
+    fn stopping_the_machine_takes_three_keys_and_no_two_of_them_are_the_same() {
+        // This screen stands in a room. Anybody who walks past it can press a key, and the
+        // thing on the other side of these keys is a media server going dark in the middle
+        // of whatever somebody is watching -- so the count is the feature. O opens a menu,
+        // Enter takes the row, Y answers a question that names the outcome.
+        use plexos_sys::power::Action;
+        let facts = facts_at(Some("192.168.2.102"));
+        let mut state = at_dashboard();
+
+        handle(Key::Char(b'o'), &mut state, &facts, &mut silent());
+        assert_eq!(
+            state.screen,
+            Screen::Power {
+                choice: Action::Restart
+            },
+            "restart is under the cursor, because it is the one that leaves the machine \
+             reachable afterwards"
+        );
+        assert!(state.going.is_none(), "opening a menu stops nothing");
+
+        handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+        assert_eq!(
+            state.screen,
+            Screen::PowerConfirm {
+                choice: Action::Restart
+            }
+        );
+        assert!(state.going.is_none(), "and neither does choosing a row");
+
+        // Enter again is *not* the answer. It is the key that got somebody here, so a
+        // confirmation that took it would turn two presses of one key into a shutdown.
+        handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+        assert!(
+            state.going.is_none(),
+            "Enter must not confirm what Enter asked"
+        );
+
+        handle(Key::Char(b'y'), &mut state, &facts, &mut silent());
+        assert_eq!(state.going, Some(Action::Restart));
+        assert_eq!(
+            state.screen,
+            Screen::PowerGoing {
+                choice: Action::Restart
+            }
+        );
+    }
+
+    #[test]
+    fn the_arrows_choose_between_the_two_and_wrap_rather_than_stopping() {
+        // Two rows, so either arrow is the other one. A list of two where Up does nothing on
+        // the first row is a list that appears not to answer half the presses.
+        use plexos_sys::power::Action;
+        let facts = facts_at(Some("192.168.2.102"));
+        let mut state = at_dashboard();
+        handle(Key::Char(b'O'), &mut state, &facts, &mut silent());
+
+        for key in [Key::Down, Key::Up, Key::Down] {
+            let before = match state.screen {
+                Screen::Power { choice } => choice,
+                ref other => panic!("expected the power menu, got {other:?}"),
+            };
+            handle(key, &mut state, &facts, &mut silent());
+            let after = match state.screen {
+                Screen::Power { choice } => choice,
+                ref other => panic!("expected the power menu, got {other:?}"),
+            };
+            assert_ne!(before, after, "{key:?} moved nothing");
+        }
+        assert_eq!(
+            state.screen,
+            Screen::Power {
+                choice: Action::Off
+            }
+        );
+
+        // And the confirmation asks about the row that was actually under the cursor.
+        handle(Key::Char(b'\n'), &mut state, &facts, &mut silent());
+        handle(Key::Char(b'Y'), &mut state, &facts, &mut silent());
+        assert_eq!(state.going, Some(Action::Off));
+    }
+
+    #[test]
+    fn escape_backs_out_of_every_step_and_stops_nothing() {
+        // The way out has to exist at each step, and the step it goes back to matters:
+        // somebody who answered "no" to shutting down may well have meant restart, and
+        // sending them to the dashboard to press O again is the machine being pedantic.
+        use plexos_sys::power::Action;
+        let facts = facts_at(Some("192.168.2.102"));
+        let mut state = at_dashboard();
+
+        handle(Key::Char(b'o'), &mut state, &facts, &mut silent());
+        handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+        handle(Key::Escape, &mut state, &facts, &mut silent());
+        assert_eq!(
+            state.screen,
+            Screen::Power {
+                choice: Action::Restart
+            },
+            "back to the menu, not out of it"
+        );
+
+        handle(Key::Escape, &mut state, &facts, &mut silent());
+        assert_eq!(state.screen, Screen::Dashboard);
+        assert!(state.going.is_none(), "nothing was ever asked for");
+    }
+
+    #[test]
+    fn a_machine_on_its_way_down_does_not_take_the_key_back() {
+        // `PowerGoing` is painted and then the sequence starts. A key that appeared to
+        // cancel it would be the screen lying: `stop_now` does not return.
+        use plexos_sys::power::Action;
+        let facts = facts_at(Some("192.168.2.102"));
+        let mut state = at_dashboard();
+        handle(Key::Char(b'o'), &mut state, &facts, &mut silent());
+        handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+        handle(Key::Char(b'y'), &mut state, &facts, &mut silent());
+        state.going.take();
+
+        for key in [
+            Key::Escape,
+            Key::Char(b'q'),
+            Key::Char(b'n'),
+            Key::Up,
+            Key::Char(b'p'),
+        ] {
+            handle(key, &mut state, &facts, &mut silent());
+            assert_eq!(
+                state.screen,
+                Screen::PowerGoing {
+                    choice: Action::Restart
+                },
+                "{key:?} pretended to take it back"
+            );
+        }
+    }
+
+    #[test]
+    fn no_key_on_the_dashboard_stops_the_machine() {
+        // The property the three-key count exists for, asserted over the whole alphabet
+        // rather than over the keys this file happens to name. A key added here later that
+        // reached `going` in one press would fail this.
+        //
+        // Locked because `p` is in the range and `p` puts a pairing code on offer, which is
+        // global to the process -- and Rust runs tests as threads in one process.
+        let _serialised = crate::pairing::test_lock();
+        let facts = facts_at(Some("192.168.2.102"));
+        for byte in 0_u8..=127 {
+            let mut state = at_dashboard();
+            handle(Key::Char(byte), &mut state, &facts, &mut silent());
+            assert!(
+                state.going.is_none(),
+                "{:?} stopped the machine on its own",
+                byte as char
+            );
+        }
+        for key in [Key::Escape, Key::Up, Key::Down, Key::Left, Key::Right] {
+            let mut state = at_dashboard();
+            handle(key, &mut state, &facts, &mut silent());
+            assert!(state.going.is_none(), "{key:?} stopped the machine");
+        }
     }
 
     #[test]
@@ -1070,6 +1356,7 @@ mod tests {
             notice_until: None,
             first_boot_code: None,
             first_boot_offered: true,
+            going: None,
         };
 
         for key in b"sSfF0123456789\t\r\n" {
