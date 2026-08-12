@@ -503,7 +503,7 @@ impl Sampler {
 
         let temperatures = read_temperatures(env);
         let gpu = read_gpu(env);
-        let notes = notes_about(&temperatures, gpu.as_ref());
+        let notes = notes_about(&temperatures, gpu.as_ref(), drm_card_present(env));
 
         Metrics {
             uptime_seconds: read_uptime(env),
@@ -751,7 +751,11 @@ impl Sampler {
 /// denied a number printed three lines above it. Same shape as the firmware list written for
 /// one machine, and the `Unknown`-means-debugfs-is-unmounted guess, both already in the trap
 /// list. A statement about the machine has to be computed from the machine.
-fn notes_about(temperatures: &[Temperature], gpu: Option<&Gpu>) -> Vec<String> {
+/// `card_present` is the fact [`read_gpu`] used to throw away. It returns `None` both when
+/// there is no DRM card on the machine and when there is one whose driver publishes none of
+/// the i915 frequency files — two states with opposite meanings and opposite remedies,
+/// collapsed into one value, which is the shape this repository already records twice.
+fn notes_about(temperatures: &[Temperature], gpu: Option<&Gpu>, card_present: bool) -> Vec<String> {
     let mut notes = Vec::new();
 
     if !temperatures
@@ -775,18 +779,28 @@ fn notes_about(temperatures: &[Temperature], gpu: Option<&Gpu>) -> Vec<String> {
         ));
     }
 
-    notes.push(
-        if gpu.is_some() {
-            "GPU frequency is not GPU load. A true utilisation figure needs the i915 PMU \
-             through perf_event_open, which is a syscall and so belongs in plexos-sys; \
-             frequency against the part's maximum is what can be read from sysfs today."
-        } else {
-            "No GPU frequency: either no DRM card is present, or its driver is xe, which \
-             exposes frequency under the tile rather than in the i915 files this reads. \
-             Remedy: /api/gpu reports which driver is bound."
-        }
-        .to_owned(),
-    );
+    notes.push(match (gpu, card_present) {
+        (Some(_), _) => "GPU frequency is not GPU load. A true utilisation figure needs the \
+             i915 PMU through perf_event_open, which is a syscall and so belongs in \
+             plexos-sys; frequency against the part's maximum is what can be read from \
+             sysfs today."
+            .to_owned(),
+        // A card is here and these figures are not. Which driver is bound decides that, and
+        // this does not guess which: the old wording named two possible causes -- no card,
+        // or `xe` -- and on the first machine anybody read it on, an RTX desktop, neither
+        // was true. A card was present and its driver was `nvidia`. A note that enumerates
+        // causes has to enumerate the one that is happening, and the honest statement is
+        // about what is read rather than about what is bound.
+        (None, true) => "No GPU frequency: these figures come from the i915 frequency files \
+             in sysfs, and the driver bound to the card here does not publish them -- which \
+             is the case for nvidia and amdgpu, and for xe, which puts them under the tile. \
+             Remedy: /api/gpu reports which driver is bound and what it can do."
+            .to_owned(),
+        (None, false) => "No GPU frequency: this machine has no DRM card at all, so there \
+             is no graphics device to report a frequency for. Remedy: /api/gpu tells apart \
+             a machine with no card from one whose card has no driver bound."
+            .to_owned(),
+    });
 
     notes
 }
@@ -1085,6 +1099,23 @@ fn read_temperatures(env: &impl Environment) -> Vec<Temperature> {
 /// this desk — so rather than guess at a path, this returns `None` there and `sample` says
 /// which driver to ask about. Reporting nothing is recoverable; reporting a wrong number
 /// on a dashboard is not.
+/// Whether this machine has a DRM card at all, which is a different question from whether
+/// [`read_gpu`] found anything to read.
+///
+/// It exists because the two were the same `None`, and the note built on that `None` then
+/// guessed at a cause and named the wrong one. `plexos_gpu::display_devices` makes the same
+/// distinction for the same reason, one level up: nothing there, something there with no
+/// driver, and a driver bound that produced no node are three states, not one.
+fn drm_card_present(env: &impl Environment) -> bool {
+    env.list_dir(Path::new(DRM_CLASS)).is_ok_and(|cards| {
+        cards.iter().any(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("card") && !n.contains('-'))
+        })
+    })
+}
+
 fn read_gpu(env: &impl Environment) -> Option<Gpu> {
     let cards = env.list_dir(Path::new(DRM_CLASS)).ok()?;
     let card = cards.into_iter().find(|path| {
@@ -1911,6 +1942,47 @@ ctxt 2390000
             Some(300),
             "and the minimum equals the current, which is what idle looks like -- the page \
              must not call this a load of 27%"
+        );
+    }
+
+    #[test]
+    fn a_card_with_no_frequency_files_is_told_apart_from_no_card_at_all() {
+        // `read_gpu` returns `None` for both, and the note built on that `None` used to
+        // guess: it named "no DRM card" or "the driver is xe". The first machine anybody
+        // read it on was an RTX desktop where a card was present and the driver was
+        // `nvidia`, so the note listed two causes and neither was the one happening.
+        //
+        // Two states, opposite remedies -- attach a graphics card, versus ask which driver
+        // is bound. The same distinction `plexos_gpu::display_devices` exists to make.
+        let nvidia = plexos_gpu::env::Fixture::new()
+            .file("/sys/class/drm/card0/device/vendor", "0x10de\n")
+            .file("/sys/class/drm/card0/device/uevent", "DRIVER=nvidia\n");
+        assert!(
+            drm_card_present(&nvidia),
+            "a card whose driver publishes no i915 frequency files is still a card"
+        );
+        assert!(
+            read_gpu(&nvidia).is_none(),
+            "and it has no frequency to read"
+        );
+
+        let headless = plexos_gpu::env::Fixture::new();
+        assert!(!drm_card_present(&headless));
+
+        let with_card = notes_about(&[], None, true).join(" ");
+        let without = notes_about(&[], None, false).join(" ");
+
+        assert!(
+            with_card.contains("does not publish them"),
+            "a card that is present must be reported as present: {with_card}"
+        );
+        assert!(
+            !with_card.contains("no DRM card at all"),
+            "and must never be described as absent: {with_card}"
+        );
+        assert!(
+            without.contains("no DRM card at all"),
+            "a machine with no card says so plainly: {without}"
         );
     }
 
