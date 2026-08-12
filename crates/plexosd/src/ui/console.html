@@ -423,13 +423,16 @@
      a ring around a third of the page. */
   #content:focus { outline: none; }
 
+  /* Sentence case, not upper. The texts are written "Healthy", "Slot b", "up 1 h 34 min",
+     and the sheet was shouting them: a duration came out as "UP 1 H 34 MIN", where the
+     units are letters and upper case makes them read as an abbreviation of something else.
+     Upper case suits a label -- the eyebrow on a card -- and not a value, and every one of
+     these is a value. */
   .badge {
-    font-size: .75rem;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    padding: .2rem .5rem;
-    border: 1px solid var(--line);
-    border-radius: 999px;
+    font-size: var(--t-micro);
+    padding: .2rem .55rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
     color: var(--muted);
     white-space: nowrap;
   }
@@ -602,7 +605,27 @@
 
   .scroll { overflow-x: auto; }
 
-  footer { margin-top: 2rem; color: var(--muted); font-size: .85rem; }
+  /* THE FOOTER, declared once.
+     It was two rules five hundred lines apart -- one setting the margin and colour, the
+     other adding the border -- and one span in it reading "refreshed 6:51:24 PM", which is
+     a fragment rather than a foot to a page. It says what this console is and when it last
+     heard from the machine, on one quiet line. */
+  footer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--gap-inline) var(--gap-control);
+    margin-top: var(--s-6);
+    padding-top: var(--s-4);
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: var(--t-micro);
+  }
+  .foot-id { display: flex; align-items: baseline; gap: var(--gap-inline); }
+  .foot-name { font-weight: 600; color: var(--ink); }
+  /* A dot that separates rather than decorates, and is not read aloud. */
+  .foot-sep { opacity: .5; }
 
   .error {
     margin: 1.5rem 0;
@@ -711,43 +734,104 @@
      placeholders cut off mid-word. Scoped to this card rather than broadened to every
      `.field`, because the install card's confirmation field has been looked at on a
      machine in its present shape and this is not the change to alter it in. */
-  #wifi .field { margin-top: .9rem; }
-  #wifi .field > label {
-    display: block;
-    margin-bottom: .3rem;
-    color: var(--muted);
-    font-size: .75rem;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-  }
-  #wifi .field input { width: 100%; min-width: 0; }
+  /* ------------------------------------------------------------------------------------
+     ONE FIELD, EVERYWHERE.
 
-  .form .field { margin-top: .9rem; }
-  .form .field > label {
-    display: block;
-    margin-bottom: .3rem;
-    color: var(--muted);
-    font-size: .75rem;
+     This rule was written twice -- `#wifi .field > label` and `.form .field > label`, the
+     same six declarations with the same values -- because the wireless card is not a
+     `.form` and needed the same thing. Two copies of one rule is how a page ends up with a
+     field that is 70 px wide beside one that is 1000, which is what "update channel" and
+     "update service" were: `.form input[type=text]` had `width: 100%` and no ceiling, and
+     `<select>` matched no form rule at all, so it kept whatever the operating system draws.
+
+     A field is a label, a control, and optionally a line of help. It has a width policy,
+     and that policy is on the field rather than on the control -- so a `<select>` and an
+     `<input>` in the same form are the same width without either of them knowing about the
+     other.
+     ------------------------------------------------------------------------------------ */
+  .field {
+    display: grid;
+    gap: var(--s-1);
+    margin-top: var(--s-4);
+    /* A ceiling, because a text field the width of a 1600 px card is not easier to type an
+       address into -- it is only harder to see where it ends. */
+    max-width: 30rem;
+  }
+  .field > label {
+    font-size: var(--t-micro);
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: .06em;
+    letter-spacing: var(--track-eyebrow);
+    color: var(--muted);
   }
-  .form input[type=text] {
-    width: 100%;
-    flex: 1 1 12rem;
-    min-width: 0;
-    padding: .55rem .7rem;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--bg);
-    color: var(--ink);
+  .field > input, .field > select { width: 100%; min-width: 0; }
+  /* The help under a control, rather than a paragraph between two of them. */
+  .field > .hint { margin: 0; font-size: var(--t-meta); }
+  /* Addresses and paths get more room; a hostname and a timezone do not need it. */
+  .field.is-wide { max-width: 44rem; }
+
+  /* Machine data is monospace; a name a person chose from a list is not. Applied by what
+     the value *is* rather than by which form it is in, which is how the timezone selector
+     ended up in the same typeface as an IP address. */
+  .field input[type=text], .field input[type=password] {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: .9rem;
+    font-size: var(--t-meta);
   }
-  .form input[type=text]:focus {
+  .field input:focus, .field select:focus {
     outline: 2px solid var(--accent);
     outline-offset: -1px;
     border-color: var(--accent);
   }
+
+  /* The native select is the one control that cannot be styled into agreement with the
+     rest -- its arrow is drawn by the operating system and is a different shape, size and
+     colour on every machine this console is opened on. `appearance: none` takes it away and
+     this puts back one that matches the page.
+     The chevron is a data URI because this page has no external assets and never will. Its
+     colour is a fixed mid-grey rather than `currentColor`, which an SVG in a
+     `background-image` cannot see: the value chosen clears 4.5:1 against both the light
+     card and the dark one, so it is legible in either without a second copy per theme. */
+  select {
+    appearance: none;
+    padding-right: 2rem;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5l5-5' fill='none' stroke='%238a94a1' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right .7rem center;
+    background-size: .7rem .47rem;
+  }
+
+  /* A checkbox and its label on one line, with the label in the case a person reads. It was
+     an uppercase tracked label -- the eyebrow treatment -- beside a native box, so the
+     control read as a section heading with a tick next to it. */
+  .check {
+    display: flex;
+    align-items: center;
+    gap: var(--gap-inline);
+    margin-top: var(--s-4);
+  }
+  /* Inside a field the field already provides the spacing; two margins would stack. */
+  .field > .check { margin-top: 0; }
+  /* A field is a grid, so its children stretch unless told otherwise -- which pulled the
+     segmented control to the full 30rem of the field and left two words floating in it. */
+  .field > .segmented { justify-self: start; }
+  .check > input[type=checkbox] {
+    width: 1.05rem;
+    height: 1.05rem;
+    min-height: 0;
+    margin: 0;
+    flex: 0 0 auto;
+    /* One line, and it themes the native tick without replacing the control -- which keeps
+       the keyboard behaviour and the platform's own focus handling. */
+    accent-color: var(--accent);
+  }
+  .check > label {
+    font-size: var(--t-body);
+    text-transform: none;
+    letter-spacing: normal;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  input[type=radio] { accent-color: var(--accent); }
 
   /* ------------------------------------------------------------------
      The terminal.
@@ -1381,7 +1465,13 @@
     padding: 0 .7rem;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
-    background: var(--surface-card);
+    /* `background-color`, never the `background` shorthand. The shorthand resets
+       `background-image` to none, and this rule sits after the one that gives `<select>` its
+       chevron -- so written as `background` it took the arrow away and left a control that
+       looked exactly like a text field, which is worse than the native arrow it replaced.
+       Caught by rendering it; a shorthand quietly clearing a longhand set elsewhere is
+       invisible in the source. */
+    background-color: var(--surface-card);
     color: var(--ink);
     font: inherit;
     font-size: var(--t-body);
@@ -1417,7 +1507,7 @@
   .progress.failed { background: var(--unavailable-soft); }
   .progress .log { border-radius: var(--radius-sm); }
 
-  footer { border-top: 1px solid var(--line); padding-top: 1rem; }
+
 
   /* ------------------------------------------------------------------------------------
      The Overview's order, and the one case where it changes.
@@ -2687,14 +2777,14 @@
         <h2>Plex</h2>
         <p class="lede">The media server itself: what is installed, what Plex offers, and how
            to move between them.</p>
-        <section class="card plex" id="plex" aria-live="polite">
+        <section class="card plex" id="plex" data-fold="plex" aria-live="polite">
           <h3>Plex Media Server</h3>
           <p class="empty">Loading…</p>
         </section>
         <!-- Every stream, in full. The rail on the Overview shows the first few compactly and
              points here; this is where all of them belong, with the whole video and audio
              path for each. Same poll, same data, two densities. -->
-        <section class="card plex streams" id="streams" aria-live="polite">
+        <section class="card plex streams" id="streams" data-fold="streams" aria-live="polite">
           <div class="np-head">
             <h3>Active streams</h3>
             <span class="count" id="streams-count"></span>
@@ -2716,6 +2806,15 @@
           <p class="empty">Loading…</p>
         </section>
         <div id="storage-disks"></div>
+        <!-- Moved here from System. Installing writes this running system onto a disk, and a
+             disk is what this view is about; under System it sat below three cards about
+             updates, which is a different subject that happens to share the word "install".
+             It stays last, stays folded, and still asks for the disk's name to be typed --
+             the one operation on this console that destroys data which was never its own. -->
+        <section class="card plex" id="install" data-fold="install" aria-live="polite">
+          <h3>Install to a disk</h3>
+          <p class="empty">Loading…</p>
+        </section>
       </section>
 
       <!-- ----------------------------------------------------------------- NETWORK -->
@@ -2749,7 +2848,7 @@
              is named here and pointed at rather than folded into the card above. An owner
              reading "update available" has to be able to tell which of the two things it is
              about; a system update never changes the Plex version, and vice versa. -->
-        <section class="card plex" id="update-plex" aria-live="polite">
+        <section class="card plex" id="update-plex" data-fold="update-plex" aria-live="polite">
           <h3>Plex Media Server</h3>
           <p class="empty">Loading…</p>
         </section>
@@ -2781,10 +2880,6 @@
         </details>
 
         <div id="sys-settings"></div>
-        <section class="card plex" id="install" data-fold="install" aria-live="polite">
-          <h3>Install to a disk</h3>
-          <p class="empty">Loading…</p>
-        </section>
       </section>
 
       <!-- ------------------------------------------------------------------ EVENTS -->
@@ -2798,7 +2893,7 @@
              already paid for that twice, with the process table and the activity card's
              disclosure. It writes `data-filter` on the group below and CSS does the rest, so
              nothing has to be re-applied after a redraw. -->
-        <div class="segmented" role="group" aria-label="Which events to show">
+        <div class="segmented" id="events-filter" role="group" aria-label="Which events to show">
           <button class="seg on" data-filter="all" aria-pressed="true">All</button>
           <button class="seg" data-filter="system" aria-pressed="false">System</button>
           <button class="seg" data-filter="plex" aria-pressed="false">Plex</button>
@@ -2826,6 +2921,12 @@
       </section>
 
       <footer>
+        <span class="foot-id">
+          <span class="foot-name">MediaLith</span>
+          <span id="foot-version"></span>
+          <span class="foot-sep" aria-hidden="true">·</span>
+          <span id="foot-host"></span>
+        </span>
         <span id="refreshed"></span>
       </footer>
     </div>
@@ -3347,7 +3448,7 @@ function addressingCard() {
   const net = settingsView ? ((settingsView.config || {}).network || { mode: "dhcp" }) : null;
 
   return `
-    <div class="card form" id="net-config">
+    <div class="card form${foldClass("net-config")}" id="net-config" data-fold="net-config">
       <h3>IP configuration</h3>
       ${!net ? `<p class="empty">Loading…</p>` : `
       <p class="hint">DHCP is the default and is right for almost every appliance. A fixed
@@ -3355,9 +3456,17 @@ function addressingCard() {
          a router's port forward, or a client that will not use its name.</p>
       <div class="field">
         <label for="mode-dhcp">Addressing</label>
-        <div class="row">
-          <button id="mode-dhcp" class="${net.mode === "static" ? "ghost" : ""}">DHCP</button>
-          <button id="mode-static" class="${net.mode === "static" ? "" : "ghost"}">Static</button>
+        <!-- A segmented choice, not two buttons. As a primary beside a ghost it read as
+             "do this / or do that" -- two actions of unequal weight, where the heavier one
+             changed depending on which was already in force, so the control announced the
+             current state by making the *other* option look like the thing to press. This is
+             one control with two exclusive positions, and "aria-pressed" says which.
+             Quoted with quotation marks: a backtick in here would end the template. -->
+        <div class="segmented" role="group" aria-label="Addressing">
+          <button id="mode-dhcp" class="seg${net.mode === "static" ? "" : " on"}"
+                  aria-pressed="${net.mode === "static" ? "false" : "true"}">DHCP</button>
+          <button id="mode-static" class="seg${net.mode === "static" ? " on" : ""}"
+                  aria-pressed="${net.mode === "static" ? "true" : "false"}">Static</button>
         </div>
       </div>
       ${net.mode === "static" ? `
@@ -3408,7 +3517,8 @@ function updatesCard() {
   // branch each carrying the id is exactly what `no_id_is_given_to_two_elements` exists to
   // catch, and it caught this one before it reached a machine.
   return `
-    <div class="card form" id="update-config">
+    <div class="card form${foldClass("update-config")}" id="update-config"
+         data-fold="update-config">
       <h3>System updates</h3>
       ${!c ? `<p class="empty">Loading…</p>` : `
       <p class="hint">These settings are about MediaLith itself — the kernel, the drivers,
@@ -3423,7 +3533,7 @@ function updatesCard() {
            beta release, and a release reaches stable by being promoted — the same bytes,
            tested, published again.</p>
       </div>
-      <div class="field">
+      <div class="field is-wide">
         <label for="set-update-url">Update service</label>
         <input type="text" id="set-update-url" autocomplete="off" spellcheck="false"
                placeholder="address of an update service" value="${esc(service.url || "")}">
@@ -3432,10 +3542,16 @@ function updatesCard() {
            release by itself, which is how every MediaLith ships today.</p>
       </div>
       <div class="field">
-        <label for="set-update-check">
+        <!-- The box outside the label rather than inside it. It was within, so it inherited
+             the field label's treatment -- upper case and tracked -- and the control read as
+             a section heading with a tick beside it. The "for" attribute is what still joins
+             them, so the whole phrase is a click target either way. Quoted with quotation
+             marks and not with backticks: this comment is inside a template literal, and a
+             backtick in there ends it. -->
+        <div class="check">
           <input type="checkbox" id="set-update-check"${service.check === false ? "" : " checked"}>
-          Check for releases automatically
-        </label>
+          <label for="set-update-check">Check for releases automatically</label>
+        </div>
         <p class="hint">About once a day. Checking only: nothing is downloaded and nothing
            is installed without somebody pressing the button.</p>
       </div>
@@ -5592,7 +5708,12 @@ function renderEvents() {
     plex: [plexInstall, plexStart].filter(Boolean).length,
   };
   counts.all = counts.system + counts.plex;
-  for (const button of document.querySelectorAll(".segmented button.seg")) {
+  // Scoped to this control by id, not to every `.seg` on the page. The segmented control is
+  // a primitive and the addressing choice on Network is one too -- a page-wide selector put
+  // a count of "0" on its DHCP and Static buttons, which is the same mistake the click
+  // handler made one commit earlier: a shared primitive addressed as though it were the only
+  // instance of itself.
+  for (const button of document.querySelectorAll("#events-filter button.seg")) {
     const n = counts[button.dataset.filter] ?? 0;
     button.disabled = n === 0;
     let tally = button.querySelector(".seg-count");
@@ -5714,6 +5835,18 @@ function render(status) {
   const since = humanUptime(status.uptime_seconds);
   uptime.textContent = since ? "up " + since : "";
   uptime.hidden = !since;
+  // The foot of the page says what this console is and when it last heard from the machine.
+  // The version and the hostname come from the same document every other field does, so the
+  // footer cannot drift from the header above it.
+  const footVersion = document.getElementById("foot-version");
+  if (footVersion) footVersion.textContent = (status.product || {}).version || "";
+  // The name the kernel is actually using, and the stored one only if there is no live
+  // answer -- the same order `renderSnapshot` uses, so the two cannot say different names.
+  const footHost = document.getElementById("foot-host");
+  if (footHost) {
+    const view = settingsView || {};
+    footHost.textContent = view.hostname_now || ((view.config || {}).system || {}).hostname || "";
+  }
   document.getElementById("refreshed").textContent =
     "refreshed " + new Date().toLocaleTimeString();
 
@@ -8122,7 +8255,12 @@ document.addEventListener("click", event => {
   // The events filter. Delegated like everything else here, and it writes one attribute on
   // the container -- the rows answer to CSS, so a redraw of the list needs to know nothing
   // about what was chosen and cannot lose it.
-  const seg = event.target && event.target.closest ? event.target.closest("button.seg") : null;
+  // `[data-filter]` and not merely `.seg`: the segmented control is a primitive and the
+  // addressing choice on Network uses it too, with handlers of its own. Without the
+  // attribute in the selector this arm swallowed those clicks -- it ends in `return` -- and
+  // wrote `undefined` into the events filter on the way past.
+  const seg = event.target && event.target.closest
+    ? event.target.closest("button.seg[data-filter]") : null;
   if (seg) {
     const group = seg.closest(".segmented");
     for (const b of group.querySelectorAll("button.seg")) {

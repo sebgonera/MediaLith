@@ -5316,9 +5316,20 @@ console.log("OK");
         // check for itself: whether Plex answers TLS on 32400, and under a certificate a
         // browser accepts for a bare address, is a question about Plex. If it turns out
         // not to, the remedy is the scheme in this one anchor.
+        // One exception, and it is not a loophole: an XML namespace. `xmlns='http://www.
+        // w3.org/2000/svg'` is an identifier and never a request -- no browser has ever
+        // dereferenced it -- and it is required for an inline SVG in a `data:` URI to parse
+        // at all, which is how this page draws the chevron on a `<select>` without an
+        // external asset. What this test exists to catch is a resource the page would go and
+        // *fetch*; a namespace is the opposite of one, and skipping it by the attribute that
+        // introduces it keeps a CDN or a font failing exactly as before.
         let mut absolute = Vec::new();
         for scheme in ["http://", "https://"] {
             for (index, _) in PAGE.match_indices(scheme) {
+                let before = &PAGE[..index];
+                if before.ends_with("xmlns='") || before.ends_with("xmlns=\"") {
+                    continue;
+                }
                 absolute.push(&PAGE[index + scheme.len()..]);
             }
         }
