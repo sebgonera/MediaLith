@@ -162,7 +162,14 @@ list that goes stale in one of them.
    screen reports otherwise. Both slots must carry signed UKIs before it is switched on, or
    ADR-0005's rollback lands on a UKI the firmware refuses.
 
-2. **`docs/PRODUCTION-READINESS.md`** — the distance between this and something that can be
+2. **A MediaLith update service that exists.** ADR-0020 built the appliance's half and the
+   publishing half, and proved both on hardware — but there is no host, no domain and no
+   published tree, so every appliance ships with `[update_service].url` empty and never
+   looks. The remaining work is not code: somewhere to put a static directory, and the
+   clock-synchronisation item below, because a machine whose RTC is wrong cannot validate
+   TLS against a real service and this deliberately does not weaken that.
+
+3. **`docs/PRODUCTION-READINESS.md`** — the distance between this and something that can be
    handed to a person who did not build it, with a revision note recording what has closed
    since it was written. Nothing in it is architectural. The items with no owner: a
    development root key with no ceremony and no way to revoke *itself*, no update channel
@@ -174,7 +181,7 @@ list that goes stale in one of them.
    whether it fits, which is the half that turns a full partition into a failure rather than
    a warning.
 
-3. **Run the hardware that has never been run.** `xe` has its firmware in the initrd, the
+4. **Run the hardware that has never been run.** `xe` has its firmware in the initrd, the
    `xe` debugfs layout is now read the way `xe` actually creates it, and no Arc card has
    ever been plugged in — so the claim is shipped-and-unverified rather than false, and the
    only thing that can close it is a card.
@@ -287,6 +294,35 @@ of them.
 
 The root key is a development key: its private half is on the build host, and every place
 that reports a signature says so, including the appliance's own log line.
+
+**And the appliance now finds its own releases (ADR-0020).** Channels were decided by
+nobody: the manifest has carried the field since v1, `sign-bundle.sh` wrote `dev` into every
+one, and `[updates].channel` has defaulted to `stable` since the schema was written with no
+readers at all — so a machine asking for stable installed development builds without comment.
+That is the fourth complete-tested-uncalled design this project has found.
+
+An update service is now files on a web server: `channels/<channel>.json` names a release,
+`releases/<release>/` holds the artefacts once and a small signed manifest per channel beside
+them. Discovery resolves an address and nothing else — everything after it is the path that
+already existed, so the unsigned channel file can only choose which *signed* manifest gets
+evaluated.
+
+**All of it has run on the reference laptop, in one sitting**, in this order: the machine
+reported itself up to date against a feed; a newer release appeared and it **found it without
+anybody typing an address**, showing the release notes and the signing key; it installed from
+the service into the inactive slot and the gate made it permanent; a release published only to
+`dev` was invisible to the same machine set to `stable`, became visible on `beta` and then on
+`stable` as the **same bytes** were promoted (`sha256sum` identical across all three); a
+manifest edited after signing was refused; a corrupted `usr.erofs` behind a valid manifest was
+refused after the download and before any partition was written; a genuinely signed older
+release was refused by the anti-rollback counter with its signer named; and a deliberately
+broken release was installed, booted, and **undid itself** — `plexos-0.1.0.202608120253+0-3.efi`
+on the ESP, three tries offered and three used, back on the previous release in seven minutes
+with nobody at the machine and the update channel and service address still configured
+afterwards.
+
+The trap that came out of the last one is in the list below and is the one worth knowing: a
+failed update raises the anti-rollback floor before anyone knows it failed.
 
 **And nothing runs unattended any more.** `0.1.0.202607301247` — the first release
 installed through the signed path end to end — boots with `plexos-init` still alive as
@@ -411,7 +447,8 @@ decides, and `http::refusal` is the only thing that calls it.
 | `/api/plex/sessions` | What Plex is playing now: who, on what, and what is happening to the picture and the sound (ADR-0018). **A `POST`** for the same reason and a stronger one — a title, a username and a device name are what somebody in the house is doing this evening |
 | `/api/setup` | The first-boot flow: ordered steps, computed not stored (ADR-0016) |
 | `/api/install` | Disks, refusals, and installing MediaLith onto one (ADR-0016) |
-| `/api/update` | Check and install a signed update; gate verdict; rollback record (ADR-0005/0006) |
+| `/api/update` | Check and install a signed update; gate verdict; rollback record (ADR-0005/0006). A body with no `source` means "the release the update service offered" |
+| `/api/update/check` | Ask the configured update service what it has, and install nothing (ADR-0020) |
 | `/api/provision` | Install Plex from Plex's own packages (ADR-0010) |
 | `/api/config`, `/api/network` | Hostname, timezone, static addressing (ADR-0008) |
 | `/api/shares` | Network shares the library lives on |
@@ -429,6 +466,9 @@ decides, and `http::refusal` is the only thing that calls it.
 | `tools/sign-bundle.sh` | Turns a built bundle into `manifest.json` + `.sig`, then verifies it with the appliance's own verifier |
 | `tools/publish-update.sh` | Serves the bundle; refuses one with no signed manifest |
 | `tools/break-bundle.sh` | Corrupts an image and re-signs it, to exercise ADR-0005 |
+| `tools/publish-release.sh` | Puts a signed bundle into a static update tree an appliance can poll (ADR-0020) |
+| `tools/promote-release.sh` | Publishes the *same bytes* to another channel; refuses if any digest moved |
+| `tools/publish-revocations.sh` | Copies a root-signed revocation list into every release directory |
 | `plexos-sign` | `root-key`, `signing-key`, `certify`, `sign`, `check`, `revoke`, `trust` |
 
 **State on `/var`** — the only surface a rollback leaves alone, which is why every one of
@@ -1176,6 +1216,34 @@ and its certificate — sign with the second one.
   about a picture nothing was decoding. The page does not draw it in that state, which is
   what made it invisible: a field that is wrong only where nothing reads it is a field that
   becomes wrong somewhere that does.
+- **A failed update raises the anti-rollback floor before it is known to be failed, so the
+  release you were running becomes uninstallable.** The sequence is recorded when the boot
+  entry is installed — deliberately, because recording it earlier would let one failed
+  download refuse a release for ever. The sibling case had never been run: install a broken
+  release, let ADR-0005 hand the machine back, and the floor now stands *above* the release
+  the machine is running. Republishing the previous good release — the obvious recovery
+  instinct — is refused as a downgrade, correctly and unhelpfully. Nothing is bricked and
+  the console works; the remedy is to publish a **higher** stamp, which any new build is.
+  Made worse here by the experiment itself: `break-bundle.sh` takes a version, and stamping
+  the broken bundle thirty minutes into the future put the floor above real time, so the
+  next genuine build was refused too. **Stamp a deliberately broken bundle one minute above
+  the running release, never into the future.**
+- **A tool that calls another tool is broken by that tool gaining a required argument, and
+  nothing says so until somebody reaches for it.** `sign-bundle.sh` gained a mandatory
+  `--channel`; `break-bundle.sh` calls it and would have failed at the moment somebody was
+  half-way through a rollback experiment. Grep for callers of a script when changing its
+  interface, exactly as for a constant.
+- **A test that spawns must both hold the lock and collect its own child.** Four `pty` tests
+  forked without `CHILD_PROCESS_TESTS` and never reaped, so `process::reap` — `waitpid(-1)`,
+  process-wide — collected a shell that had exited 0 and told the SIGKILL test it had a
+  status. It failed on a twelve-core host and passed on a two-core one, which is the whole
+  character of the bug: more tests in flight, more chances for somebody else's zombie to be
+  the one reaped. Holding the lock is not enough on its own, because a *finished* child is
+  still there after the lock is released.
+- **`sfdisk` is translated, and the GPT tests read English out of it.** On a Polish host
+  `sfdisk --list` answers `Typ etykiety dysku: gpt` and a test grepping for `Disklabel type`
+  fails about bytes that are perfect. Any test that greps a util-linux program's output has
+  to run it under `LC_ALL=C`.
 - **Break the image, not the manifest, when testing rollback.** Overwriting a data block
   and recomputing only the manifest digest leaves the hash tree and root hash intact, so
   the updater accepts the bundle — correctly, because every check it makes asks whether the
