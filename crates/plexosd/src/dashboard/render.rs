@@ -73,7 +73,69 @@ pub enum Screen {
         /// What is happening.
         choice: Action,
     },
+    /// What is in range, and where the cursor is.
+    Wireless {
+        /// One row per network, strongest first, as the last scan found them.
+        rows: Vec<WirelessRow>,
+        /// Which row the cursor is on. Always in range of `rows` when `rows` is not empty.
+        choice: usize,
+        /// Whether a scan is holding the radio right now.
+        scanning: bool,
+        /// The last thing that went wrong or could not be done, with its remedy.
+        note: Option<String>,
+    },
+    /// Typing a passphrase for a chosen network.
+    ///
+    /// **The passphrase is not in here.** Only how many characters have been typed, which is
+    /// all the screen needs in order to draw a mask. What somebody typed lives in the
+    /// keyboard handler's own state and reaches the supplicant without passing through the
+    /// thing whose whole job is to put strings on a monitor.
+    WirelessKey {
+        /// The network being joined.
+        ssid: String,
+        /// How many characters have been typed. Never the characters.
+        typed: usize,
+        /// Whether this network takes no passphrase at all.
+        open: bool,
+    },
+    /// Associating, or explaining why it did not work.
+    WirelessJoining {
+        /// The network being joined.
+        ssid: String,
+        /// Where the attempt has got to, in the radio's own words.
+        detail: String,
+        /// What went wrong, with a remedy.
+        error: Option<String>,
+    },
+    /// It worked.
+    WirelessJoined {
+        /// The network this machine is now on.
+        ssid: String,
+    },
 }
+
+/// One network on the wireless list: what the screen draws, and what choosing it needs.
+///
+/// A projection rather than a [`crate::wifi::Network`], for the same reason the pairing
+/// screen carries a URL rather than a secret — the render layer is given what it draws and
+/// nothing else. A BSSID and a dBm figure are neither.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WirelessRow {
+    /// The name, as it is broadcast.
+    pub ssid: String,
+    /// Signal as whole bars out of [`BARS`].
+    pub bars: u8,
+    /// Whether this is the 5 GHz band. Two rows with one name and very different signals
+    /// are otherwise inexplicable.
+    pub five_ghz: bool,
+    /// What credential joining it would take.
+    pub security: crate::wifi::Security,
+    /// The network this machine already remembers.
+    pub saved: bool,
+}
+
+/// How many bars a signal is drawn as.
+pub const BARS: u8 = 4;
 
 /// How wide the laid-out content is, whatever the screen's own width.
 ///
@@ -161,6 +223,19 @@ pub fn frame(screen: &Screen, facts: &Facts, rows: usize, columns: usize) -> Str
         Screen::Power { choice } => power(*choice, facts),
         Screen::PowerConfirm { choice } => power_confirm(*choice, facts),
         Screen::PowerGoing { choice } => power_going(*choice),
+        Screen::Wireless {
+            rows,
+            choice,
+            scanning,
+            note,
+        } => wireless(rows, *choice, *scanning, note.as_deref()),
+        Screen::WirelessKey { ssid, typed, open } => wireless_key(ssid, *typed, *open),
+        Screen::WirelessJoining {
+            ssid,
+            detail,
+            error,
+        } => wireless_joining(ssid, detail, error.as_deref()),
+        Screen::WirelessJoined { ssid } => wireless_joined(ssid, facts),
     };
 
     place(&lines, rows, columns)
@@ -259,11 +334,24 @@ fn dashboard(facts: &Facts) -> Vec<Line> {
         lines.push(Line::blank());
         lines.push(Line::plain("Press P to pair a browser"));
     } else {
-        {
-            // No misleading invitation. Pressing P on a machine with no address would
-            // produce a QR code pointing nowhere, so the screen does not offer it.
-            lines.push(Line::plain("Waiting for a network address..."));
-            lines.push(Line::blank());
+        // No misleading invitation. Pressing P on a machine with no address would produce a
+        // QR code pointing nowhere, so the screen does not offer it.
+        lines.push(Line::plain("Waiting for a network address..."));
+        lines.push(Line::blank());
+        // The remedy depends on what this machine has, and getting it wrong is the
+        // `operstate` mistake in a friendlier place: telling somebody with no Ethernet
+        // socket to plug in a cable is telling them the appliance is unusable. This is the
+        // one moment the wireless list is not a convenience, so it is named here.
+        if facts.wireless.is_some() {
+            lines.push(Line::drawn(
+                format!(
+                    "{}Connect a cable, or press W to join a Wi-Fi network.{}",
+                    sgr::DIM,
+                    sgr::RESET
+                ),
+                51,
+            ));
+        } else {
             lines.push(Line::drawn(
                 format!(
                     "{}Connect this machine to your network with a cable.{}",
@@ -282,7 +370,7 @@ fn dashboard(facts: &Facts) -> Vec<Line> {
         identity(facts).chars().count(),
     ));
     lines.push(Line::blank());
-    lines.push(footer(facts.address().is_some()));
+    lines.push(footer(facts));
     lines
 }
 
@@ -299,10 +387,18 @@ fn identity(facts: &Facts) -> String {
 }
 
 /// The keys, and only the ones that do something.
-fn footer(can_pair: bool) -> Line {
+///
+/// Two of them are conditional, and both conditions are the same idea: a key that leads
+/// nowhere is worse than a key that is not offered. P with no address produces a QR code
+/// pointing at nothing; W on a machine with no radio produces a list that can never have
+/// anything in it.
+fn footer(facts: &Facts) -> Line {
     let mut keys = Vec::new();
-    if can_pair {
+    if facts.address().is_some() {
         keys.push("P  Pair a browser");
+    }
+    if facts.wireless.is_some() {
+        keys.push("W  Wi-Fi");
     }
     keys.push("D  Details");
     keys.push("O  Power");
@@ -609,7 +705,13 @@ fn details(facts: &Facts) -> Vec<Line> {
             25,
         ));
         for failure in failures {
-            lines.push(Line::plain(format!("  {failure}")));
+            // Padded to the same column as the fields above, for the reason `columns`
+            // records: every line is centred on its own width, so a short one sits somewhere
+            // else entirely and the block stops looking like a block.
+            lines.push(Line::plain(format!(
+                "  {failure:<width$}",
+                width = CONTENT - 2
+            )));
         }
     }
 
@@ -618,6 +720,350 @@ fn details(facts: &Facts) -> Vec<Line> {
         format!("{}ESC  back{}", sgr::DIM, sgr::RESET),
         9,
     ));
+    lines
+}
+
+/// A signal as a bar meter, in characters the console font certainly has.
+///
+/// Not a block-drawing glyph and not a bullet, for the reason the QR renderer already
+/// records: the font here is whichever one the kernel loaded, and a missing glyph is a blank
+/// cell that reads as a bug rather than as a font.
+fn bars(filled: u8) -> String {
+    let filled = filled.min(BARS) as usize;
+    format!(
+        "[{}{}]",
+        "#".repeat(filled),
+        " ".repeat(BARS as usize - filled)
+    )
+}
+
+/// What a network asks for, in as few words as fit beside its name.
+fn security_word(security: crate::wifi::Security) -> &'static str {
+    use crate::wifi::Security;
+    match security {
+        Security::Open => "open",
+        Security::Wep => "WEP",
+        Security::Psk => "WPA2",
+        Security::Sae => "WPA3",
+        Security::Enterprise => "802.1X",
+    }
+}
+
+/// A left half and a right half in a column of exactly `total` characters.
+///
+/// **Exactly**, and that is the whole reason this exists. [`place`] centres every line on its
+/// own width, so a list whose rows are different lengths is a list with no left edge: five
+/// networks came out fanned across the screen, each one starting somewhere else, because the
+/// text on the right of each row is a different length. Rows of one width centre as a block.
+///
+/// The left half is cut when there is no room, because the right half is the part that says
+/// whether the network can be joined at all — and a name cut to `Sebastian's Netw...` is
+/// still recognisable, where a signal strength cut in half is not.
+fn columns(left: &str, right: &str, total: usize) -> String {
+    let right_width = right.chars().count();
+    let room = total.saturating_sub(right_width + 2);
+    let left: String = if left.chars().count() > room {
+        left.chars()
+            .take(room.saturating_sub(3))
+            .chain("...".chars())
+            .collect()
+    } else {
+        left.to_owned()
+    };
+    let gap = total.saturating_sub(left.chars().count() + right_width);
+    format!("{left}{}{right}", " ".repeat(gap.max(1)))
+}
+
+/// One row of the wireless list.
+fn wireless_row(selected: bool, row: &WirelessRow) -> Line {
+    let mut right = vec![bars(row.bars)];
+    if row.five_ghz {
+        right.push("5 GHz".to_owned());
+    }
+    right.push(security_word(row.security).to_owned());
+    if row.saved {
+        right.push("saved".to_owned());
+    }
+    // Said on the row rather than only when it is chosen, because somebody scanning a list
+    // for the network they know the name of should not have to press Enter on it to find
+    // out this appliance will not join it.
+    if row.security.refusal().is_some() {
+        right.push("cannot join".to_owned());
+    }
+    let right = right.join("  ");
+
+    let left = format!("{}  {}", if selected { ">" } else { " " }, row.ssid);
+    let text = columns(&left, &right, CONTENT);
+    let width = text.chars().count();
+    if selected {
+        Line::drawn(
+            format!("{}{}{text}{}", sgr::BOLD, sgr::CYAN, sgr::RESET),
+            width,
+        )
+    } else {
+        Line::drawn(text, width)
+    }
+}
+
+/// The wireless list.
+///
+/// This screen exists for one machine: the one with no Ethernet socket, or with one nobody
+/// can reach a cable to. Every other way into this appliance — the console page, the QR
+/// code, the pairing — needs an address first, and an address needs a network. So this is
+/// the only screen here that is not a convenience.
+fn wireless(rows: &[WirelessRow], choice: usize, scanning: bool, note: Option<&str>) -> Vec<Line> {
+    let mut lines = vec![
+        Line::drawn(format!("{}WIRELESS{}", sgr::BOLD, sgr::RESET), 8),
+        Line::blank(),
+        Line::blank(),
+    ];
+
+    if rows.is_empty() {
+        // The two empty states need different sentences and the same screen. "Still
+        // looking" and "looked, found nothing" take opposite actions from the person
+        // reading them, and a list that says neither is a machine that appears to have
+        // stopped.
+        if scanning {
+            lines.push(Line::plain("Looking for networks..."));
+        } else {
+            lines.push(Line::plain("Nothing in range."));
+            lines.push(Line::blank());
+            lines.push(Line::drawn(
+                format!(
+                    "{}A 5 GHz network can be in the next room and out of range here.{}",
+                    sgr::DIM,
+                    sgr::RESET
+                ),
+                60,
+            ));
+        }
+    } else {
+        for (index, row) in rows.iter().enumerate() {
+            lines.push(wireless_row(index == choice, row));
+        }
+        if scanning {
+            lines.push(Line::blank());
+            lines.push(Line::drawn(
+                format!("{}Still looking...{}", sgr::DIM, sgr::RESET),
+                16,
+            ));
+        }
+    }
+
+    if let Some(note) = note {
+        lines.push(Line::blank());
+        lines.push(Line::drawn(
+            format!("{}{note}{}", sgr::YELLOW, sgr::RESET),
+            note.chars().count(),
+        ));
+    }
+
+    lines.push(Line::blank());
+    lines.push(Line::blank());
+    lines.push(Line::drawn(
+        format!(
+            "{}Up/Down  choose      Enter  join      R  scan again      ESC  back{}",
+            sgr::DIM,
+            sgr::RESET
+        ),
+        66,
+    ));
+    lines
+}
+
+/// Typing a passphrase, drawn from a count rather than from the text.
+///
+/// The mask is the whole security property of this screen made visible: `typed` is a number,
+/// so there is nothing here that *could* be painted in clear even by a mistake. It is also
+/// why the count is shown at all — somebody typing a long passphrase on a keyboard they
+/// cannot see the output of needs to know the machine is receiving it.
+fn wireless_key(ssid: &str, typed: usize, open: bool) -> Vec<Line> {
+    let mut lines = vec![
+        Line::drawn(format!("{}JOIN A NETWORK{}", sgr::BOLD, sgr::RESET), 14),
+        Line::blank(),
+        Line::drawn(
+            format!("{}{ssid}{}", sgr::BOLD, sgr::RESET),
+            ssid.chars().count(),
+        ),
+        Line::blank(),
+        Line::blank(),
+    ];
+
+    if open {
+        lines.push(Line::plain("This network has no passphrase."));
+        lines.push(Line::blank());
+        lines.push(Line::drawn(
+            format!(
+                "{}Anything sent over it can be read by anyone in range.{}",
+                sgr::YELLOW,
+                sgr::RESET
+            ),
+            52,
+        ));
+        lines.push(Line::blank());
+        lines.push(Line::blank());
+        lines.push(Line::drawn(
+            format!("{}Enter  join      ESC  back{}", sgr::DIM, sgr::RESET),
+            26,
+        ));
+        return lines;
+    }
+
+    lines.push(Line::plain("Passphrase:"));
+    lines.push(Line::blank());
+    let mask = "*".repeat(typed);
+    lines.push(Line::drawn(
+        format!("{}{mask}_{}", sgr::BOLD, sgr::RESET),
+        typed + 1,
+    ));
+    lines.push(Line::blank());
+    let counted = match typed {
+        0 => "nothing typed yet".to_owned(),
+        1 => "1 character".to_owned(),
+        n => format!("{n} characters"),
+    };
+    lines.push(Line::drawn(
+        format!("{}{counted}{}", sgr::DIM, sgr::RESET),
+        counted.chars().count(),
+    ));
+
+    lines.push(Line::blank());
+    lines.push(Line::blank());
+    lines.push(Line::drawn(
+        format!(
+            "{}Enter  join      Backspace  correct      ESC  back{}",
+            sgr::DIM,
+            sgr::RESET
+        ),
+        50,
+    ));
+    lines
+}
+
+/// Associating, or saying why it did not work.
+fn wireless_joining(ssid: &str, detail: &str, error: Option<&str>) -> Vec<Line> {
+    let mut lines = vec![
+        Line::drawn(
+            format!("{}{}Joining {ssid}{}", sgr::BOLD, sgr::CYAN, sgr::RESET),
+            8 + ssid.chars().count(),
+        ),
+        Line::blank(),
+        Line::blank(),
+    ];
+
+    match error {
+        None => {
+            lines.push(Line::plain(detail.to_owned()));
+            lines.push(Line::blank());
+            lines.push(Line::blank());
+            lines.push(Line::drawn(
+                format!(
+                    "{}A wrong passphrase looks like this for about twenty seconds,{}",
+                    sgr::DIM,
+                    sgr::RESET
+                ),
+                59,
+            ));
+            lines.push(Line::drawn(
+                format!(
+                    "{}because the access point retries rather than refusing.{}",
+                    sgr::DIM,
+                    sgr::RESET
+                ),
+                53,
+            ));
+        }
+        Some(error) => {
+            lines.push(Line::drawn(
+                format!("{}{}It did not work.{}", sgr::YELLOW, sgr::BOLD, sgr::RESET),
+                16,
+            ));
+            lines.push(Line::blank());
+            // In full, wrapped rather than cut. This is the screen somebody is standing at
+            // because the browser is not reachable, so a summary here sends them to a
+            // console they cannot open.
+            for line in wrap(error, CONTENT) {
+                lines.push(Line::plain(line));
+            }
+        }
+    }
+
+    lines.push(Line::blank());
+    lines.push(Line::blank());
+    lines.push(Line::drawn(
+        format!("{}ESC  back to the list{}", sgr::DIM, sgr::RESET),
+        20,
+    ));
+    lines
+}
+
+/// It worked.
+fn wireless_joined(ssid: &str, facts: &Facts) -> Vec<Line> {
+    let mut lines = wordmark();
+    lines.push(Line::blank());
+    let banner = format!("*  Joined {ssid}");
+    lines.push(Line::drawn(
+        format!("{}{}{banner}{}", sgr::GREEN, sgr::BOLD, sgr::RESET),
+        banner.chars().count(),
+    ));
+    lines.push(Line::blank());
+
+    // The address if there is one yet, and an honest sentence if there is not. An
+    // association and a DHCP lease are not the same event, and the gap between them is
+    // seconds -- so a screen that promised an address here would be wrong about half the
+    // time it was read.
+    match facts.address() {
+        Some(address) => {
+            lines.push(Line::plain("This machine is now on your network at"));
+            lines.push(Line::blank());
+            lines.push(Line::drawn(
+                format!("{}https://{address}{}", sgr::BOLD, sgr::RESET),
+                address.chars().count() + 8,
+            ));
+        }
+        None => {
+            lines.push(Line::plain("Waiting for an address from the router..."));
+        }
+    }
+
+    lines.push(Line::blank());
+    lines.push(Line::drawn(
+        format!(
+            "{}It will be rejoined on its own every time this machine starts.{}",
+            sgr::DIM,
+            sgr::RESET
+        ),
+        62,
+    ));
+    lines.push(Line::blank());
+    lines.push(Line::drawn(
+        format!("{}Press any key to go back.{}", sgr::DIM, sgr::RESET),
+        25,
+    ));
+    lines
+}
+
+/// Breaks a sentence at spaces so it fits a column.
+///
+/// The remedies this appliance writes are sentences rather than labels — deliberately, and
+/// enforced elsewhere by a test — so a screen that shows one has to be able to wrap. Cutting
+/// instead would remove the remedy and leave the complaint, which is the shape of diagnostic
+/// this project exists to not produce.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
     lines
 }
 
@@ -642,14 +1088,18 @@ fn stop_outcome(choice: Action) -> &'static str {
 /// The space matters. A selected row that gains a character the others do not have shifts
 /// two columns left every time the cursor moves, and a list that jitters as somebody
 /// arrows down it reads as a fault in the screen.
-fn menu_row(selected: bool, label: &str) -> Line {
+/// `width` is the widest label in the menu, and every row is padded to it — because
+/// [`place`] centres each line on its own width, so rows of different lengths have no shared
+/// left edge and read as a list somebody knocked over.
+fn menu_row(selected: bool, label: &str, width: usize) -> Line {
+    let padded = format!("{label:<width$}");
     if selected {
         Line::drawn(
-            format!("{}{}>  {label}{}", sgr::BOLD, sgr::CYAN, sgr::RESET),
-            label.chars().count() + 3,
+            format!("{}{}>  {padded}{}", sgr::BOLD, sgr::CYAN, sgr::RESET),
+            width + 3,
         )
     } else {
-        Line::plain(format!("   {label}"))
+        Line::drawn(format!("   {padded}"), width + 3)
     }
 }
 
@@ -665,8 +1115,13 @@ fn power(choice: Action, facts: &Facts) -> Vec<Line> {
         Line::blank(),
     ];
 
+    let width = [Action::Restart, Action::Off]
+        .into_iter()
+        .map(|option| stop_word(option).chars().count())
+        .max()
+        .unwrap_or_default();
     for option in [Action::Restart, Action::Off] {
-        lines.push(menu_row(option == choice, stop_word(option)));
+        lines.push(menu_row(option == choice, stop_word(option), width));
     }
 
     lines.push(Line::blank());
@@ -788,6 +1243,7 @@ fn help() -> Vec<Line> {
     lines.push(Line::field("P", "Show a QR code that signs a browser in"));
     lines.push(Line::field("D", "Everything this screen knows"));
     lines.push(Line::field("O", "Restart or shut this machine down"));
+    lines.push(Line::field("W", "Join a Wi-Fi network"));
     lines.push(Line::field("?", "This page"));
     lines.push(Line::field("ESC", "Back to the dashboard"));
     lines.push(Line::blank());
@@ -843,6 +1299,7 @@ mod tests {
             uptime: Some(Duration::from_secs(125)),
             addresses: vec!["192.168.2.102".to_owned()],
             interface: Some("eth0".to_owned()),
+            wireless: None,
             plex: Plex::Running,
             transcoding: Transcoding::Ready,
             verdict: Verdict::Working,
@@ -865,6 +1322,271 @@ mod tests {
             }
         }
         out
+    }
+
+    fn row(ssid: &str, bars: u8, security: crate::wifi::Security) -> WirelessRow {
+        WirelessRow {
+            ssid: ssid.to_owned(),
+            bars,
+            five_ghz: false,
+            security,
+            saved: false,
+        }
+    }
+
+    #[test]
+    fn the_passphrase_screen_has_nothing_to_draw_but_a_mask() {
+        // `typed` is a number, so there is nothing on this screen that *could* be painted in
+        // clear even by a mistake. The count is shown because somebody typing on a keyboard
+        // whose output they cannot see needs to know the machine is receiving it.
+        let seen = visible(&frame(
+            &Screen::WirelessKey {
+                ssid: "Upstairs".to_owned(),
+                typed: 11,
+                open: false,
+            },
+            &working(),
+            50,
+            180,
+        ));
+        assert!(seen.contains("***********"), "{seen}");
+        assert!(seen.contains("11 characters"), "{seen}");
+        assert!(seen.contains("Upstairs"), "the network is named: {seen}");
+        assert!(seen.contains("Backspace"), "{seen}");
+
+        // Nothing typed yet is its own sentence rather than "0 characters".
+        let empty = visible(&frame(
+            &Screen::WirelessKey {
+                ssid: "Upstairs".to_owned(),
+                typed: 0,
+                open: false,
+            },
+            &working(),
+            50,
+            180,
+        ));
+        assert!(empty.contains("nothing typed yet"), "{empty}");
+    }
+
+    #[test]
+    fn an_open_network_is_not_asked_for_a_passphrase_and_is_warned_about() {
+        // A field with nothing to put in it is a screen somebody stares at. And a network
+        // with no encryption is worth one sentence: this appliance is about to carry a media
+        // library over it.
+        let seen = visible(&frame(
+            &Screen::WirelessKey {
+                ssid: "CoffeeShop".to_owned(),
+                typed: 0,
+                open: true,
+            },
+            &working(),
+            50,
+            180,
+        ));
+        assert!(!seen.contains("Passphrase"), "{seen}");
+        assert!(seen.contains("read by anyone in range"), "{seen}");
+    }
+
+    #[test]
+    fn a_network_that_cannot_be_joined_says_so_on_its_own_row() {
+        // Somebody scanning a list for the name they know should not have to press Enter on
+        // it to find out this appliance will not join it.
+        use crate::wifi::Security;
+        let seen = visible(&frame(
+            &Screen::Wireless {
+                rows: vec![
+                    row("Upstairs", 4, Security::Psk),
+                    row("OldRouter", 2, Security::Wep),
+                    row("Office", 3, Security::Enterprise),
+                ],
+                choice: 0,
+                scanning: false,
+                note: None,
+            },
+            &working(),
+            50,
+            180,
+        ));
+        assert_eq!(
+            seen.matches("cannot join").count(),
+            2,
+            "WEP and 802.1X, and nothing else: {seen}"
+        );
+        assert!(seen.contains("WPA2"), "{seen}");
+        assert!(
+            seen.contains("[####]"),
+            "a full signal is four bars: {seen}"
+        );
+        assert!(seen.contains("[##  ]"), "and a weak one is not: {seen}");
+    }
+
+    #[test]
+    fn every_row_of_the_list_is_one_width_however_long_the_name_is() {
+        // `place` centres each line on its own width, so rows of different lengths have no
+        // shared edge — which is what a rendered power menu showed, staggered across the
+        // middle of the screen. The list is the same hazard with a worse case: an SSID can
+        // be thirty-two characters, and a row that grew to fit one would push its own signal
+        // strength off a narrow screen.
+        use crate::wifi::Security;
+        let rows = vec![
+            row("A", 4, Security::Psk),
+            row(
+                "A network with a deliberately very long name indeed",
+                1,
+                Security::Wep,
+            ),
+            row("Upstairs", 2, Security::Open),
+        ];
+        let widths: Vec<_> = rows
+            .iter()
+            .map(|each| wireless_row(false, each).width)
+            .collect();
+        assert!(
+            widths.iter().all(|width| *width == widths[0]),
+            "the rows are different widths: {widths:?}"
+        );
+
+        // And the name is what gives way, not the part that says whether it can be joined.
+        let seen = visible(&frame(
+            &Screen::Wireless {
+                rows,
+                choice: 0,
+                scanning: false,
+                note: None,
+            },
+            &working(),
+            50,
+            180,
+        ));
+        assert!(seen.contains("..."), "a name too long is cut: {seen}");
+        assert!(
+            seen.contains("cannot join"),
+            "and the verdict survives: {seen}"
+        );
+    }
+
+    #[test]
+    fn an_empty_list_tells_still_looking_from_looked_and_found_nothing() {
+        // The two take opposite actions from the person reading them, and a list that says
+        // neither is a machine that appears to have stopped.
+        let looking = visible(&frame(
+            &Screen::Wireless {
+                rows: Vec::new(),
+                choice: 0,
+                scanning: true,
+                note: None,
+            },
+            &working(),
+            50,
+            180,
+        ));
+        assert!(looking.contains("Looking for networks"), "{looking}");
+
+        let nothing = visible(&frame(
+            &Screen::Wireless {
+                rows: Vec::new(),
+                choice: 0,
+                scanning: false,
+                note: None,
+            },
+            &working(),
+            50,
+            180,
+        ));
+        assert!(nothing.contains("Nothing in range"), "{nothing}");
+        assert!(
+            nothing.contains("5 GHz"),
+            "with the one thing worth knowing about an empty list: {nothing}"
+        );
+    }
+
+    #[test]
+    fn the_joined_screen_does_not_promise_an_address_it_does_not_have() {
+        // An association and a DHCP lease are not the same event and the gap between them is
+        // seconds, so a screen that printed an address here would be wrong about half the
+        // times it was read.
+        let joined = Screen::WirelessJoined {
+            ssid: "Upstairs".to_owned(),
+        };
+        let with_address = visible(&frame(&joined, &working(), 50, 180));
+        assert!(
+            with_address.contains("https://192.168.2.102"),
+            "{with_address}"
+        );
+
+        let none = Facts {
+            addresses: Vec::new(),
+            interface: None,
+            ..working()
+        };
+        let without = visible(&frame(&joined, &none, 50, 180));
+        assert!(without.contains("Waiting for an address"), "{without}");
+        assert!(
+            !without.contains("https://"),
+            "no address is invented: {without}"
+        );
+    }
+
+    #[test]
+    fn a_remedy_is_wrapped_rather_than_cut() {
+        // Every diagnostic in this project names a remedy, and the remedy is the half at the
+        // end. A screen that truncated would keep the complaint and drop the fix, which is
+        // the shape of diagnostic this whole appliance exists to not produce.
+        let excuse = "the network did not accept the passphrase. Remedy: check it, and \
+                      remember that a passphrase with a space in it is a passphrase with a \
+                      space in it.";
+        let seen = visible(&frame(
+            &Screen::WirelessJoining {
+                ssid: "Upstairs".to_owned(),
+                detail: String::new(),
+                error: Some(excuse.to_owned()),
+            },
+            &working(),
+            50,
+            180,
+        ));
+        assert!(seen.contains("Remedy"), "{seen}");
+        assert!(seen.contains("space in it."), "the end survived: {seen}");
+        assert!(seen.contains("It did not work"), "{seen}");
+    }
+
+    #[test]
+    fn wrapping_breaks_at_spaces_and_loses_no_words() {
+        let text = "one two three four five six seven eight nine ten";
+        let lines = wrap(text, 20);
+        assert!(lines.len() > 1, "{lines:?}");
+        for line in &lines {
+            assert!(line.chars().count() <= 20, "{line:?}");
+        }
+        assert_eq!(lines.join(" "), text, "nothing was dropped or duplicated");
+    }
+
+    #[test]
+    fn the_dashboard_names_wireless_only_where_there_is_a_radio() {
+        // The one moment this list is not a convenience: a machine with no cable and no
+        // address. Telling somebody with no Ethernet socket to plug in a cable is telling
+        // them the appliance is unusable.
+        let stranded = Facts {
+            addresses: Vec::new(),
+            interface: None,
+            verdict: Verdict::NoNetwork,
+            wireless: Some("wlan0".to_owned()),
+            ..working()
+        };
+        let seen = visible(&frame(&Screen::Dashboard, &stranded, 101, 360));
+        assert!(seen.contains("press W to join a Wi-Fi network"), "{seen}");
+        assert!(seen.contains("W  Wi-Fi"), "and it is in the footer: {seen}");
+
+        let wired_only = Facts {
+            wireless: None,
+            ..stranded
+        };
+        let seen = visible(&frame(&Screen::Dashboard, &wired_only, 101, 360));
+        assert!(seen.contains("with a cable"), "{seen}");
+        assert!(
+            !seen.contains("W  Wi-Fi"),
+            "a key that leads nowhere is not offered: {seen}"
+        );
     }
 
     #[test]
@@ -978,11 +1700,23 @@ mod tests {
         // A selected row that gains a character the others do not have shifts the list every
         // time the cursor moves, and a menu that jitters as somebody arrows down it reads as
         // a fault in the screen rather than as a selection.
-        let selected = menu_row(true, "Restart");
-        let not = menu_row(false, "Restart");
+        let selected = menu_row(true, "Restart", 9);
+        let not = menu_row(false, "Restart", 9);
         assert_eq!(
             selected.width, not.width,
             "the cursor is drawn in space the row already had"
+        );
+
+        // And the sharper half, which is what a rendered screen actually showed: rows of
+        // *different labels* have to come out the same width too. `place` centres each line
+        // on its own width, so a shorter row does not sit under a longer one — it sits
+        // somewhere else, and a menu of two came out staggered across the middle of the
+        // screen with no left edge at all. Neither test above could see that, because both
+        // rows in it said the same word.
+        assert_eq!(
+            menu_row(false, "Restart", 9).width,
+            menu_row(true, "Shut down", 9).width,
+            "two rows of a menu must share a left edge"
         );
     }
 
@@ -1331,6 +2065,40 @@ mod tests {
             Screen::PowerGoing {
                 choice: Action::Off,
             },
+            Screen::Wireless {
+                rows: vec![
+                    WirelessRow {
+                        ssid: "Sebastian's Network".to_owned(),
+                        bars: 4,
+                        five_ghz: true,
+                        security: crate::wifi::Security::Psk,
+                        saved: true,
+                    },
+                    WirelessRow {
+                        ssid: "OldRouter".to_owned(),
+                        bars: 1,
+                        five_ghz: false,
+                        security: crate::wifi::Security::Wep,
+                        saved: false,
+                    },
+                ],
+                choice: 0,
+                scanning: false,
+                note: None,
+            },
+            Screen::WirelessKey {
+                ssid: "Sebastian's Network".to_owned(),
+                typed: 11,
+                open: false,
+            },
+            Screen::WirelessJoining {
+                ssid: "Sebastian's Network".to_owned(),
+                detail: "asking for an address".to_owned(),
+                error: None,
+            },
+            Screen::WirelessJoined {
+                ssid: "Sebastian's Network".to_owned(),
+            },
         ];
 
         // Nothing is asserted here and nothing needs to be: the value of this loop is that it
@@ -1346,7 +2114,11 @@ mod tests {
                 | Screen::Help
                 | Screen::Power { .. }
                 | Screen::PowerConfirm { .. }
-                | Screen::PowerGoing { .. } => {}
+                | Screen::PowerGoing { .. }
+                | Screen::Wireless { .. }
+                | Screen::WirelessKey { .. }
+                | Screen::WirelessJoining { .. }
+                | Screen::WirelessJoined { .. } => {}
             }
         }
         all

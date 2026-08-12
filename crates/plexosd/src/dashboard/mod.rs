@@ -127,6 +127,7 @@ const FALLBACK: (usize, usize) = (24, 80);
 pub fn run(
     first_boot_code: Option<String>,
     plex: &std::sync::Arc<crate::plex::Handle>,
+    wifi: &std::sync::Arc<crate::wifi::Job>,
     log: &mut dyn FnMut(&str),
 ) {
     let screen = match std::fs::OpenOptions::new()
@@ -174,7 +175,7 @@ pub fn run(
     quieten_the_kernel(log);
 
     let keys = read_keys(&screen);
-    draw(&screen, size, first_boot_code, plex, &keys, log);
+    draw(&screen, size, first_boot_code, plex, wifi, &keys, log);
 }
 
 /// What a keystroke means, once the escape sequences have been put back together.
@@ -327,6 +328,33 @@ struct State {
     /// path through it be a test — a handler that called `power::schedule` would be one no
     /// test could exercise without restarting the machine running the suite.
     going: Option<plexos_sys::power::Action>,
+    /// What the keyboard asked the radio to do, performed by the draw loop.
+    ///
+    /// The same arrangement as [`State::going`] and for the same two reasons: `handle` stays
+    /// a pure function, and the frame showing what is about to happen is painted before the
+    /// thing happens.
+    radio: Option<Radio>,
+    /// The passphrase being typed, while it is being typed.
+    ///
+    /// **Here and nowhere else.** The render model carries only how many characters have
+    /// been entered, so there is nothing in the thing that paints the screen that *could* be
+    /// drawn in clear even by a mistake. It is cleared on every way off that screen.
+    typed: String,
+}
+
+/// What the keyboard asked the radio to do.
+enum Radio {
+    /// Look for what is in range.
+    Scan,
+    /// Join one.
+    Join {
+        /// The network's name.
+        ssid: String,
+        /// The passphrase, empty for an open network.
+        passphrase: String,
+        /// What the scan said the network expects, so the right kind of credential is kept.
+        security: crate::wifi::Security,
+    },
 }
 
 /// The loop: read keys, re-read the machine, paint when it changed.
@@ -335,6 +363,7 @@ fn draw(
     (rows, columns): (usize, usize),
     first_boot_code: Option<String>,
     plex: &std::sync::Arc<crate::plex::Handle>,
+    wifi: &std::sync::Arc<crate::wifi::Job>,
     keys: &mpsc::Receiver<u8>,
     log: &mut dyn FnMut(&str),
 ) {
@@ -370,6 +399,8 @@ fn draw(
         first_boot_code,
         first_boot_offered: false,
         going: None,
+        radio: None,
+        typed: String::new(),
     };
 
     // Bytes that have arrived and are not yet a whole key. Never more than a few, because
@@ -410,7 +441,10 @@ fn draw(
             facts_read = Instant::now();
         }
 
-        advance(&mut state, &facts);
+        // Read once a tick and passed in, so `advance` is a function of a value rather than
+        // of a mutex — which is what lets every wireless transition below be a test.
+        let radio = wifi.snapshot();
+        advance(&mut state, &facts, &radio);
 
         // Silence after a minute with nobody at the keyboard. Not a pause in the loop --
         // the state still advances, so whatever is on screen when somebody presses a key is
@@ -436,6 +470,32 @@ fn draw(
         // two shutdown sequences on the same Plex.
         if let Some(action) = state.going.take() {
             crate::power::schedule(action, plex);
+        }
+
+        // The same claim the console's own route makes, so the screen and the page cannot
+        // both hold the radio: two supplicants on one interface is a machine that associates
+        // and immediately disassociates, repeatedly, for no visible reason. Losing the claim
+        // is not an error worth a screen -- the job the loser would have started is already
+        // running and its progress is what both of them are showing.
+        match state.radio.take() {
+            Some(Radio::Scan) => {
+                if wifi.begin(crate::wifi::Phase::Scanning, "scanning for networks") {
+                    crate::wifi::spawn_scan(wifi);
+                }
+            }
+            Some(Radio::Join {
+                ssid,
+                passphrase,
+                security,
+            }) => {
+                if wifi.begin(crate::wifi::Phase::Associating, &format!("joining {ssid}")) {
+                    // `hidden` is false because every row on that list came from a scan, and
+                    // a scan reports the networks that broadcast a name. Typing the name of
+                    // one that does not is a keyboard this screen has not been given.
+                    crate::wifi::spawn_join(wifi, ssid, passphrase, false, Some(security));
+                }
+            }
+            None => {}
         }
 
         std::thread::sleep(TICK);
@@ -471,6 +531,23 @@ fn handle(key: Key, state: &mut State, facts: &Facts, log: &mut dyn FnMut(&str))
         // Nothing is offered, because there is nothing left to offer: the machine is on its
         // way down and a key that appeared to cancel it would be lying.
         Screen::PowerGoing { .. } => return,
+        // Every printable byte on this screen is a character of a passphrase, including the
+        // ones the dashboard has other meanings for. A handler that read the key first would
+        // have typed `p` and put a pairing code on the screen instead.
+        Screen::WirelessKey { .. } => return typing(key, state),
+        Screen::Wireless { .. } => return network_key(key, state, log),
+        Screen::WirelessJoining { .. } => {
+            if matches!(key, Key::Escape | Key::Char(b'q' | b'Q')) {
+                state.screen = empty_list();
+            }
+            return;
+        }
+        // A notice, so anything dismisses it.
+        Screen::WirelessJoined { .. } => {
+            state.notice_until = None;
+            state.screen = Screen::Dashboard;
+            return;
+        }
         _ => {}
     }
 
@@ -498,6 +575,18 @@ fn handle(key: Key, state: &mut State, facts: &Facts, log: &mut dyn FnMut(&str))
                 choice: plexos_sys::power::Action::Restart,
             };
         }
+        Key::Char(b'w' | b'W') => {
+            // Only where there is a radio. A list that can never have anything in it is the
+            // same mistake as a QR code pointing nowhere: somebody presses the key, sees
+            // nothing, and concludes the appliance is broken.
+            if facts.wireless.is_some() {
+                state.screen = empty_list();
+                // Immediately, without asking. Somebody who pressed W wants to see what is
+                // in range, and a list that opened empty with a "scan" key on it would be
+                // asking them to confirm the thing they just asked for.
+                state.radio = Some(Radio::Scan);
+            }
+        }
         Key::Char(b'?' | b'/' | b'h' | b'H') => state.screen = Screen::Help,
         // Escape on its own, and never the first byte of an arrow: pressing Up used to
         // cancel a pairing offer, because the three bytes of the arrow arrived one at a
@@ -511,6 +600,145 @@ fn handle(key: Key, state: &mut State, facts: &Facts, log: &mut dyn FnMut(&str))
             state.screen = Screen::Dashboard;
         }
         _ => {}
+    }
+}
+
+/// A wireless list with nothing in it yet.
+///
+/// The rows are filled in by [`advance`] from the radio's own job, so this is the state the
+/// screen is in for the fraction of a second before the first scan reports — and the state
+/// it goes back to from every way off the screens below it.
+fn empty_list() -> Screen {
+    Screen::Wireless {
+        rows: Vec::new(),
+        choice: 0,
+        scanning: false,
+        note: None,
+    }
+}
+
+/// The wireless list: move the cursor, take a row, scan again, or leave.
+fn network_key(key: Key, state: &mut State, log: &mut dyn FnMut(&str)) {
+    match key {
+        // Clamped rather than wrapped, unlike the two-row power menu. A list of a dozen
+        // networks that jumps from the last back to the first is one where somebody holding
+        // Down to reach the bottom sails past it without noticing.
+        Key::Up | Key::Down | Key::Home | Key::End => {
+            if let Screen::Wireless { rows, choice, .. } = &mut state.screen {
+                let last = rows.len().saturating_sub(1);
+                *choice = match key {
+                    Key::Up => choice.saturating_sub(1),
+                    Key::Down => (*choice + 1).min(last),
+                    Key::Home => 0,
+                    _ => last,
+                };
+            }
+        }
+        Key::Char(b'r' | b'R') => {
+            if let Screen::Wireless { note, .. } = &mut state.screen {
+                *note = None;
+            }
+            state.radio = Some(Radio::Scan);
+        }
+        Key::Char(b'\r' | b'\n') => {
+            let Screen::Wireless { rows, choice, .. } = &state.screen else {
+                return;
+            };
+            let Some((ssid, security)) = rows
+                .get(*choice)
+                .map(|row| (row.ssid.clone(), row.security))
+            else {
+                return;
+            };
+            // The remedy in full, at the moment somebody asked for the thing it refuses.
+            // `Security::refusal` writes both of these and each names what to change on the
+            // access point, which is the only place either can be fixed.
+            if let Some(refusal) = security.refusal() {
+                log(&format!("{ssid} cannot be joined: {refusal}"));
+                if let Screen::Wireless { note, .. } = &mut state.screen {
+                    *note = Some(refusal.to_owned());
+                }
+                return;
+            }
+            state.typed.clear();
+            state.screen = Screen::WirelessKey {
+                ssid,
+                typed: 0,
+                open: security == crate::wifi::Security::Open,
+            };
+        }
+        Key::Escape | Key::Char(b'q' | b'Q') => state.screen = Screen::Dashboard,
+        _ => {}
+    }
+}
+
+/// Typing a passphrase.
+///
+/// Every printable byte is a character rather than a command, which is why this screen is
+/// dispatched to before the keys are read at all: `p` here is a letter of a passphrase, and
+/// on the dashboard it puts a pairing code on the screen.
+fn typing(key: Key, state: &mut State) {
+    /// Backspace, as a terminal in raw mode actually sends it.
+    ///
+    /// Both, because which one arrives depends on the terminal rather than on the keyboard —
+    /// the Linux console sends `DEL` and a great many others send `BS`. Accepting one is a
+    /// screen where the correction key does nothing on somebody else's machine.
+    const ERASE: [u8; 2] = [0x7f, 0x08];
+
+    let Screen::WirelessKey { ssid, open, .. } = &state.screen else {
+        return;
+    };
+    let (ssid, open) = (ssid.clone(), *open);
+
+    match key {
+        Key::Char(b'\r' | b'\n') => {
+            // An empty passphrase on a network that wants one is refused here rather than
+            // sent: the supplicant's answer would be twenty-five seconds of retrying
+            // followed by a timeout, which reads as a wrong passphrase rather than as none.
+            if !open && state.typed.is_empty() {
+                return;
+            }
+            state.radio = Some(Radio::Join {
+                ssid: ssid.clone(),
+                // Moved out rather than copied, so after this line the only place it exists
+                // is the message on its way to the supplicant.
+                passphrase: std::mem::take(&mut state.typed),
+                security: if open {
+                    crate::wifi::Security::Open
+                } else {
+                    crate::wifi::Security::Psk
+                },
+            });
+            state.screen = Screen::WirelessJoining {
+                ssid,
+                detail: "starting".to_owned(),
+                error: None,
+            };
+            return;
+        }
+        Key::Escape => {
+            // Cleared on the way out, which is the whole reason this is a branch of its own
+            // rather than something that falls through: a passphrase left in memory because
+            // somebody changed their mind is a passphrase nobody knows is there.
+            state.typed.clear();
+            state.screen = empty_list();
+            return;
+        }
+        Key::Char(byte) if ERASE.contains(&byte) => {
+            state.typed.pop();
+        }
+        // Printable ASCII and nothing else. A control character in a passphrase is a
+        // keystroke that was meant as a command, and a passphrase field is not somewhere to
+        // find out that the machine took it literally.
+        Key::Char(byte) if byte.is_ascii_graphic() || byte == b' ' => {
+            state.typed.push(byte as char);
+        }
+        _ => return,
+    }
+
+    // One place where what is drawn is derived from what is held, so the two cannot drift.
+    if let Screen::WirelessKey { typed, .. } = &mut state.screen {
+        *typed = state.typed.chars().count();
     }
 }
 
@@ -595,7 +823,7 @@ fn start_pairing(log: &mut dyn FnMut(&str)) -> Option<String> {
 /// offer is gone in both cases, and [`crate::pairing::Offers::is_expired`] is true only for
 /// the second. So a browser that pairs while somebody is watching the screen sees the
 /// screen say so, without the two ever talking to each other.
-fn advance(state: &mut State, facts: &Facts) {
+fn advance(state: &mut State, facts: &Facts, radio: &crate::wifi::Progress) {
     if let Some(until) = state.notice_until
         && Instant::now() >= until
     {
@@ -648,8 +876,96 @@ fn advance(state: &mut State, facts: &Facts) {
                 state.notice_until = Some(Instant::now() + NOTICE);
             }
         }
+        // The list is rebuilt from the radio's own job on every tick rather than kept, so a
+        // scan that finishes while somebody is looking at the screen fills it in without a
+        // keystroke -- and there is no second copy of what is in range to go stale.
+        Screen::Wireless { choice, note, .. } => {
+            let (choice, note) = (*choice, note.clone());
+            let saved = crate::wifi::saved().map(|network| network.ssid);
+            let rows: Vec<_> = radio
+                .networks
+                .iter()
+                .map(|network| render::WirelessRow {
+                    ssid: network.ssid.clone(),
+                    bars: bars_for(network.strength()),
+                    five_ghz: network.is_5ghz(),
+                    security: network.security,
+                    saved: saved.as_deref() == Some(network.ssid.as_str()),
+                })
+                .collect();
+            state.screen = Screen::Wireless {
+                // Clamped rather than reset. A scan that comes back with one network fewer
+                // must not move somebody's cursor to the top of the list they were reading.
+                choice: choice.min(rows.len().saturating_sub(1)),
+                rows,
+                scanning: radio.phase == crate::wifi::Phase::Scanning,
+                // A scan's own failure is worth showing here; a note somebody's keystroke
+                // produced takes precedence, because it is the more recent answer to the
+                // more specific question.
+                note: note.or_else(|| {
+                    (radio.phase == crate::wifi::Phase::Failed)
+                        .then(|| radio.error.clone())
+                        .flatten()
+                }),
+            };
+        }
+        Screen::WirelessJoining { ssid, .. } => {
+            let ssid = ssid.clone();
+            match radio.phase {
+                crate::wifi::Phase::Connected => {
+                    state.screen = Screen::WirelessJoined { ssid };
+                    state.notice_until = Some(Instant::now() + NOTICE);
+                }
+                _ => {
+                    state.screen = Screen::WirelessJoining {
+                        ssid,
+                        detail: radio.detail.clone(),
+                        error: radio.error.clone(),
+                    };
+                }
+            }
+        }
         _ => {}
     }
+
+    // Nothing wireless survives the radio disappearing. A machine whose adapter was
+    // unplugged while somebody was reading the list would otherwise sit on a list of
+    // networks it can no longer see, with a join key that could never do anything.
+    if facts.wireless.is_none()
+        && matches!(
+            state.screen,
+            Screen::Wireless { .. }
+                | Screen::WirelessKey { .. }
+                | Screen::WirelessJoining { .. }
+                | Screen::WirelessJoined { .. }
+        )
+    {
+        state.typed.clear();
+        state.screen = Screen::Dashboard;
+    }
+}
+
+/// A signal, as whole bars.
+///
+/// `strength` is already the linear share of usable range that the console page draws, so
+/// this is the same number rounded to the resolution a console has. Deriving it here rather
+/// than taking dBm means the screen and the page cannot disagree about how strong a network
+/// is, which is the sort of thing somebody notices when they have both open.
+fn bars_for(strength: f32) -> u8 {
+    // Counted rather than cast. Turning a float into an integer here would be two lint
+    // exceptions and a truncation nobody checks, for a number with four possible values.
+    //
+    // It starts at one, which is the deliberate part: zero bars beside a network the scan
+    // has just found reads as a fault rather than as a weak signal, and the scan finding it
+    // means something reached this machine.
+    let scaled = strength * f32::from(render::BARS);
+    let mut filled = 1;
+    for bar in 2..=render::BARS {
+        if scaled > f32::from(bar) - 1.0 {
+            filled = bar;
+        }
+    }
+    filled
 }
 
 /// What the QR code carries.
@@ -802,6 +1118,7 @@ mod tests {
             uptime: Some(Duration::from_secs(60)),
             addresses: address.map(|a| vec![a.to_owned()]).unwrap_or_default(),
             interface: address.map(|_| "eth0".to_owned()),
+            wireless: None,
             plex: Plex::Running,
             transcoding: Transcoding::Ready,
             verdict: if address.is_some() {
@@ -903,6 +1220,8 @@ mod tests {
             first_boot_code: None,
             first_boot_offered: true,
             going: None,
+            radio: None,
+            typed: String::new(),
         };
 
         handle(Key::Char(b'P'), &mut state, &facts_at(None), &mut silent());
@@ -999,12 +1318,14 @@ mod tests {
             first_boot_code: None,
             first_boot_offered: true,
             going: None,
+            radio: None,
+            typed: String::new(),
         };
 
         handle(Key::Char(b'p'), &mut state, &facts, &mut silent());
         assert!(crate::pairing::secret().is_some(), "a code is on offer");
 
-        advance(&mut state, &facts);
+        advance(&mut state, &facts, &crate::wifi::Progress::default());
         let Screen::Pairing { url, .. } = &state.screen else {
             panic!("expected the pairing screen, got {:?}", state.screen);
         };
@@ -1035,9 +1356,11 @@ mod tests {
             first_boot_code: None,
             first_boot_offered: true,
             going: None,
+            radio: None,
+            typed: String::new(),
         };
         crate::pairing::consume(&secret).expect("the browser spends it");
-        advance(&mut state, &facts);
+        advance(&mut state, &facts, &crate::wifi::Progress::default());
         assert_eq!(state.screen, Screen::Paired);
 
         // And the other way: an offer whose deadline has passed. Driven through the struct
@@ -1066,6 +1389,8 @@ mod tests {
             first_boot_code: Some("4K7QM2XR9T8BHVWP".to_owned()),
             first_boot_offered: false,
             going: None,
+            radio: None,
+            typed: String::new(),
         };
 
         handle(Key::Char(b'x'), &mut state, &facts, &mut silent());
@@ -1095,10 +1420,16 @@ mod tests {
             first_boot_code: Some("4K7QM2XR9T8BHVWP".to_owned()),
             first_boot_offered: false,
             going: None,
+            radio: None,
+            typed: String::new(),
         };
 
         // No cable yet: nothing is offered, and the screen says what it is waiting for.
-        advance(&mut state, &facts_at(None));
+        advance(
+            &mut state,
+            &facts_at(None),
+            &crate::wifi::Progress::default(),
+        );
         assert!(crate::pairing::secret().is_none());
         let Screen::FirstBoot { url, .. } = &state.screen else {
             panic!("expected the first-boot screen");
@@ -1106,7 +1437,11 @@ mod tests {
         assert!(url.is_none());
 
         // The lease arrives.
-        advance(&mut state, &facts_at(Some("192.168.2.102")));
+        advance(
+            &mut state,
+            &facts_at(Some("192.168.2.102")),
+            &crate::wifi::Progress::default(),
+        );
         let Screen::FirstBoot { url, .. } = &state.screen else {
             panic!("expected the first-boot screen");
         };
@@ -1118,7 +1453,11 @@ mod tests {
         // And exactly once. Renewing on every expiry would leave a live credential standing
         // on a screen nobody is in front of, for as long as the machine is on.
         crate::pairing::cancel();
-        advance(&mut state, &facts_at(Some("192.168.2.102")));
+        advance(
+            &mut state,
+            &facts_at(Some("192.168.2.102")),
+            &crate::wifi::Progress::default(),
+        );
         assert!(
             crate::pairing::secret().is_none(),
             "after the first one runs out the screen asks for P, like every other pairing"
@@ -1139,9 +1478,11 @@ mod tests {
             first_boot_code: Some("4K7QM2XR9T8BHVWP".to_owned()),
             first_boot_offered: false,
             going: None,
+            radio: None,
+            typed: String::new(),
         };
 
-        advance(&mut state, &facts);
+        advance(&mut state, &facts, &crate::wifi::Progress::default());
         let Screen::FirstBoot { recovery_code, .. } = &state.screen else {
             panic!("expected the first-boot screen");
         };
@@ -1157,6 +1498,8 @@ mod tests {
             first_boot_code: None,
             first_boot_offered: true,
             going: None,
+            radio: None,
+            typed: String::new(),
         };
 
         handle(Key::Char(b'd'), &mut state, &facts, &mut silent());
@@ -1178,6 +1521,8 @@ mod tests {
             first_boot_code: None,
             first_boot_offered: true,
             going: None,
+            radio: None,
+            typed: String::new(),
         }
     }
 
@@ -1344,6 +1689,464 @@ mod tests {
         }
     }
 
+    /// A machine with a radio fitted.
+    fn with_a_radio(address: Option<&str>) -> Facts {
+        Facts {
+            wireless: Some("wlan0".to_owned()),
+            ..facts_at(address)
+        }
+    }
+
+    /// What the radio's job looks like after a scan that found these.
+    fn found(networks: &[(&str, f32, crate::wifi::Security)]) -> crate::wifi::Progress {
+        crate::wifi::Progress {
+            networks: networks
+                .iter()
+                .map(|(ssid, dbm, security)| crate::wifi::Network {
+                    ssid: (*ssid).to_owned(),
+                    bssid: "00:11:22:33:44:55".to_owned(),
+                    signal_dbm: *dbm,
+                    frequency_mhz: 5180,
+                    security: *security,
+                    hidden: false,
+                })
+                .collect(),
+            ..crate::wifi::Progress::default()
+        }
+    }
+
+    #[test]
+    fn pressing_w_on_a_machine_with_no_radio_does_nothing_at_all() {
+        // The same rule as P with no address, and it matters more here: a list that can
+        // never have anything in it is a key somebody presses, sees nothing happen, and
+        // concludes the appliance is broken.
+        let mut state = at_dashboard();
+        handle(Key::Char(b'W'), &mut state, &facts_at(None), &mut silent());
+        assert_eq!(state.screen, Screen::Dashboard);
+        assert!(state.radio.is_none(), "and nothing touched the radio");
+    }
+
+    #[test]
+    fn the_list_fills_itself_in_from_the_scan_with_nobody_pressing_anything() {
+        // A scan takes seconds. Somebody who pressed W is looking at the screen for the
+        // whole of it, so the list appearing has to be something the loop does rather than
+        // something a keystroke asks for.
+        use crate::wifi::Security;
+        let facts = with_a_radio(None);
+        let mut state = at_dashboard();
+
+        handle(Key::Char(b'w'), &mut state, &facts, &mut silent());
+        assert!(
+            matches!(state.radio, Some(Radio::Scan)),
+            "pressing W starts a scan without being asked twice"
+        );
+        assert_eq!(state.screen, empty_list());
+
+        advance(&mut state, &facts, &found(&[]));
+        let Screen::Wireless { rows, .. } = &state.screen else {
+            panic!("expected the list, got {:?}", state.screen);
+        };
+        assert!(rows.is_empty());
+
+        advance(
+            &mut state,
+            &facts,
+            &found(&[
+                ("Upstairs", -45.0, Security::Psk),
+                ("Shed", -80.0, Security::Sae),
+            ]),
+        );
+        let Screen::Wireless { rows, .. } = &state.screen else {
+            panic!("expected the list");
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].ssid, "Upstairs");
+        assert!(
+            rows[0].bars > rows[1].bars,
+            "a stronger signal draws more bars: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_passphrase_reaches_the_supplicant_and_nothing_else() {
+        // The property this whole arrangement exists for. What somebody types is held in one
+        // field of the keyboard's own state, moved into the message that starts the join,
+        // and is gone from both by the time anything paints a screen.
+        use crate::wifi::Security;
+        let facts = with_a_radio(None);
+        let mut state = at_dashboard();
+        handle(Key::Char(b'w'), &mut state, &facts, &mut silent());
+        advance(
+            &mut state,
+            &facts,
+            &found(&[("Upstairs", -45.0, Security::Psk)]),
+        );
+
+        handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+        assert_eq!(
+            state.screen,
+            Screen::WirelessKey {
+                ssid: "Upstairs".to_owned(),
+                typed: 0,
+                open: false,
+            }
+        );
+
+        for byte in b"hunter2 " {
+            handle(Key::Char(*byte), &mut state, &facts, &mut silent());
+        }
+        let Screen::WirelessKey { typed, .. } = state.screen else {
+            panic!("expected the passphrase screen");
+        };
+        assert_eq!(typed, 8, "the count follows what is held");
+        assert_eq!(state.typed, "hunter2 ");
+
+        state.radio.take();
+        handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+        let Some(Radio::Join {
+            ssid,
+            passphrase,
+            security,
+        }) = state.radio.take()
+        else {
+            panic!("nothing was asked of the radio");
+        };
+        assert_eq!(ssid, "Upstairs");
+        assert_eq!(passphrase, "hunter2 ");
+        assert_eq!(security, Security::Psk);
+        assert!(
+            state.typed.is_empty(),
+            "it is moved into the message rather than copied out of a field that keeps it"
+        );
+    }
+
+    #[test]
+    fn the_passphrase_is_not_in_the_thing_that_paints_the_screen() {
+        // Asserted against the rendered frame rather than against the type, because the type
+        // being unable to hold it is exactly the claim being checked -- and a claim about a
+        // type is worth nothing if the value reaches the screen by another route.
+        use crate::wifi::Security;
+        let facts = with_a_radio(None);
+        let mut state = at_dashboard();
+        handle(Key::Char(b'w'), &mut state, &facts, &mut silent());
+        advance(
+            &mut state,
+            &facts,
+            &found(&[("Upstairs", -45.0, Security::Psk)]),
+        );
+        handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+        for byte in b"correcthorse" {
+            handle(Key::Char(*byte), &mut state, &facts, &mut silent());
+        }
+
+        let painted = render::frame(&state.screen, &facts, 50, 180);
+        assert!(
+            !painted.contains("correcthorse"),
+            "the passphrase reached the screen:\n{painted}"
+        );
+        assert!(
+            painted.contains("************"),
+            "and the mask is as long as what was typed:\n{painted}"
+        );
+    }
+
+    #[test]
+    fn escaping_out_of_the_passphrase_takes_it_out_of_memory_too() {
+        // A passphrase left behind because somebody changed their mind is one nobody knows
+        // is there. It is also how the next network typed into this screen would start with
+        // the previous one's characters already counted.
+        use crate::wifi::Security;
+        let facts = with_a_radio(None);
+        let mut state = at_dashboard();
+        handle(Key::Char(b'w'), &mut state, &facts, &mut silent());
+        advance(
+            &mut state,
+            &facts,
+            &found(&[("Upstairs", -45.0, Security::Psk)]),
+        );
+        handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+        for byte in b"abcdef" {
+            handle(Key::Char(*byte), &mut state, &facts, &mut silent());
+        }
+
+        handle(Key::Escape, &mut state, &facts, &mut silent());
+        assert!(state.typed.is_empty());
+        assert!(matches!(state.screen, Screen::Wireless { .. }));
+    }
+
+    #[test]
+    fn backspace_corrects_whichever_byte_the_terminal_sends_for_it() {
+        // The Linux console sends DEL and a great many terminals send BS. Accepting one is
+        // a screen where the correction key does nothing on somebody else's machine.
+        use crate::wifi::Security;
+        let facts = with_a_radio(None);
+        for erase in [0x7f_u8, 0x08] {
+            let mut state = at_dashboard();
+            handle(Key::Char(b'w'), &mut state, &facts, &mut silent());
+            advance(
+                &mut state,
+                &facts,
+                &found(&[("Upstairs", -45.0, Security::Psk)]),
+            );
+            handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+            for byte in b"abc" {
+                handle(Key::Char(*byte), &mut state, &facts, &mut silent());
+            }
+            handle(Key::Char(erase), &mut state, &facts, &mut silent());
+
+            assert_eq!(state.typed, "ab", "{erase:#04x} did not erase");
+            let Screen::WirelessKey { typed, .. } = state.screen else {
+                panic!("expected the passphrase screen");
+            };
+            assert_eq!(typed, 2, "and the mask followed it");
+        }
+    }
+
+    #[test]
+    fn an_empty_passphrase_is_refused_here_rather_than_by_the_access_point() {
+        // The supplicant's answer to no passphrase is twenty-five seconds of retrying and
+        // then a timeout, which is the same screen a *wrong* passphrase produces. Refusing
+        // it here is the difference between "you typed nothing" and "it did not work".
+        use crate::wifi::Security;
+        let facts = with_a_radio(None);
+        let mut state = at_dashboard();
+        handle(Key::Char(b'w'), &mut state, &facts, &mut silent());
+        advance(
+            &mut state,
+            &facts,
+            &found(&[("Upstairs", -45.0, Security::Psk)]),
+        );
+        handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+        state.radio.take();
+
+        handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+        assert!(state.radio.is_none(), "nothing was sent");
+        assert!(matches!(state.screen, Screen::WirelessKey { .. }));
+
+        // An open network is the other way round: there is nothing to type, so Enter is the
+        // whole interaction.
+        let mut state = at_dashboard();
+        handle(Key::Char(b'w'), &mut state, &facts, &mut silent());
+        advance(
+            &mut state,
+            &facts,
+            &found(&[("CoffeeShop", -60.0, Security::Open)]),
+        );
+        handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+        state.radio.take();
+        handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+        assert!(
+            matches!(state.radio, Some(Radio::Join { ref passphrase, .. }) if passphrase.is_empty()),
+            "an open network joins with no credential"
+        );
+    }
+
+    #[test]
+    fn a_network_this_appliance_cannot_join_says_why_instead_of_trying() {
+        // Both refusals name what to change on the access point, which is the only place
+        // either can be fixed. A screen that said "could not join" would send somebody to
+        // look at the appliance.
+        use crate::wifi::Security;
+        let facts = with_a_radio(None);
+        for security in [Security::Wep, Security::Enterprise] {
+            let mut state = at_dashboard();
+            handle(Key::Char(b'w'), &mut state, &facts, &mut silent());
+            advance(
+                &mut state,
+                &facts,
+                &found(&[("OldRouter", -50.0, security)]),
+            );
+            state.radio.take();
+
+            handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+            let Screen::Wireless { note, .. } = &state.screen else {
+                panic!("expected to stay on the list, got {:?}", state.screen);
+            };
+            let note = note.as_deref().unwrap_or_default();
+            assert!(note.contains("Remedy"), "{security:?}: {note}");
+            assert!(state.radio.is_none(), "{security:?} was tried anyway");
+        }
+    }
+
+    #[test]
+    fn a_scan_that_comes_back_shorter_does_not_move_somebody_s_cursor_off_the_end() {
+        // Networks come and go between scans. A cursor left past the end is a join that
+        // reads a row that is not there, and a cursor reset to the top is somebody losing
+        // the network they had just found in a list of twenty.
+        use crate::wifi::Security;
+        let facts = with_a_radio(None);
+        let mut state = at_dashboard();
+        handle(Key::Char(b'w'), &mut state, &facts, &mut silent());
+        advance(
+            &mut state,
+            &facts,
+            &found(&[
+                ("A", -40.0, Security::Psk),
+                ("B", -50.0, Security::Psk),
+                ("C", -60.0, Security::Psk),
+            ]),
+        );
+        handle(Key::End, &mut state, &facts, &mut silent());
+        assert!(matches!(state.screen, Screen::Wireless { choice: 2, .. }));
+
+        advance(&mut state, &facts, &found(&[("A", -40.0, Security::Psk)]));
+        let Screen::Wireless { choice, rows, .. } = &state.screen else {
+            panic!("expected the list");
+        };
+        assert_eq!(*choice, 0);
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn connecting_ends_on_a_screen_that_says_so() {
+        use crate::wifi::{Phase, Progress, Security};
+        let facts = with_a_radio(None);
+        let mut state = at_dashboard();
+        handle(Key::Char(b'w'), &mut state, &facts, &mut silent());
+        advance(
+            &mut state,
+            &facts,
+            &found(&[("Upstairs", -45.0, Security::Psk)]),
+        );
+        handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+        for byte in b"passphrase" {
+            handle(Key::Char(*byte), &mut state, &facts, &mut silent());
+        }
+        handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+
+        // Associating: the radio's own words, so a screen and a page reading the same job
+        // cannot disagree about where it has got to.
+        advance(
+            &mut state,
+            &facts,
+            &Progress {
+                phase: Phase::Addressing,
+                detail: "asking for an address".to_owned(),
+                ..Progress::default()
+            },
+        );
+        assert_eq!(
+            state.screen,
+            Screen::WirelessJoining {
+                ssid: "Upstairs".to_owned(),
+                detail: "asking for an address".to_owned(),
+                error: None,
+            }
+        );
+
+        advance(
+            &mut state,
+            &facts,
+            &Progress {
+                phase: Phase::Connected,
+                detail: "connected to Upstairs".to_owned(),
+                ..Progress::default()
+            },
+        );
+        assert_eq!(
+            state.screen,
+            Screen::WirelessJoined {
+                ssid: "Upstairs".to_owned()
+            }
+        );
+        assert!(state.notice_until.is_some(), "and it gives way on its own");
+    }
+
+    #[test]
+    fn a_failed_join_keeps_the_reason_on_the_screen_somebody_is_standing_at() {
+        // This is the screen somebody is at *because* the browser is not reachable. A
+        // summary here sends them to a console they cannot open.
+        use crate::wifi::{Phase, Progress, Security};
+        let facts = with_a_radio(None);
+        let mut state = at_dashboard();
+        handle(Key::Char(b'w'), &mut state, &facts, &mut silent());
+        advance(
+            &mut state,
+            &facts,
+            &found(&[("Upstairs", -45.0, Security::Psk)]),
+        );
+        handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+        for byte in b"wrong" {
+            handle(Key::Char(*byte), &mut state, &facts, &mut silent());
+        }
+        handle(Key::Char(b'\r'), &mut state, &facts, &mut silent());
+
+        let excuse = "the network did not accept it. Remedy: check the passphrase.";
+        advance(
+            &mut state,
+            &facts,
+            &Progress {
+                phase: Phase::Failed,
+                error: Some(excuse.to_owned()),
+                ..Progress::default()
+            },
+        );
+        let painted = render::frame(&state.screen, &facts, 50, 180);
+        assert!(painted.contains("Remedy"), "{painted}");
+
+        // And the way back is to the list, so a second attempt is one keystroke rather than
+        // starting from the dashboard.
+        handle(Key::Escape, &mut state, &facts, &mut silent());
+        assert!(matches!(state.screen, Screen::Wireless { .. }));
+    }
+
+    #[test]
+    fn the_radio_disappearing_takes_the_screen_with_it() {
+        // A USB adapter can be unplugged while somebody is reading the list. Left alone, the
+        // screen would sit on networks it can no longer see, with a join key that could
+        // never do anything.
+        use crate::wifi::Security;
+        let mut state = at_dashboard();
+        handle(
+            Key::Char(b'w'),
+            &mut state,
+            &with_a_radio(None),
+            &mut silent(),
+        );
+        advance(
+            &mut state,
+            &with_a_radio(None),
+            &found(&[("Upstairs", -45.0, Security::Psk)]),
+        );
+        handle(
+            Key::Char(b'\r'),
+            &mut state,
+            &with_a_radio(None),
+            &mut silent(),
+        );
+        for byte in b"secret" {
+            handle(
+                Key::Char(*byte),
+                &mut state,
+                &with_a_radio(None),
+                &mut silent(),
+            );
+        }
+
+        advance(
+            &mut state,
+            &facts_at(None),
+            &crate::wifi::Progress::default(),
+        );
+        assert_eq!(state.screen, Screen::Dashboard);
+        assert!(
+            state.typed.is_empty(),
+            "and it does not leave a passphrase behind"
+        );
+    }
+
+    #[test]
+    fn anything_in_range_gets_at_least_one_bar() {
+        // Zero bars beside a network the scan has just found reads as a fault rather than as
+        // a weak signal. The scan found it, so something reached this machine.
+        assert_eq!(bars_for(0.0), 1);
+        assert_eq!(bars_for(1.0), render::BARS);
+        assert!(bars_for(0.5) > 1 && bars_for(0.5) < render::BARS);
+        // And nothing outside the range, whatever a driver reports.
+        assert_eq!(bars_for(-3.0), 1);
+        assert_eq!(bars_for(9.0), render::BARS);
+    }
+
     #[test]
     fn no_key_opens_a_shell() {
         // One already exists on the second virtual terminal, reached the way it always has
@@ -1357,6 +2160,8 @@ mod tests {
             first_boot_code: None,
             first_boot_offered: true,
             going: None,
+            radio: None,
+            typed: String::new(),
         };
 
         for key in b"sSfF0123456789\t\r\n" {

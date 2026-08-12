@@ -1512,7 +1512,7 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
 
     // After the network, so the first frame already carries the address a browser should
     // be pointed at; before `serve_tls`, which never returns.
-    spawn_dashboard(first_boot_code, &plex);
+    spawn_dashboard(first_boot_code, &plex, &served_wifi);
 
     let uploading_job = std::sync::Arc::clone(&job);
     let uploading_plex = std::sync::Arc::clone(&plex);
@@ -1611,14 +1611,23 @@ fn update_report(
 ///
 /// Its failure is a machine with no monitor, which is most of them. It is logged and the
 /// appliance carries on, because it always has.
-fn spawn_dashboard(first_boot_code: Option<String>, plex: &std::sync::Arc<crate::plex::Handle>) {
+fn spawn_dashboard(
+    first_boot_code: Option<String>,
+    plex: &std::sync::Arc<crate::plex::Handle>,
+    wifi: &std::sync::Arc<crate::wifi::Job>,
+) {
     // The same handle the console's own power route uses, and that is the point rather than
     // an economy: `stop_now` asks it to stop Plex, and a second handle would be a second
     // opinion about whether Plex is running.
     let plex = std::sync::Arc::clone(plex);
+    // And the same wireless job the console page polls, which is the point rather than an
+    // economy again: the radio can only be held by one thing, and two jobs would be two
+    // opinions about whether it is busy -- so a scan started at the screen would be
+    // invisible in the browser and a second supplicant would be started on top of it.
+    let wifi = std::sync::Arc::clone(wifi);
     std::thread::spawn(move || {
         let mut log = |line: &str| println!("plexosd: dashboard: {line}");
-        crate::dashboard::run(first_boot_code, &plex, &mut log);
+        crate::dashboard::run(first_boot_code, &plex, &wifi, &mut log);
     });
 }
 

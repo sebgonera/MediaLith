@@ -193,6 +193,15 @@ pub struct Facts {
     pub addresses: Vec<String>,
     /// The interface carrying the first of them.
     pub interface: Option<String>,
+    /// The wireless interface, when this machine has one.
+    ///
+    /// Not part of a status report and deliberately not derived from one: a status report
+    /// describes addresses and routes, and whether a radio is fitted is a fact about the
+    /// hardware that is true whether or not anything is using it. [`Facts::gather`] fills
+    /// this in; [`Facts::from_status`] leaves it `None`, because a status report cannot
+    /// answer it and a field guessed from one would be a field that lies on the machines
+    /// this feature exists for.
+    pub wireless: Option<String>,
     /// Plex.
     pub plex: Plex,
     /// Hardware transcoding.
@@ -222,7 +231,12 @@ impl Facts {
         // Before the facts are derived, because the interface named beside the address is
         // looked up from whichever address comes first.
         prefer_covered(&mut status.network.reachable_at, crate::tls::covers);
-        Self::from_status(&status, gpu, &crate::rollback::last_for)
+        let mut facts = Self::from_status(&status, gpu, &crate::rollback::last_for);
+        // Asked of the machine rather than of the status report, for the reason on the
+        // field: a report about addresses cannot say whether a radio is fitted, and the
+        // machines this matters for are exactly the ones with no address to report.
+        facts.wireless = crate::wifi::interface(env).ok().flatten();
+        facts
     }
 
     /// The same, from a gathered status — which is what makes every state below testable.
@@ -314,6 +328,9 @@ impl Facts {
             uptime: status.uptime_seconds.map(Duration::from_secs),
             addresses,
             interface,
+            // A status report cannot answer this, so it is not guessed from one. `gather`
+            // asks the machine.
+            wireless: None,
             plex,
             transcoding: gpu,
             verdict,
