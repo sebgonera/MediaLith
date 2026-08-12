@@ -747,10 +747,18 @@ and its certificate — sign with the second one.
   address on the appliance while its test passed. Same rule as `CONFIG_*` symbols and PCI
   IDs, applied to the output format of any program whose file you read.
 - **A design can be complete, tested and uncalled, and the tests will not tell you.**
-  Three times now: the `auth` gate, `cgroup::delegation`, and the whole ADR-0008
-  configuration model — schema, validation, fixtures, and `paths::CONFIG_FILE` with no
-  callers anywhere, so no hostname was ever set and no timezone ever applied. Grep for
-  callers of a constant before assuming the feature behind it exists.
+  Five times now: the `auth` gate, `cgroup::delegation`, the whole ADR-0008 configuration
+  model — schema, validation, fixtures, and `paths::CONFIG_FILE` with no callers anywhere, so
+  no hostname was ever set and no timezone ever applied — and then `[updates].channel`, which
+  had defaulted to `stable` since the schema was written while every bundle was signed `dev`,
+  so a machine asking for stable releases installed development builds without comment.
+  Grep for callers of a constant before assuming the feature behind it exists.
+  The fifth is the one worth remembering, because it was **written and found the same
+  evening**: `[update_service].check` was stored, patched by the API, drawn as a checkbox in
+  the console, and read by nothing — the scheduler asked the update service every round
+  regardless. A setting is not implemented when it round-trips; it is implemented when
+  something branches on it. The shape to grep for is a config field whose only occurrences
+  are the struct, the serializer and the form.
 - **Storing is not applying, and a settings page that conflates them is worse than none.**
   It looks like it worked. `plexosd::settings` reports four distinct outcomes per field
   for that reason, and the sharpest case is the timezone: with no zoneinfo in the image,
