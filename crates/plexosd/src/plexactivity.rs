@@ -1172,6 +1172,225 @@ fn library_source(rating_key: &str, token: &str) -> Option<Source> {
     Some(source)
 }
 
+// ------------------------------------------------------------------------------------
+// ARTWORK.
+//
+// A poster is the same class of information as a title: it says what somebody in this house
+// is watching this evening. So it is behind the same credential, and the browser reaches it
+// the same way -- an authenticated POST, whose bytes it turns into an object URL, because
+// `<img src>` cannot send an Authorization header and a GET on this console needs no
+// credential at all.
+//
+// **This is not a proxy.** The browser supplies one thing, a rating key, and it is a number.
+// It cannot name a host, a port, a path, a URL or a token. Everything else is resolved here
+// from Plex's own metadata, and the path that comes back is refused unless it is a path on
+// the local server -- Plex publishes absolute URLs for some artwork, and following one would
+// turn this into exactly the general fetcher it must not be.
+// ------------------------------------------------------------------------------------
+
+/// The largest poster this will hand to a browser.
+///
+/// Plex's own thumbnails are tens of kilobytes; four megabytes is far above anything it
+/// serves and far below anything that matters to this machine's memory. The read is bounded
+/// rather than trusted, so a Plex that answered with a gigabyte would be cut off rather than
+/// held.
+pub const MAX_ARTWORK: u64 = 4 * 1024 * 1024;
+
+/// The image formats this appliance will serve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageKind {
+    /// JPEG, which is what Plex serves for almost everything.
+    Jpeg,
+    /// PNG.
+    Png,
+    /// WebP.
+    Webp,
+}
+
+impl ImageKind {
+    /// The `Content-Type` this appliance will put on it.
+    ///
+    /// A fixed string from a closed set, never a value echoed from Plex: a `Content-Type`
+    /// copied out of somebody else's answer is a header this machine did not write.
+    #[must_use]
+    pub const fn mime(self) -> &'static str {
+        match self {
+            Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
+            Self::Webp => "image/webp",
+        }
+    }
+
+    /// What the bytes actually are.
+    ///
+    /// Decided from the signature rather than from what the server claimed, because the
+    /// claim is a string from another program and the bytes are the thing being handed to a
+    /// browser. A `Content-Type` of `image/jpeg` on something that is not one is exactly the
+    /// case worth refusing.
+    #[must_use]
+    pub fn sniff(bytes: &[u8]) -> Option<Self> {
+        if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            return Some(Self::Jpeg);
+        }
+        if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Some(Self::Png);
+        }
+        if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+            return Some(Self::Webp);
+        }
+        None
+    }
+}
+
+/// Whether a rating key is one this appliance will ask Plex about.
+///
+/// Digits only, and bounded. It is interpolated into a request line, so anything carrying a
+/// space, a newline or a slash could write headers of its own or address a different
+/// resource -- which is the whole attack this endpoint exists to not have.
+#[must_use]
+pub fn valid_rating_key(key: &str) -> bool {
+    !key.is_empty() && key.len() <= 12 && key.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The artwork path Plex publishes for an item, if it publishes a local one.
+///
+/// `thumb` first and `art` never: the poster is what a person recognises, and the backdrop
+/// is a different picture that would look like the wrong one. `grandparentThumb` is the
+/// series poster and is right for an episode, which usually has no poster of its own.
+///
+/// Refused unless it is a path on this server. Plex hands out absolute `https://` URLs for
+/// artwork it has fetched from its own services, and those carry a token in the query --
+/// following one would both leak the credential and make this a fetcher of arbitrary hosts.
+#[must_use]
+pub fn local_artwork_path(metadata: &str) -> Option<String> {
+    let document: Value = serde_json::from_str(metadata).ok()?;
+    let entry = document
+        .get("MediaContainer")?
+        .get("Metadata")?
+        .as_array()?
+        .first()?;
+
+    let candidate = text(entry, "thumb").or_else(|| text(entry, "grandparentThumb"))?;
+
+    // A path on this server, and nothing else. One leading slash, no scheme, no authority,
+    // no traversal, and no query -- a query is where a token would ride.
+    if !candidate.starts_with('/')
+        || candidate.starts_with("//")
+        || candidate.contains("://")
+        || candidate.contains("..")
+        || candidate.contains('?')
+        || candidate.contains('\r')
+        || candidate.contains('\n')
+        || candidate.contains(' ')
+    {
+        return None;
+    }
+    Some(candidate)
+}
+
+/// Reads a response whose body is bytes rather than text.
+///
+/// Separate from [`ask`] because that one is lossy by design -- a film title in a script
+/// this build cannot represent must not lose the session it belongs to -- and lossy is
+/// exactly wrong for an image, where every byte is the thing.
+fn ask_bytes(path: &str, token: &str) -> Result<Vec<u8>, Trouble> {
+    let address = crate::plex::LOOPBACK_ADDRESS
+        .parse()
+        .map_err(|_| Trouble::Unreachable)?;
+
+    let mut stream = std::net::TcpStream::connect_timeout(&address, TIMEOUT).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::ConnectionRefused {
+            Trouble::NotRunning
+        } else {
+            Trouble::Unreachable
+        }
+    })?;
+    let _ = stream.set_read_timeout(Some(TIMEOUT));
+    let _ = stream.set_write_timeout(Some(TIMEOUT));
+
+    let request = format!(
+        "GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nAccept: image/*\r\n\
+         X-Plex-Token: {token}\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|_| Trouble::Unreachable)?;
+
+    // Bounded before it is read, not after. One extra byte so an image exactly at the limit
+    // is told apart from one over it.
+    let mut raw = Vec::new();
+    stream
+        .take(MAX_ARTWORK + 1)
+        .read_to_end(&mut raw)
+        .map_err(|_| Trouble::Unreachable)?;
+
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or(Trouble::Unreadable)?;
+    let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+    let body = raw.split_off(split + 4);
+
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .ok_or(Trouble::Unreadable)?;
+
+    match status {
+        // A redirect is refused rather than followed. Plex answers some artwork requests
+        // with one, and the target is chosen by Plex rather than by this appliance -- which
+        // is the general fetcher this endpoint must not become, and is also where a
+        // credential-bearing URL would appear.
+        "200" => Ok(body),
+        "401" | "403" => Err(Trouble::Refused),
+        _ => Err(Trouble::Unreadable),
+    }
+}
+
+/// The poster for a session's item, read with the credential this process holds.
+///
+/// The token is read, used and dropped inside this call, exactly as [`observe`] does: it
+/// exists for the length of one request and is never held anywhere that outlives it, and it
+/// is never returned, logged or put in a header.
+///
+/// `None` when the machine is not provisioned, Plex is not running or not claimed, the key
+/// is not one this appliance will ask about, or the answer is not an image it serves. One
+/// answer for all of them: the caller has one thing to draw either way, and the differences
+/// are facts about somebody's library.
+#[must_use]
+pub fn poster_for(mount: &Path, rating_key: &str) -> Option<(ImageKind, Vec<u8>)> {
+    if !valid_rating_key(rating_key) {
+        return None;
+    }
+    if !crate::plex::is_provisioned(mount) {
+        return None;
+    }
+    let preferences = std::fs::read_to_string(crate::plex::preferences_file()).ok()?;
+    let token = crate::plex::account_token(&preferences)?;
+    poster(rating_key, token)
+}
+
+/// The poster for one library item, as bytes this appliance is willing to serve.
+///
+/// `None` for every failure, and deliberately without distinguishing them: the page draws
+/// its own placeholder either way, and a message naming which internal step failed is a
+/// message about Plex's library and its filesystem.
+fn poster(rating_key: &str, token: &str) -> Option<(ImageKind, Vec<u8>)> {
+    if !valid_rating_key(rating_key) {
+        return None;
+    }
+    let metadata = ask(&format!("/library/metadata/{rating_key}"), token).ok()?;
+    let path = local_artwork_path(&metadata)?;
+    let bytes = ask_bytes(&path, token).ok()?;
+
+    if bytes.len() as u64 > MAX_ARTWORK {
+        return None;
+    }
+    let kind = ImageKind::sniff(&bytes)?;
+    Some((kind, bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1471,6 +1690,131 @@ mod tests {
                 "{rubbish:?} must not panic and must not invent sessions"
             );
         }
+    }
+
+    /// A metadata document shaped like Plex's, with a token planted where a real one lives.
+    const ARTWORK_METADATA: &str = r#"{"MediaContainer":{"size":1,"Metadata":[{
+        "ratingKey":"51231","title":"A film",
+        "thumb":"/library/metadata/51231/thumb/1699887766",
+        "art":"/library/metadata/51231/art/1699887766",
+        "Media":[{"Part":[{"Stream":[]}]}]}]}}"#;
+
+    #[test]
+    fn a_rating_key_is_a_number_and_nothing_else() {
+        // It is interpolated into a request line, so a value carrying a space, a newline or
+        // a slash could write headers of its own or address a different resource. This is
+        // the whole of what the browser gets to choose, which is why it is the whole of what
+        // has to be checked.
+        assert!(valid_rating_key("51231"));
+        assert!(valid_rating_key("1"));
+
+        for bad in [
+            "",
+            "51231 ",
+            "51231\r\nX-Plex-Token: stolen",
+            "../../etc/passwd",
+            "51231/thumb",
+            "abc",
+            "-1",
+            "5123151231512315", // longer than any key Plex issues
+            "http://elsewhere.invalid/x",
+        ] {
+            assert!(!valid_rating_key(bad), "{bad:?} must not be asked about");
+        }
+    }
+
+    #[test]
+    fn artwork_is_taken_from_the_metadata_and_only_when_it_is_local() {
+        assert_eq!(
+            local_artwork_path(ARTWORK_METADATA).as_deref(),
+            Some("/library/metadata/51231/thumb/1699887766"),
+            "the poster comes from `thumb`, which is the picture a person recognises"
+        );
+
+        // Plex hands out absolute URLs for artwork it fetched from its own services, and
+        // those carry a token in the query. Following one would leak the credential *and*
+        // turn this endpoint into a fetcher of arbitrary hosts, which is the one thing it
+        // must never be.
+        for hostile in [
+            r#"{"MediaContainer":{"Metadata":[{"thumb":"https://plex.tv/photo?X-Plex-Token=SECRET"}]}}"#,
+            r#"{"MediaContainer":{"Metadata":[{"thumb":"//evil.invalid/x.jpg"}]}}"#,
+            r#"{"MediaContainer":{"Metadata":[{"thumb":"/library/../../etc/passwd"}]}}"#,
+            r#"{"MediaContainer":{"Metadata":[{"thumb":"/library/metadata/1/thumb?X-Plex-Token=SECRET"}]}}"#,
+            r#"{"MediaContainer":{"Metadata":[{"thumb":"/library/metadata/1\r\nHost: evil"}]}}"#,
+            r#"{"MediaContainer":{"Metadata":[{"thumb":""}]}}"#,
+            r#"{"MediaContainer":{"size":0}}"#,
+        ] {
+            assert_eq!(local_artwork_path(hostile), None, "must refuse: {hostile}");
+        }
+    }
+
+    #[test]
+    fn only_images_this_appliance_recognises_are_served() {
+        // Decided from the bytes rather than from what the server claimed: a `Content-Type`
+        // of `image/jpeg` on something that is not one is exactly the case worth refusing,
+        // and the claim is a string from another program.
+        assert_eq!(
+            ImageKind::sniff(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some(ImageKind::Jpeg)
+        );
+        assert_eq!(
+            ImageKind::sniff(b"\x89PNG\r\n\x1a\nrest"),
+            Some(ImageKind::Png)
+        );
+        assert_eq!(
+            ImageKind::sniff(b"RIFF\0\0\0\0WEBPVP8 "),
+            Some(ImageKind::Webp)
+        );
+
+        for not_an_image in [
+            &b"<!DOCTYPE html><html>"[..],
+            &b"{\"MediaContainer\":{}}"[..],
+            &b"GIF89a"[..],
+            &b""[..],
+            &b"\xFF\xD8"[..], // truncated below the signature
+        ] {
+            assert_eq!(ImageKind::sniff(not_an_image), None);
+        }
+
+        // The type on the wire is one of three fixed strings this appliance wrote, never a
+        // value echoed out of Plex's answer.
+        for kind in [ImageKind::Jpeg, ImageKind::Png, ImageKind::Webp] {
+            assert!(kind.mime().starts_with("image/"));
+        }
+    }
+
+    #[test]
+    fn the_poster_path_never_carries_a_credential() {
+        // The endpoint's whole surface, checked for the invariant the sessions route already
+        // holds: the browser sends a number, and nothing that comes back names a token.
+        let path = local_artwork_path(ARTWORK_METADATA).expect("a local path");
+        assert!(!path.contains("X-Plex-Token"), "{path}");
+        assert!(!path.contains(PLANTED_TOKEN), "{path}");
+        assert!(
+            !path.contains('?'),
+            "a query is where a token would ride: {path}"
+        );
+
+        // And the refusal a browser is given says nothing about the library, the filesystem
+        // or Plex's answer -- there is one refusal for every failure, by construction.
+        assert_eq!(
+            local_artwork_path(
+                r#"{"MediaContainer":{"Metadata":[{"thumb":"https://plex.tv/x?X-Plex-Token=SECRET"}]}}"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn artwork_is_refused_before_anything_is_asked_when_the_key_is_wrong() {
+        // Fails closed, and fails without a request: a malformed key never reaches the point
+        // where a connection would be opened, so a page cannot use this to make the
+        // appliance talk to anything.
+        let nowhere = std::path::Path::new("/nonexistent/plex/mount");
+        assert!(poster_for(nowhere, "not-a-key").is_none());
+        assert!(poster_for(nowhere, "").is_none());
+        // And an unprovisioned machine answers the same way rather than explaining itself.
+        assert!(poster_for(nowhere, "51231").is_none());
     }
 
     #[test]

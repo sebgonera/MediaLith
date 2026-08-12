@@ -164,6 +164,46 @@ pub fn respond(request: &Request, env: &impl Environment, services: &Services) -
                 ),
             }
         }
+        // A poster, and nothing else.
+        //
+        // A POST for the same reason the sessions route is one: a poster says what somebody
+        // in this house is watching, which is the class of thing this console keeps behind a
+        // credential. `<img src>` cannot send an Authorization header, so the page fetches
+        // this and turns the bytes into an object URL rather than pointing an element at a
+        // GET that would need no credential at all.
+        //
+        // **Not a proxy.** The body carries a rating key and it is a number. It cannot name
+        // a host, a port, a path, a URL or a token; everything else is resolved inside
+        // `plexactivity` from Plex's own metadata, and a path that is not on the local
+        // server is refused there.
+        ("POST", "/api/plex/poster") => {
+            let key = serde_json::from_slice::<serde_json::Value>(&request.body)
+                .ok()
+                .and_then(|v| {
+                    v.get("rating_key")
+                        .and_then(|k| k.as_str())
+                        .map(ToOwned::to_owned)
+                });
+            let Some(key) = key else {
+                return Response::text(400, "the body must carry a `rating_key`.\n");
+            };
+            match crate::plexactivity::poster_for(
+                std::path::Path::new(plexos_types::paths::PLEX_MOUNT),
+                &key,
+            ) {
+                Some((kind, bytes)) => Response {
+                    status: 200,
+                    content_type: kind.mime(),
+                    body: bytes,
+                    location: None,
+                },
+                // One answer for every failure, and deliberately: which internal step failed
+                // is a statement about Plex's library and its filesystem, and the page draws
+                // its own placeholder either way. Nothing here echoes anything Plex said.
+                None => Response::text(404, "no artwork for that item.\n"),
+            }
+        }
+
         // Starting an installation. Returns as soon as the work is handed to a thread:
         // the download alone is minutes, and a request held open for it would time out
         // in the browser with the install still running and no way to say so.

@@ -2185,6 +2185,45 @@
   .pa-num { font-weight: 650; color: var(--ink); font-variant-numeric: tabular-nums; }
   .pa-sep { opacity: .5; }
 
+  /* The poster. A fixed shape, so a row of sessions lines up whatever artwork arrives --
+     and so the placeholder and the picture occupy exactly the same space, which is what
+     stops a card jumping when bytes land a second later. 2:3 is the poster ratio every
+     film uses. */
+  /* The card is a grid, so the poster is placed rather than floated -- a float inside a grid
+     container does nothing to its siblings, which is why the title sat under the picture
+     instead of beside it on the first render. The art takes a column and spans the rows that
+     identify the session; everything below it runs the full width, because a pipeline
+     diagram squeezed into a column beside a poster is a pipeline nobody can read. */
+  .np-item:has(.np-art) {
+    grid-template-columns: 3.5rem minmax(0, 1fr);
+    column-gap: var(--s-3);
+  }
+  .np-item:has(.np-art) > :not(.np-art) { grid-column: 2; }
+  .np-item:has(.np-art) > .np-verdict ~ * { grid-column: 1 / -1; }
+  .np-art {
+    grid-column: 1;
+    grid-row: 1 / span 3;
+    align-self: start;
+    width: 3.5rem;
+    aspect-ratio: 2 / 3;
+    border-radius: var(--radius-xs);
+    overflow: hidden;
+    background: var(--surface-inset);
+    border: 1px solid var(--border);
+  }
+  .np-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  /* The fallback, drawn first and replaced only if bytes arrive -- so there is never a
+     moment showing a broken-image icon. A shape rather than a word: it sits beside the
+     title, which already says what this is. */
+  .np-art-none {
+    display: block;
+    width: 100%;
+    height: 100%;
+    background:
+      linear-gradient(115deg, transparent 46%, var(--border) 46%, var(--border) 54%, transparent 54%),
+      var(--surface-inset);
+  }
+
   /* ------------------------------------------------------------------------------------
      THE TRANSCODE PATH.
      A data path, not an infographic: small nodes joined by rules. Three states and no more
@@ -8499,6 +8538,131 @@ function renderPlexActivity(locked) {
     </div>`;
 }
 
+// ------------------------------------------------------------------------------------
+// POSTERS.
+//
+// The bytes come from `POST /api/plex/poster` with the credential this page already holds,
+// because a poster says what somebody in this house is watching and that is the class of
+// thing the console keeps behind a credential. An image element cannot send an Authorization
+// header, and a GET on this console needs none at all -- so the page fetches, and turns the
+// answer into an object URL.
+//
+// The browser sends one thing: a rating key, which is a number it already has in the
+// session model. It never sends a URL, a host, a path or a token, and there is nothing here
+// that could.
+//
+// **Object URLs are owned, not leaked.** The streams region is replaced wholesale whenever
+// its signature changes, so an image element is recreated many times for one film; the URL
+// is kept against the rating key and reused, and revoked when that item stops playing. A
+// URL per redraw, at one redraw a second, is a browser holding megabytes of an evening.
+// ------------------------------------------------------------------------------------
+const posterUrls = new Map();
+const posterFailed = new Set();
+const posterAsking = new Set();
+/// At most this many artwork requests in flight. A page showing eight sessions must not
+/// open eight connections to an appliance whose job is to encode video.
+const POSTER_AT_ONCE = 3;
+let posterInFlight = 0;
+const posterQueue = [];
+
+function posterDrain() {
+  while (posterInFlight < POSTER_AT_ONCE && posterQueue.length) {
+    const key = posterQueue.shift();
+    posterInFlight += 1;
+    posterFetch(key).finally(() => { posterInFlight -= 1; posterDrain(); });
+  }
+}
+
+async function posterFetch(key) {
+  try {
+    // A locked console does not merely hide the answer; it never asks the question. The
+    // same rule the session poll follows.
+    const value = credential();
+    if (!value) throw new Error("locked");
+    const response = await fetch("/api/plex/poster", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + value,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ rating_key: key }),
+    });
+    if (!response.ok) throw new Error(String(response.status));
+    const blob = await response.blob();
+    if (!blob.type.startsWith("image/")) throw new Error("not an image");
+    posterUrls.set(key, URL.createObjectURL(blob));
+  } catch {
+    // One outcome for every failure, which is what the appliance gives: the card draws its
+    // placeholder and nothing is retried in a loop.
+    posterFailed.add(key);
+  } finally {
+    posterAsking.delete(key);
+    paintPosters();
+  }
+}
+
+/// Fills every poster element that has bytes, and asks for the ones that do not.
+function paintPosters() {
+  for (const slot of document.querySelectorAll(".np-art[data-rating]")) {
+    const key = slot.dataset.rating;
+    if (!key) continue;
+    const url = posterUrls.get(key);
+    if (url) {
+      if (slot.dataset.painted !== key) {
+        slot.dataset.painted = key;
+        // Built rather than written as markup. Two reasons and both matter: this page bans
+        // the literal so that nothing can quietly start fetching from elsewhere, and an
+        // object URL interpolated into HTML is a URL going through a parser for no reason.
+        // `alt` is empty on purpose -- the title is next to it, and a screen reader reading
+        // the film's name twice is worse than not describing a picture of it.
+        const image = document.createElement("img");
+        image.alt = "";
+        image.src = url;
+        slot.replaceChildren(image);
+      }
+      continue;
+    }
+    if (posterFailed.has(key) || posterAsking.has(key)) continue;
+    posterAsking.add(key);
+    posterQueue.push(key);
+  }
+  posterDrain();
+}
+
+/// Lets go of the artwork for anything that has stopped playing.
+///
+/// `revokeObjectURL` is the whole point: without it every film watched since the page opened
+/// stays in memory for as long as the tab does.
+function releasePosters(activeKeys) {
+  for (const [key, url] of [...posterUrls]) {
+    if (!activeKeys.has(key)) {
+      URL.revokeObjectURL(url);
+      posterUrls.delete(key);
+    }
+  }
+  for (const key of [...posterFailed]) if (!activeKeys.has(key)) posterFailed.delete(key);
+}
+
+/// Everything, when the page goes away. A tab closing frees these anyway; doing it here is
+/// what makes the ownership explicit rather than incidental.
+window.addEventListener("pagehide", () => {
+  for (const url of posterUrls.values()) URL.revokeObjectURL(url);
+  posterUrls.clear();
+});
+
+/// The poster slot for a session, with the placeholder already in it.
+///
+/// The fallback is drawn first and replaced if bytes arrive, so there is never a moment
+/// showing a broken image: an element that has not loaded and one that cannot are the same
+/// picture here.
+function npArt(session) {
+  const key = session.rating_key;
+  if (!key) return "";
+  return `<div class="np-art" data-rating="${esc(key)}">
+      <span class="np-art-none" aria-hidden="true"></span>
+    </div>`;
+}
+
 /// The transcode path, from what Plex actually said about it.
 ///
 /// **Every stage state comes from `video.hardware` and `video.full_pipeline` and from
@@ -8610,6 +8774,7 @@ function npItem(session, detailed, index) {
 
   return `
     <div class="np-item ${verdict.edge}${paused ? " is-paused" : ""}">
+      ${detailed ? npArt(session) : ""}
       <div class="np-title">${npTitle(session)}</div>
       ${who ? `<div class="np-who">${who}${paused ? " · paused" : ""}</div>` : ""}
       ${path ? `<div class="np-path">${path}</div>` : ""}
@@ -8774,6 +8939,10 @@ function renderStreams(report, locked) {
       : !sessions.length ? npQuiet(report)
       : `<div class="np-list">${sessions.map((s, i) => npItem(s, true, i)).join("")}</div>`;
   }
+  // After the markup exists, and on every pass rather than only on a redraw: a card that was
+  // not rebuilt still has an empty slot if its bytes arrived since.
+  releasePosters(new Set(sessions.map(s => s.rating_key).filter(Boolean)));
+  if (!locked) paintPosters();
   if (count) count.textContent = locked || !sessions.length ? "" : String(sessions.length);
 }
 
