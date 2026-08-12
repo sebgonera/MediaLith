@@ -3,6 +3,42 @@
 **Status:** Accepted
 **Date:** 2026-07-29
 
+## Revision — 2026-08-12: step 1 is done, and it cost more than the one symbol
+
+The Context below is left exactly as it was measured on 2026-07-29, including the line
+`# CONFIG_MODULES is not set`, which stopped being true when step 1 was taken. A dated
+record is worth more than one edited to stay current, and this note is where the current
+state goes.
+
+`CONFIG_MODULES=y` now, with `MODULE_SIG_FORCE` beside it, and `plexos-init` loads four
+NVIDIA modules by `finit_module` — there is still no udev, no kmod and no modprobe, so
+those four are loaded because they are named in `plexos_init::nvidia::MODULES` and nothing
+else can be.
+
+What this decision did not anticipate is the part worth recording, because it is a general
+consequence of the trade rather than anything to do with NVIDIA. **Turning `MODULES` on
+gives kconfig a third answer for every tristate symbol in the tree, and it takes it.**
+Eleven options that had been built in or absent became `=m` on the next build, producing
+eight `.ko` files — and in an image with no module loader, a module is a feature that is
+silently gone. It compiles, it installs, it passes every test, and the thing it does never
+happens on a machine.
+
+One of the eight was `x86_pkg_temp_thermal`, which publishes the only thermal zone that
+reports the processor die. The activity card fell back to `acpitz` — a chassis sensor —
+and reported it as the processor, with nothing failing and nothing logged. The other seven
+were netfilter extensions that nothing in this image could ever have reached.
+
+Two things follow, and both are in place:
+
+- Anything MediaLith depends on is pinned `=y` in `linux.fragment`, and anything it does not
+  want is pinned `=n` rather than left modular.
+- `post-image-test.sh` stage 7 asserts that **every shipped `.ko` is one the loader names**,
+  reading the list out of `nvidia.rs` rather than keeping a second copy. A future kernel
+  bump that turns a built-in subsystem into a module fails the build and prints the module.
+
+The general form of it belongs with the decision: **admitting modules to this image changed
+the default answer for every driver in the kernel, not only for the one that motivated it.**
+
 ## Context
 
 PlexOS was moved to a machine with no integrated graphics and an RTX 5060 and did no

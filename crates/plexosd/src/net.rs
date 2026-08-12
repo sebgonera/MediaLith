@@ -479,7 +479,10 @@ pub fn wait_for_link(
                 io::ErrorKind::TimedOut,
                 format!(
                     "waited {}s for a wired interface with a carrier; interfaces seen: \
-                     {seen}. {remedy} Wireless is not configurable in this release.",
+                     {seen}. {remedy} Wireless can be joined from the console's Network \
+                     view once the console is reachable, which is why setup still asks for \
+                     a wired link: configuring the radio needs a network to configure it \
+                     over.",
                     timeout.as_secs()
                 ),
             ));

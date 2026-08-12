@@ -1285,14 +1285,23 @@ boots, serves the console, and transcodes on the CPU. No kernel driver binds to 
 this kernel builds `i915` and nothing else, so `/sys/class/drm` holds only `version` and
 `/dev/dri` never exists.
 
-Supporting it is not a kernel option away, and ADR-0015 works out why. The blocker is not
-NVIDIA: **`# CONFIG_MODULES is not set`.** This kernel cannot load a module at all, and an
-out-of-tree driver cannot be built in — so the first step is admitting loadable modules to
-an image whose defining property is that it is one artefact built from source and covered
-by one root hash. After that comes a package building NVIDIA's open modules (Blackwell
-requires them; they are dual MIT/GPL, which is the good news), GSP firmware, and a
-binary-only userspace that Plex reaches NVDEC and NVENC through. Buildroot's
-`nvidia-driver` is pinned at **390.151**, a Kepler-era branch, and is no help.
+That paragraph describes the machine as it was first tried, and the blocker it names is
+gone. **`CONFIG_MODULES=y` now** — with `MODULE_SIG_FORCE`, and ADR-0015 step 1 is where
+the trade is written down. `plexos-init` loads four NVIDIA modules by `finit_module`,
+because there is still no udev and no modprobe and nothing else can load anything.
+
+**What that cost is the part worth carrying forward, and it is not about NVIDIA.** Turning
+modules on gives kconfig a third answer for every tristate symbol in the tree, and it takes
+it: eleven options became `=m`, producing eight `.ko` files, in an image where a module is
+a feature that is *silently gone*. `efivarfs` was caught at the time; the other eight
+shipped for a further release, and one of them — `x86_pkg_temp_thermal` — publishes the only
+thermal zone that reports the processor die, so the activity card reported a chassis sensor
+as the processor with nothing failing and nothing logged. They are pinned now, and
+`post-image-test.sh` stage 7 asserts that every shipped `.ko` is one `plexos_init::nvidia::MODULES`
+names, so the next occurrence is a failed build that prints the module.
+
+Buildroot's `nvidia-driver` package is pinned at **390.151**, a Kepler-era branch, and was
+no help; the open modules are built by `BR2_PACKAGE_PLEXOS_NVIDIA` instead.
 
 `CONFIG_DRM_XE=y` is already set, so current Intel Arc cards work today with no change.
 `CONFIG_DRM_AMDGPU` is not set; it is the cheapest coverage available but is deliberately
