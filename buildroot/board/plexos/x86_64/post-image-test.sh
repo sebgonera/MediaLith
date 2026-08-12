@@ -990,27 +990,59 @@ else
           "--with-arch=x86-64"
 fi
 
-# One artefact, checked for instructions the baseline does not have.
+# And the artefacts themselves — by running them, not by disassembling them.
 #
-# busybox and not glibc, deliberately. glibc carries SSE4.2 and AVX2 implementations
-# on purpose and picks between them with IFUNC resolvers at load time, so finding one
-# there proves nothing. busybox has no CPU dispatch of any kind, so any post-baseline
-# instruction in it can only have come from the compiler — which makes it a direct
-# reading of the CPU floor the toolchain was configured with.
+# The obvious check is to grep a binary for instructions the baseline does not have.
+# **That check is unsound, and it was written here and failed on its first honest
+# test.** Scanning the generic busybox finds `pshufb`, `palignr` and `sha256rnds2`
+# after the toolchain was moved to -march=x86-64 — because busybox ships hand-written
+# SHA-1 and SHA-256 assembly in libbb/hash_sha*_hwaccel_x86-64.S and reaches it only
+# through `get_shaNI()`, which asks CPUID first. glibc does the same thing through
+# IFUNC. So the presence of a post-baseline instruction says nothing at all about the
+# floor: what matters is whether anything *executes* it on a processor that lacks it,
+# and only running the binary can answer that.
 #
-# Deliberately not a proof about every instruction in the image: it is five mnemonics
-# in one binary, chosen because none of them can be reached below the generation that
-# introduced it.
-BUSYBOX="${OUTPUT}/target/bin/busybox"
-OBJDUMP="$(find_tool objdump)"
-if [ ! -r "${BUSYBOX}" ]; then
-    skipped "busybox carries no post-baseline instructions" "no ${BUSYBOX}"
-elif [ -z "${OBJDUMP}" ]; then
-    skipped "busybox carries no post-baseline instructions" "no objdump"
+# qemu-user is what turns that into a test. It decodes every instruction against the
+# named model, so a binary that reaches its exit on an Opteron_G1 model has taken a
+# path containing nothing above the x86-64 baseline. Not a proof about every path —
+# a program has many — but a direct reading of the one that matters, which is startup.
+QEMU_USER="$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)"
+[ -z "${QEMU_USER}" ] && [ -x "${PLEXOS_QEMU_USER:-}" ] && QEMU_USER="${PLEXOS_QEMU_USER}"
+LOADER="${OUTPUT}/target/lib/ld-linux-x86-64.so.2"
+if [ -z "${QEMU_USER}" ]; then
+    skipped "target binaries start on a baseline CPU" \
+            "no qemu-x86_64 on this host; install qemu-user-static or set PLEXOS_QEMU_USER"
+elif [ ! -x "${LOADER}" ]; then
+    skipped "target binaries start on a baseline CPU" "no ${LOADER}"
 else
-    found="$("${OBJDUMP}" -d --no-show-raw-insn "${BUSYBOX}" 2>/dev/null \
-             | grep -oE '\b(crc32|pshufb|popcnt|pmuldq|blendvps)\b' | sort -u | tr '\n' ' ')"
-    check "busybox carries no post-baseline instructions" "${found}" ""
+    for entry in "busybox:bin/busybox:--help" \
+                 "curl:usr/bin/curl:--version" \
+                 "gpgv:usr/bin/gpgv:--version" \
+                 "veritysetup:usr/sbin/veritysetup:--version" \
+                 "wpa_supplicant:usr/sbin/wpa_supplicant:-v"; do
+        name="${entry%%:*}"; rest="${entry#*:}"
+        rel="${rest%%:*}"; args="${rest#*:}"
+        bin="${OUTPUT}/target/${rel}"
+        if [ ! -x "${bin}" ]; then
+            skipped "${name} starts on an Opteron_G1 CPU model" "no ${bin}"
+            continue
+        fi
+        # Opteron_G1 is the oldest AMD64 model QEMU offers: measured here to have no
+        # SSSE3, no SSE4, no POPCNT and no CMPXCHG16B. If it runs there it runs on
+        # anything that can execute the 64-bit ABI at all.
+        out="$( { timeout 90 "${QEMU_USER}" -cpu Opteron_G1 "${LOADER}" \
+                    --library-path "${OUTPUT}/target/lib:${OUTPUT}/target/usr/lib" \
+                    "${bin}" "${args}"; } 2>&1 )"
+        rc=$?
+        if [ ${rc} -eq 132 ] || grep -qi "illegal instruction" <<<"${out}"; then
+            bad "${name} starts on an Opteron_G1 CPU model" \
+                "SIGILL: something in the startup path is above the x86-64 baseline"
+        elif [ ${rc} -eq 124 ]; then
+            bad "${name} starts on an Opteron_G1 CPU model" "timed out"
+        else
+            ok "${name} starts on an Opteron_G1 CPU model"
+        fi
+    done
 fi
 
 stage "stage 9 — no package sync can recurse into an output tree"

@@ -39,7 +39,7 @@ CASES=(
   "curl:${TREE}/target/usr/bin/curl:--version"
   "gpgv:${TREE}/target/usr/bin/gpgv:--version"
   "veritysetup:${TREE}/target/usr/sbin/veritysetup:--version"
-  "mkfs.erofs:${TREE}/target/usr/sbin/mkfs.erofs:-V"
+  "mkfs.erofs:${TREE}/target/usr/bin/mkfs.erofs:-V"
   "ip:${TREE}/target/sbin/ip:-V"
   "wpa_supplicant:${TREE}/target/usr/sbin/wpa_supplicant:-v"
 )
