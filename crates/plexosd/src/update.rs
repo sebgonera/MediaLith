@@ -1095,7 +1095,10 @@ pub(crate) fn fetch_document(
 /// curl exits 22 for an HTTP error status when `--fail` is given, which separates "the
 /// publisher does not serve this" from "the network is broken" — and those have opposite
 /// meanings for an optional document.
-fn fetch_optional(curl: &Path, url: &str) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+pub(crate) fn fetch_optional(
+    curl: &Path,
+    url: &str,
+) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     const HTTP_ERROR: i32 = 22;
 
     if is_local(url) {

@@ -480,12 +480,26 @@ fn ask(
     let curl = crate::update::curl_for(&bundle_at_base).map_err(|error| error.to_string())?;
 
     let url = feed_url(base, channel);
-    let document = crate::update::fetch_document(&curl, &url).map_err(|error| {
-        format!(
-            "could not reach the update service: {error}. The system is otherwise \
-             unaffected — nothing about this changes what the appliance is running."
-        )
-    })?;
+    // Optional, because "this service publishes no such channel" is an answer and not a
+    // failure of the network. curl exits 22 for an HTTP error status, which is the only
+    // thing that separates a 404 from a server that is not there -- and the two need
+    // opposite words. Without the distinction, a stable appliance pointed at a tree with
+    // only a dev feed was told to check the address and re-read the signing instructions.
+    let document = crate::update::fetch_optional(&curl, &url)
+        .map_err(|error| {
+            format!(
+                "could not reach the update service: {error}. The system is otherwise \
+                 unaffected — nothing about this changes what the appliance is running."
+            )
+        })?
+        .ok_or_else(|| {
+            format!(
+                "this update service publishes nothing on the {channel} channel: there is no \
+                 {url}. The service is answering, so this is not a network fault. Remedy: \
+                 track a channel it does publish, or ask whoever runs it to promote a \
+                 release to {channel}."
+            )
+        })?;
 
     let (feed, bundle) = locate(base, &document)?;
 

@@ -1536,9 +1536,28 @@ fn update_report(
     update: &std::sync::Arc<crate::update::Job>,
     discovery: &std::sync::Arc<crate::discover::Discovery>,
 ) -> UpdateReport {
+    let mut availability = discovery.snapshot();
+
+    // What the machine is *set to* is true before anything has been checked, and the page
+    // draws it either way. Without this, an appliance tracking dev reports an empty channel
+    // for the first five minutes of every boot -- and the page's own fallback then draws the
+    // word "stable" over it, which is a settings page telling somebody the opposite of what
+    // their file says. Found on the appliance immediately after an update, in the window
+    // where nothing had been checked yet.
+    if let Ok(config) = crate::settings::load(&crate::settings::path())
+        && availability.channel.is_empty()
+    {
+        availability.channel = config.updates.channel;
+        config
+            .update_service
+            .url
+            .trim()
+            .clone_into(&mut availability.source);
+    }
+
     UpdateReport {
         progress: update.snapshot(),
-        availability: discovery.snapshot(),
+        availability,
     }
 }
 
