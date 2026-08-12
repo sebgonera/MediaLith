@@ -238,6 +238,45 @@ CONFIG_MODULE_SIG_SHA256=y
 # answers it in a second, and nothing else will say a word.
 CONFIG_EFIVAR_FS=y
 
+# That rule was written and then not finished, which is the part worth recording. The note
+# above pinned `efivarfs` and stopped; a build later, `.config` still carried eleven `=m`
+# lines building eight `.ko` files, and `find output/target -name '*.ko'` answered it in a
+# second exactly as promised, the first time anybody ran it. The eight are one thermal
+# driver and seven netfilter extensions -- seven rather than ten, because the three
+# `NF_LOG_*` symbols all build into `nf_log_syslog`.
+#
+# The one that mattered is this. `plexosd::metrics` reads processor die temperature from a
+# thermal zone typed `x86_pkg_temp`, and CONFIG_X86_PKG_TEMP_THERMAL is what publishes that
+# zone. As a module, with nothing in this image able to load one, the zone never exists --
+# so the activity card falls back to `acpitz`, a chassis sensor, and reports it. Nothing
+# fails, nothing is logged, and the number on the page is a real temperature of the wrong
+# thing. The remedy string in metrics.rs said to set the symbol to `y` "rather than `m`,
+# because this image is built with CONFIG_MODULES off", which stopped being true in the
+# section above and turned a correct instruction into a wrong explanation.
+CONFIG_X86_PKG_TEMP_THERMAL=y
+
+# The other seven modules are netfilter extensions, and they are here as `n` rather than
+# `y` -- ten symbols, because three of them share one module.
+#
+# They arrive from the architecture default config, not from anything this file asks for,
+# and nothing in this image can reach them: there is no iptables, no nft, no userspace of
+# any kind that speaks to netfilter, and no module loader to bring them in if there were.
+# Seven `.ko` files that ship in every image, ride in `/usr` under the root hash, and can
+# never be loaded is not a feature that is silently gone -- it is a feature that was never
+# wanted, taking up room and one line each in the shipped-module list that stage 7 now
+# checks. Turning them off makes that list exactly the four modules MediaLith deliberately
+# loads, which is what makes an unexpected `.ko` mean something.
+CONFIG_NETFILTER_XT_MARK=n
+CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=n
+CONFIG_NETFILTER_XT_TARGET_LOG=n
+CONFIG_NETFILTER_XT_TARGET_MASQUERADE=n
+CONFIG_NF_LOG_ARP=n
+CONFIG_NF_LOG_IPV4=n
+CONFIG_NF_LOG_IPV6=n
+CONFIG_NF_LOG_SYSLOG=n
+CONFIG_NF_REJECT_IPV4=n
+CONFIG_NF_REJECT_IPV6=n
+
 # ---------------------------------------------------------------------------
 # Note: wired Ethernet may arrive over USB
 # ---------------------------------------------------------------------------

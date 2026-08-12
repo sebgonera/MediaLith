@@ -768,7 +768,10 @@ fn notes_about(temperatures: &[Temperature], gpu: Option<&Gpu>) -> Vec<String> {
             "No processor die temperature: this kernel publishes {found}, none of which is \
              the processor itself -- acpitz is a chassis sensor. Remedy: set \
              CONFIG_X86_PKG_TEMP_THERMAL=y in the kernel fragment. It has to be `y` rather \
-             than `m`, because this image is built with CONFIG_MODULES off."
+             than `m`: this image does build modules now, for NVIDIA's out-of-tree ones, \
+             but nothing in it loads a module it was not written to load -- there is no \
+             udev and no modprobe -- so `m` here is the same as absent, and that is exactly \
+             how this zone went missing once already."
         ));
     }
 
