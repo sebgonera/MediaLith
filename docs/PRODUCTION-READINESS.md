@@ -180,6 +180,40 @@ thing they were pieces *of* still does not exist. What is closed, and what is no
 Update *distribution* is therefore not complete. What is complete is everything on the
 appliance and everything in the publishing tooling.
 
+### 1.35 A failed update raises the anti-rollback floor before it is known to have failed
+
+**Open decision, deliberately deferred on 2026-08-12. Do not close it by accident.**
+
+`update::write_slot` records the manifest's sequence as the new anti-rollback floor at the
+moment the boot entry is installed — after the partitions are written, before the machine has
+ever booted the release. The comment there explains the half that was thought through: doing
+it *earlier* would mean one failed download refuses that release for ever, on an appliance
+with deliberately no way to lower the number from the network.
+
+The sibling case had never been run until the ADR-0020 acceptance test ran it. Install a
+release, let ADR-0005 discover at boot that it is broken, and the machine hands itself back
+to the previous slot — with the floor now standing **above the release it is running**.
+Republishing the last known-good release, which is what anybody would reach for, is refused
+as a downgrade. Correctly: the counter cannot distinguish "the operator is recovering" from
+"an attacker is replaying", and that indistinguishability is the entire point of it.
+
+**What this costs today:** nothing is bricked, the console works, and the remedy is to
+publish a release with a **higher** stamp — which every new build has, since the stamp is a
+timestamp. Observed on the reference laptop, recovered by building
+`PLEXOS_VERSION=0.1.0.202608120254`.
+
+**Why it is not obviously a bug to fix.** The candidate change is to record the sequence when
+the *gate* marks the slot permanent rather than when the entry is installed, so "accepted"
+means "successfully ran". That is a change to the security-critical path ADR-0006 defines,
+and it has a cost of its own: between an install and a successful boot the floor would not
+have moved, so a machine that installs a release and is then handed an older signed one
+before rebooting would evaluate it against the older floor. Which of the two windows matters
+more is a real question, not an obvious one.
+
+**If it is taken up it needs its own ADR**, superseding the relevant part of ADR-0006, plus
+the rollback experiment run again — because the only way to see either behaviour is to break
+a release on purpose and reboot a machine three times.
+
 ### 1.4 The appliance cannot tell the time, and the trust chain consults the clock
 
 There is no time synchronisation of any kind — `plexos-update/src/clock.rs` says so

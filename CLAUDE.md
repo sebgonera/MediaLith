@@ -1311,7 +1311,10 @@ See `docs/DEVELOPMENT.md`. Short version: Buildroot needs a Linux host with real
 network access. It cannot be built in the hosted Claude Code environment — the proxy
 there reaches GitHub and nothing else, and Buildroot fetches from a dozen other hosts.
 
-## Open decisions, none blocking
+## Open decisions
+
+None blocks a build. Item 4 is the one that would cost somebody an evening if it were met
+without warning, and it has a written remedy rather than a fix.
 
 1. **Name — decided.** The product is **MediaLith** (2026-08-11). This entry existed
    because "PlexOS" used a third-party trademark; it no longer does, and the disclaimer
@@ -1326,3 +1329,13 @@ there reaches GitHub and nothing else, and Buildroot fetches from a dozen other 
    machines exist.
 2. **Secure Boot keys.** Enrol our own, or go through Microsoft's shim process.
 3. **Licence.** Not chosen.
+4. **When the anti-rollback floor should be recorded — IMPORTANT, deliberately deferred
+   2026-08-12.** The sequence is written when the boot entry is installed, so a release that
+   turns out to be unbootable raises the floor *above the release the machine ends up running
+   after the rollback*, and republishing the last good release is refused as a downgrade.
+   Nothing is bricked and the remedy is a higher stamp, which every build has. The candidate
+   change — record it when the gate marks the slot permanent — moves a security-critical
+   decision ADR-0006 owns and opens a different window, so it needs its own ADR and a rerun of
+   the rollback experiment. **The full statement of both sides is
+   `docs/PRODUCTION-READINESS.md` §1.35**; this entry exists so it is not lost, and the
+   readiness document is the one that is kept current.
