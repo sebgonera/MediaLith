@@ -2185,6 +2185,35 @@
   .pa-num { font-weight: 650; color: var(--ink); font-variant-numeric: tabular-nums; }
   .pa-sep { opacity: .5; }
 
+  /* The terminal's warning. Amber rather than red: this is a door that is meant to be
+     opened, by somebody who should know what is behind it -- not a fault. */
+  .termgate {
+    padding: var(--pad-card-sm) var(--pad-card);
+    border: 1px solid var(--border-warn);
+    border-left: 4px solid var(--degraded);
+    border-radius: var(--radius);
+    background: var(--surface-card);
+    margin-bottom: var(--gap-section);
+  }
+  .termgate-head { display: flex; align-items: flex-start; gap: var(--gap-control); }
+  .termgate-mark {
+    flex: 0 0 auto;
+    width: .6rem;
+    height: .6rem;
+    margin-top: .45rem;
+    border-radius: var(--radius-pill);
+    background: var(--degraded);
+  }
+  .termgate-what { margin: 0; font-size: var(--t-card); font-weight: 650; }
+  .termgate-where { margin: var(--s-1) 0 0; font-size: var(--t-meta); color: var(--muted); }
+  .termgate-why { margin-top: var(--s-3); }
+  .termgate-why > summary {
+    cursor: pointer;
+    font-size: var(--t-micro);
+    color: var(--muted);
+  }
+  .termgate-why > summary:hover { color: var(--ink); }
+
   /* The poster. A fixed shape, so a row of sessions lines up whatever artwork arrives --
      and so the placeholder and the picture occupy exactly the same space, which is what
      stops a card jumping when bytes land a second later. 2:3 is the poster ratio every
@@ -3141,8 +3170,12 @@
         <h2>Storage</h2>
         <p class="lede">Where the appliance keeps its own state, and where the library it
            plays actually lives.</p>
+        <!-- The loading state is a card, because everything that replaces it is one. It was
+             a bare paragraph above the cards, so a view still fetching showed one line of
+             unstyled text where a card was about to be -- which reads as a page that has
+             finished and has nothing to say. -->
         <div id="storage-body">
-          <p class="empty">Loading…</p>
+          <section class="card"><p class="empty">Loading…</p></section>
         </div>
         <section class="card plex" id="shares" data-fold="shares" aria-live="polite">
           <h3>Media shares</h3>
@@ -3250,15 +3283,30 @@
       <section class="view" data-view="advanced" id="view-advanced" hidden>
         <h2>Terminal</h2>
         <p class="lede">A root shell on the appliance, in the browser.</p>
-        <div class="absent" id="term-gate">
-          <strong>This is advanced administration.</strong> The shell below runs as root, in
-          the machine's own namespaces, with no confinement — that is deliberate, because a
-          confined shell cannot do the thing anyone opens one for. Everything else in this
-          console is a named operation with a remedy attached; this is the admission that the
-          list of operations cannot be complete, because every fault of the last month was
-          diagnosed by looking at something nobody had thought to expose.
-          <strong>ADR-0014: this console is fit for a trusted LAN and is not fit to expose
-          beyond one.</strong>
+        <!-- The warning, with a shape.
+             It was four sentences of equal weight in one block, so the two facts somebody
+             has to act on -- this is root with no confinement, and this console is not fit
+             to expose beyond a trusted LAN -- carried the same emphasis as the paragraph
+             explaining why that is deliberate. The reasoning is worth keeping and is worth
+             reading once; it is behind a disclosure now, which is where a thing you read
+             once belongs. The warning itself does not disappear and cannot be dismissed. -->
+        <div class="termgate" id="term-gate">
+          <div class="termgate-head">
+            <span class="termgate-mark" aria-hidden="true"></span>
+            <div>
+              <p class="termgate-what">Root shell, with no confinement</p>
+              <p class="termgate-where">This console is fit for a trusted LAN and is not fit
+                 to expose beyond one — ADR-0014.</p>
+            </div>
+          </div>
+          <details class="termgate-why">
+            <summary>Why it is not confined</summary>
+            <p class="hint">A confined shell cannot do the thing anyone opens one for.
+               Everything else in this console is a named operation with a remedy attached;
+               this is the admission that the list of operations cannot be complete, because
+               every fault of the last month was diagnosed by looking at something nobody had
+               thought to expose.</p>
+          </details>
         </div>
         <div id="term-host"></div>
       </section>
