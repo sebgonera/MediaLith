@@ -4,7 +4,7 @@
 # rollback on real hardware.
 #
 #   tools/break-bundle.sh <good-bundle-dir> <broken-bundle-dir> <version> \
-#                         <signing-key> <certificate>
+#                         <signing-key> <certificate> --channel <channel>
 #
 # The rollback path is the one branch of this project that a bug turns from "degrades"
 # into "bricks", and until it has actually run it is a claim rather than a fact. It
@@ -63,10 +63,24 @@ BROKEN="${2:-}"
 VERSION="${3:-}"
 KEY="${4:-}"
 CERT="${5:-}"
+shift 5 2>/dev/null || true
+
+# The channel is passed straight through to sign-bundle.sh, which has no default and will
+# not invent one (ADR-0020). A broken bundle published to a channel the appliance under test
+# does not track is refused before it is downloaded -- which is a perfectly correct refusal
+# and a completely useless experiment, because rollback is never reached.
+CHANNEL=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --channel) CHANNEL="${2:-}"; shift 2 ;;
+        --channel=*) CHANNEL="${1#--channel=}"; shift ;;
+        *) printf >&2 'unrecognised argument %s\n' "$1"; exit 2 ;;
+    esac
+done
 
 if [ -z "${GOOD}" ] || [ -z "${BROKEN}" ] || [ -z "${VERSION}" ] \
-   || [ -z "${KEY}" ] || [ -z "${CERT}" ]; then
-    printf >&2 'usage: %s <good-bundle-dir> <broken-bundle-dir> <version> <signing-key> <certificate>\n' "$0"
+   || [ -z "${KEY}" ] || [ -z "${CERT}" ] || [ -z "${CHANNEL}" ]; then
+    printf >&2 'usage: %s <good-bundle-dir> <broken-bundle-dir> <version> <signing-key> <certificate> --channel <channel>\n' "$0"
     printf >&2 '  remedy: the first is output/images/medialith-update from a build; the\n'
     printf >&2 '          third must sort above what the appliance is running, and the\n'
     printf >&2 '          last two are what tools/sign-bundle.sh takes\n'
@@ -140,7 +154,7 @@ PYTHON
 # Re-signed, so the appliance accepts it and only verity can object. The manifest is
 # rewritten from the amended update.json rather than patched, for the reason above.
 rm -f "${BROKEN}/manifest.json" "${BROKEN}/manifest.json.sig"
-"$(dirname "$0")/sign-bundle.sh" "${BROKEN}" "${KEY}" "${CERT}"
+"$(dirname "$0")/sign-bundle.sh" "${BROKEN}" "${KEY}" "${CERT}" --channel "${CHANNEL}"
 
 printf 'broken bundle at %s\n' "${BROKEN}"
 printf '  version:   %s  (must sort above what the appliance runs)\n' "${VERSION}"
