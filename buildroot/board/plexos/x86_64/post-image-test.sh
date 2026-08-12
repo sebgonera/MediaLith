@@ -765,10 +765,68 @@ stage "stage 7 — every shipped kernel module is one something loads"
 # "shipped but never loaded" impossible to express rather than merely tested for.
 NVIDIA_RS="${BOARD_DIR}/../../../../crates/plexos-init/src/nvidia.rs"
 MODULES_DIR="${OUTPUT}/target/usr/lib/modules"
+
+# Is the driver that needs modules actually in this build? Read from the *effective*
+# Buildroot config where there is one, because that is what the build used; the defconfig
+# is the fallback for a tree that has not been configured yet.
+BR_CONFIG="${OUTPUT}/.config"
+[ -r "${BR_CONFIG}" ] || BR_CONFIG="${BOARD_DIR}/../../../configs/plexos_x86_64_defconfig"
+NVIDIA_WANTED=0
+grep -q '^BR2_PACKAGE_PLEXOS_NVIDIA=y' "${BR_CONFIG}" 2>/dev/null && NVIDIA_WANTED=1
+
+# The audit itself, as a function, for one reason: the interesting case is a modules
+# directory that is not there at all, and the only honest way to test that is to call this
+# with a path that does not exist. Leaving it inline meant the absent case could only be
+# reached by breaking a real build, so it was never exercised -- and what it did was skip
+# the whole stage, silently, including on a build where NVIDIA is enabled and every
+# expected module is therefore missing. A skip reads as a pass.
+#
+#   $1  the modules directory to audit
+#   $2  1 if BR2_PACKAGE_PLEXOS_NVIDIA is enabled for this build
+#
+# Prints one line per problem and returns non-zero if there were any.
+module_audit() {
+    local dir="$1" nvidia="$2" problems="" module
+    local loaded shipped
+
+    loaded=$(awk '/pub const MODULES/,/;/' "${NVIDIA_RS}" \
+             | grep -oE '"[a-z0-9_-]+"' | tr -d '"' | sort -u)
+
+    if [ ! -d "${dir}" ]; then
+        # No directory is the correct and expected state for an Intel-only image: nothing
+        # is out of tree, so nothing needs a loader. It is a defect only when something is
+        # supposed to be in there.
+        if [ "${nvidia}" = "1" ]; then
+            printf 'no modules directory at %s, but BR2_PACKAGE_PLEXOS_NVIDIA is enabled: %s\n' \
+                   "${dir}" "$(printf '%s' "${loaded}" | tr '\n' ' ')is what plexos-init will try to load"
+            return 1
+        fi
+        return 0
+    fi
+
+    shipped=$(find "${dir}" -name '*.ko' -printf '%f\n' 2>/dev/null | sed 's/\.ko$//' | sort -u)
+
+    # Every shipped module must be one the loader names.
+    for module in ${shipped}; do
+        printf '%s\n' "${loaded}" | grep -qx "${module}" \
+            || problems="${problems}ships but nothing loads it: ${module}"$'\n'
+    done
+
+    # And the other direction, which only matters when the package that provides them is in.
+    if [ "${nvidia}" = "1" ]; then
+        for module in ${loaded}; do
+            printf '%s\n' "${shipped}" | grep -qx "${module}" \
+                || problems="${problems}the loader names it and it is not shipped: ${module}"$'\n'
+        done
+    fi
+
+    [ -z "${problems}" ] && return 0
+    printf '%s' "${problems}"
+    return 1
+}
+
 if [ ! -r "${NVIDIA_RS}" ]; then
     skipped "the whole stage" "needs ${NVIDIA_RS} to read the loader's own module list"
-elif [ ! -d "${MODULES_DIR}" ]; then
-    skipped "the whole stage" "no ${MODULES_DIR}; nothing has installed modules into the target"
 else
     # The names between the brackets of `pub const MODULES: [&str; N] = [...]`, one per
     # line. Parsed rather than duplicated, for the reason in the comment above.
@@ -791,43 +849,38 @@ else
     check "the list is read whole, against the length it declares" \
           "$(printf '%s\n' "${LOADED}" | grep -c .)" "${DECLARED:-?}"
 
-    SHIPPED=$(find "${MODULES_DIR}" -name '*.ko' -printf '%f\n' 2>/dev/null \
-              | sed 's/\.ko$//' | sort -u)
+    printf '  %-6s %s\n' "info" \
+           "BR2_PACKAGE_PLEXOS_NVIDIA is $([ "${NVIDIA_WANTED}" = 1 ] && echo enabled || echo 'not set'), per ${BR_CONFIG##*/}"
 
-    # Every shipped module must be one the loader names. The failure prints the module,
-    # because "an unexpected module is present" is not something anybody can act on.
-    unexpected=""
-    for module in ${SHIPPED}; do
-        printf '%s\n' "${LOADED}" | grep -qx "${module}" || unexpected="${unexpected} ${module}"
-    done
-    assert "no module ships that nothing loads${unexpected:+ (found:${unexpected})}" \
-           "[ -z '${unexpected}' ]" \
-           "each of those is built as a module and never loaded, so the feature behind it is absent on the machine: pin its CONFIG_* to =y in linux.fragment, or to =n if MediaLith does not want it"
-
-    # And the other direction, which the rule above cannot see: a module the loader expects
-    # and the image does not carry is an RTX machine that comes up with no NVDEC.
-    missing=""
-    for module in ${LOADED}; do
-        printf '%s\n' "${SHIPPED}" | grep -qx "${module}" || missing="${missing} ${module}"
-    done
-    if [ -n "${missing}" ]; then
-        # Not a failure when the package is off: a build without BR2_PACKAGE_PLEXOS_NVIDIA
-        # is a legitimate build, and it is the one every Intel-only image makes.
-        if grep -q '^BR2_PACKAGE_PLEXOS_NVIDIA=y' "${BOARD_DIR}/../../../configs/plexos_x86_64_defconfig" 2>/dev/null; then
-            bad "every module the loader names is shipped (missing:${missing})" \
-                "plexos-init will call finit_module on a path that does not exist; check the plexos-nvidia package built"
-        else
-            skipped "every module the loader names is shipped" \
-                    "BR2_PACKAGE_PLEXOS_NVIDIA is not set, so there is nothing to ship"
-        fi
+    # The real audit. Its output is the list of problems, so the failure names them.
+    audit_problems="$(module_audit "${MODULES_DIR}" "${NVIDIA_WANTED}")" && audit_ok=1 || audit_ok=0
+    if [ "${audit_ok}" = "1" ]; then
+        ok "every shipped module is one the loader names, and nothing is missing"
     else
-        ok "every module the loader names is shipped"
+        bad "the shipped module set does not match the loader's" \
+            "$(printf '%s' "${audit_problems}" | tr '\n' ';') -- pin an unexpected module's CONFIG_* to =y in linux.fragment (or =n if MediaLith does not want it); a missing one means the plexos-nvidia package did not build"
     fi
+
+    # The edge case this stage used to get wrong, exercised rather than reasoned about.
+    #
+    # A build with NVIDIA enabled and no modules directory at all is the worst version of
+    # this failure: plexos-init calls finit_module on four paths that do not exist, an RTX
+    # machine comes up with no NVDEC, and the old code answered by skipping the stage --
+    # which prints "skip" and counts as not-failed. Both directions are checked, because a
+    # rule that fails an Intel-only image would be its own defect.
+    absent="${TMP}/no-such-modules-dir"
+    rm -rf "${absent}"
+    assert "a missing modules directory FAILS when NVIDIA is enabled" \
+           "! module_audit '${absent}' 1 >/dev/null" \
+           "this is the case the stage used to skip; a skip reads as a pass"
+    assert "and is accepted when NVIDIA is not" \
+           "module_audit '${absent}' 0 >/dev/null" \
+           "an Intel-only image ships no modules at all and that is correct, not a fault"
 
     # Named on its own because it is the one that was actually wrong, and because a
     # regression here is invisible: the page keeps showing a temperature.
     assert "the processor die thermal driver is built in, not shipped as a module" \
-           "! find '${MODULES_DIR}' -name 'x86_pkg_temp_thermal.ko' | grep -q ." \
+           "! find '${MODULES_DIR}' -name 'x86_pkg_temp_thermal.ko' 2>/dev/null | grep -q ." \
            "CONFIG_X86_PKG_TEMP_THERMAL went back to =m: nothing loads it, the x86_pkg_temp zone never appears, and metrics falls back to acpitz -- a chassis sensor reported as the processor"
 fi
 
