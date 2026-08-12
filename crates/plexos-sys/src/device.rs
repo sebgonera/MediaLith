@@ -351,33 +351,74 @@ pub fn resolve_on(disk: Option<&str>, path: &str, log: &mut dyn FnMut(&str)) -> 
         return Ok(path.to_owned());
     };
 
-    // Waited for first, whatever the disk: enumeration is what is slow, and a USB stick
-    // that has not appeared yet has no partitions to prefer between.
-    let any = wait_for_partlabel(label, DEVICE_TIMEOUT, log)?;
     let Some(disk) = disk else {
-        return Ok(any);
+        // Nothing to scope to: one-disk machines, and firmware that does not publish which
+        // device it booted. Waiting for the label on any disk is all there is, and is what
+        // this has always done.
+        return wait_for_partlabel(label, DEVICE_TIMEOUT, log);
     };
 
-    match by_partlabel_on(disk, label) {
-        Ok(scoped) => {
-            if scoped != any {
-                log(&format!(
-                    "{label} is on more than one disk; using {scoped} because the firmware \
-                     booted {disk}, not {any}"
-                ));
-            }
-            Ok(scoped)
+    // Waited for **on the disk the firmware booted**, and this ordering is the whole fix.
+    //
+    // It used to wait for the label on any disk and only then prefer the booted one, which
+    // reads as harmless and is a race. A machine booting from a USB stick with a second
+    // MediaLith disk attached enumerates the internal disk first: at 8.6 s the leftover
+    // 500 GB disk had `usr_a`, at 8.7 s this had already resolved to it and started
+    // dm-verity against it, and at 9.7 s -- a second later -- the stick's own partitions
+    // appeared. The boot failed with "metadata block 1 is corrupted", which is what
+    // verifying one installation's `/usr` against another's hash tree looks like.
+    //
+    // The fallback made it worse rather than saving it: `by_partlabel_on` could not find the
+    // partition on a stick that did not exist yet, so the code took the other disk's
+    // deliberately. For `/usr` that is a failed boot; for `/var` it is silent, and the
+    // machine comes up on another installation's Plex database, device token and
+    // certificate with nothing reporting anything wrong.
+    wait_for_partlabel_on(disk, label, DEVICE_TIMEOUT, log)
+}
+
+/// Waits for a labelled partition **on one disk**, and refuses every other disk's.
+///
+/// # Errors
+/// If the disk has no partition with that label before the timeout. It does not fall back
+/// to another disk: a `usr_a` belonging to a different installation is not a worse answer
+/// than none, it is a wrong one, and the `/var` case is wrong without saying so.
+pub fn wait_for_partlabel_on(
+    disk: &str,
+    label: &str,
+    timeout: Duration,
+    log: &mut dyn FnMut(&str),
+) -> io::Result<String> {
+    let deadline = Instant::now() + timeout;
+    let mut announced = false;
+
+    loop {
+        if let Ok(device) = by_partlabel_on(disk, label) {
+            return Ok(device);
         }
-        // The boot disk has no such partition. Reported and then the unscoped answer is
-        // used: refusing here would turn a machine that boots today into one that does
-        // not, over a preference.
-        Err(error) => {
-            log(&format!(
-                "{error}. Falling back to {any}, which is what this did before the boot \
-                 disk could be identified."
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "waited {}s for partition {label} on {disk}, which is the disk the \
+                     firmware booted. It never appeared. Another disk may carry that label \
+                     and this deliberately did not use it: mounting another installation's \
+                     partition is a wrong answer rather than a slow one. Remedy: if this \
+                     machine has a second MediaLith disk attached, unplug it and restart; \
+                     if not, the boot disk's partition table is not what this release \
+                     expects.",
+                    timeout.as_secs()
+                ),
             ));
-            Ok(any)
         }
+
+        if !announced {
+            announced = true;
+            log(&format!(
+                "waiting for partition {label} on {disk} (USB storage enumerates seconds \
+                 after PCI, so the disk this booted from may not be here yet)"
+            ));
+        }
+        sleep(POLL);
     }
 }
 
@@ -431,6 +472,67 @@ pub fn booted_disk(log: &mut dyn FnMut(&str)) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_label_on_the_wrong_disk_is_refused_rather_than_used() {
+        // The boot this exists to stop, from a real console log. A USB stick with a second
+        // MediaLith disk attached: at 8.6 s the internal disk's `usr_a` existed, at 8.7 s
+        // PID 1 had resolved to it and started dm-verity, and at 9.7 s the stick's own
+        // partitions appeared. "metadata block 1 is corrupted" is what verifying one
+        // installation's /usr against another's hash tree looks like.
+        //
+        // The old code waited for the label on *any* disk and only then preferred the booted
+        // one, so the race was already lost by the time the preference was applied -- and
+        // when the preference could not be satisfied it took the other disk deliberately.
+        //
+        // A disk that does not exist stands in for one that has not enumerated yet: both are
+        // "no such partition on this disk", which is the state that used to fall through.
+        let mut said = Vec::new();
+        let error = wait_for_partlabel_on(
+            "nonexistent-disk",
+            "usr_a",
+            Duration::from_millis(20),
+            &mut |m| said.push(m.to_owned()),
+        )
+        .expect_err("a partition that is not on this disk must not resolve to another's");
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        let message = error.to_string();
+        assert!(
+            message.contains("firmware booted"),
+            "the refusal has to say which disk it was looking at: {message}"
+        );
+        assert!(
+            message.contains("Remedy:"),
+            "and name a remedy, like every other diagnostic here: {message}"
+        );
+        assert!(
+            message.contains("unplug"),
+            "the remedy for the boot this came from is to remove the other disk: {message}"
+        );
+    }
+
+    #[test]
+    fn without_a_booted_disk_the_old_behaviour_is_what_is_left() {
+        // `None` is not a failure: it is every one-disk machine, and every firmware that
+        // does not publish which device it booted. There is nothing to scope to, so the
+        // label alone is all there is -- and that has to keep working, or the fix for a
+        // two-disk machine would stop a one-disk machine booting.
+        //
+        // A path that is not a by-partlabel path is returned untouched, which is the branch
+        // every non-label device takes.
+        let mut said = Vec::new();
+        assert_eq!(
+            resolve_on(None, "/dev/vda2", &mut |m| said.push(m.to_owned())).unwrap(),
+            "/dev/vda2"
+        );
+        assert_eq!(
+            resolve_on(Some("vda"), "/dev/mapper/plexos-usr", &mut |m| said
+                .push(m.to_owned()))
+            .unwrap(),
+            "/dev/mapper/plexos-usr"
+        );
+    }
 
     /// The shape of a real partition uevent, as the kernel emits it.
     const PARTITION: &str = "MAJOR=254\nMINOR=2\nDEVNAME=vda2\nDEVTYPE=partition\n\
