@@ -3085,6 +3085,16 @@
           </div>
           <div id="streams-body"><p class="empty">Loading…</p></div>
         </section>
+
+        <!-- MAINTENANCE, last and shut.
+             The vertical narrative this view is built around is: what the service is doing,
+             what it is costing, who is watching, and only then how to change it. Version
+             controls sat in the same card as the state line, which put "reinstall" beside
+             "Running" -- two things a person reaches for in completely different moods. -->
+        <details class="card" id="plex-maintenance" hidden>
+          <summary>Version and installation</summary>
+          <div id="plex-maintenance-body"></div>
+        </details>
       </section>
 
       <!-- ----------------------------------------------------------------- STORAGE -->
@@ -6531,9 +6541,21 @@ function renderPlexInto(report) {
               ? esc(claim.detail)
               : `<span class="warnink">Not signed in.</span> ${esc(claim.detail)}`}</dd>`
           : ""}
-      </dl>
-      ${plexVersionsMarkup(report, busy)}
-      ${progressMarkup(report, phase, busy)}`;
+      </dl>`;
+
+    // The maintenance half, into its own element after the streams. Written here rather
+    // than in a second renderer because it comes from the same report and a second one
+    // would be a second thing to keep in agreement with this.
+    const care = document.getElementById("plex-maintenance");
+    const careBody = document.getElementById("plex-maintenance-body");
+    if (care && careBody) {
+      care.hidden = false;
+      careBody.innerHTML = `${plexVersionsMarkup(report, busy)}
+        ${progressMarkup(report, phase, busy)}`;
+      // An install that is running or has failed is not something to report into a
+      // disclosure somebody has shut.
+      if (busy || phase === "failed") care.open = true;
+    }
     wirePlexVersionControls(report);
     renderPlexFuture(report);
     return;
