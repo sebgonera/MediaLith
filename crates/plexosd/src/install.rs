@@ -80,6 +80,12 @@ pub struct Candidate {
 pub enum Refusal {
     /// It is the disk MediaLith is running from.
     IsSource(String),
+    /// Which disk this system is running from could not be established, so no disk can be
+    /// ruled out and therefore none can be offered.
+    ///
+    /// Not a property of the disk it is attached to. It is attached to *every* disk,
+    /// because the thing that is unknown is which of them must be protected.
+    SourceUnknown,
     /// There is no such disk.
     Unknown(String),
     /// It cannot hold the layout.
@@ -102,6 +108,14 @@ impl std::fmt::Display for Refusal {
                  onto. Remedy: choose the disk you want MediaLith to live on. This one is \
                  the installer, and erasing it half way through would leave a machine \
                  with neither system."
+            ),
+            Self::SourceUnknown => write!(
+                f,
+                "MediaLith cannot identify the disk it booted from, so no disk can be \
+                 offered: the one that must be protected is the one that cannot be named. \
+                 Remedy: none from the console. This disk is not refused for anything \
+                 about itself, and installing onto the wrong one erases the running \
+                 system."
             ),
             Self::Unknown(name) => write!(
                 f,
@@ -150,7 +164,19 @@ pub fn candidates(env: &impl Environment, source: Option<&str>) -> io::Result<Ve
             continue;
         };
         disk.is_source = source.is_some_and(|s| s == disk.name);
-        disk.refusal = refusal_for(&disk).map(|r| r.to_string());
+        // `source` being `None` is the case this whole module's safety turns on, and it is
+        // handled here rather than left to callers because there is exactly one safe
+        // reading of it and it is not the one that falls out naturally. With no source
+        // known, `is_source` is false for every disk, `refusal_for` finds nothing to say
+        // about any of them, and the list comes back describing a machine where every disk
+        // is free to erase -- which is "nothing is excluded" standing in for "I do not
+        // know", the two values this project has already written down as the same value
+        // with opposite meanings. `POST /api/install` refused this case from the day it was
+        // written; `GET` did not, so the page offered disks the POST would then refuse.
+        disk.refusal = match source {
+            Some(_) => refusal_for(&disk).map(|r| r.to_string()),
+            None => Some(Refusal::SourceUnknown.to_string()),
+        };
         disks.push(disk);
     }
 
@@ -705,6 +731,13 @@ pub struct Progress {
     pub error: Option<String>,
     /// The disks on this machine, refreshed on every read.
     pub disks: Vec<Candidate>,
+    /// The disk MediaLith is running from, if that could be established.
+    ///
+    /// `None` is why every disk in `disks` carries a refusal, and the page needs to be able
+    /// to tell that apart from a machine with no usable disks: both show nothing to install
+    /// onto, and they call for opposite sentences. Reported as well as acted on, because a
+    /// person told "no disk can be used" deserves to know it is not about their disks.
+    pub source: Option<String>,
     /// Everything said so far.
     pub log: Vec<String>,
 }
@@ -716,6 +749,7 @@ impl Default for Progress {
             detail: "nothing has been installed".to_owned(),
             error: None,
             disks: Vec::new(),
+            source: None,
             log: Vec::new(),
         }
     }
@@ -739,6 +773,9 @@ impl Job {
         // looking at the page should appear, and a cached list is one that offers a disk
         // that has been unplugged.
         state.disks = candidates(env, source).unwrap_or_default();
+        // Set here rather than at `begin`, so it is refreshed with the disks it explains
+        // and cannot be left over from a snapshot taken under different conditions.
+        state.source = source.map(str::to_owned);
         state.clone()
     }
 
@@ -895,6 +932,63 @@ mod tests {
             vet(&disks, "sda", "sda"),
             Err(Refusal::IsSource(_))
         ));
+    }
+
+    #[test]
+    fn an_unknown_running_disk_refuses_every_disk_rather_than_excluding_none() {
+        // The defect this closes: `GET /api/install` passed `None` straight through, so
+        // `is_source` was false everywhere, no disk collected a refusal, and the page drew
+        // a radio button and an install button beside every disk on the machine -- while
+        // `POST` refused the request outright. The backend was right and the page invited
+        // somebody to make a request that could not succeed, which is the worst of both:
+        // it reads as a bug in the appliance, and the one time it is not is the time
+        // somebody finds a way to force it through.
+        let disks = candidates(&laptop(), None).unwrap();
+        assert!(!disks.is_empty(), "the fixture has disks to refuse");
+
+        for disk in &disks {
+            let refusal = disk
+                .refusal
+                .as_deref()
+                .unwrap_or_else(|| panic!("{} was offered with no source known", disk.name));
+            assert!(
+                refusal.contains("cannot identify the disk it booted from"),
+                "{refusal}"
+            );
+            assert!(refusal.contains("Remedy:"), "{refusal}");
+            // Not about the disk. Somebody reading this must not go looking for a fault in
+            // a drive that has nothing wrong with it.
+            assert!(
+                refusal.contains("not refused for anything about itself"),
+                "{refusal}"
+            );
+        }
+
+        // And the flag is still false, because none of them *is* the source -- which is
+        // precisely why the refusal cannot be carried by `is_source`.
+        assert!(disks.iter().all(|d| !d.is_source));
+    }
+
+    #[test]
+    fn the_snapshot_says_which_disk_it_booted_from_so_the_page_can_tell_the_states_apart() {
+        // "Every disk is refused" is reached by two roads: nothing here is big enough, and
+        // the boot disk could not be named. They need opposite sentences, and the disk list
+        // alone cannot distinguish them.
+        let job = Job::new();
+
+        let known = job.snapshot(&laptop(), Some("sda"));
+        assert_eq!(known.source.as_deref(), Some("sda"));
+        assert!(
+            known.disks.iter().any(|d| d.refusal.is_none()),
+            "with the source known, something is installable"
+        );
+
+        let unknown = job.snapshot(&laptop(), None);
+        assert_eq!(unknown.source, None);
+        assert!(
+            unknown.disks.iter().all(|d| d.refusal.is_some()),
+            "with the source unknown, nothing is"
+        );
     }
 
     #[test]

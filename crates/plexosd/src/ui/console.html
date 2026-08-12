@@ -6235,7 +6235,10 @@ function renderInstall(report) {
   renderStorageDisks(report);
 
   const typing = document.activeElement && document.activeElement.id === "install-confirm";
-  const rendered = JSON.stringify([phase, report.detail, report.error, disks, (report.log || []).length]);
+  // report.source is in here because the section reads it: a cache keyed on everything but
+  // the field you just added is the defect already in the trap list, and this one would
+  // hide the difference between "cannot identify the boot disk" and "here are your disks".
+  const rendered = JSON.stringify([phase, report.detail, report.error, report.source ?? null, disks, (report.log || []).length]);
   if (rendered === lastInstallRendered && !busy) return;
   if (typing) return;
   lastInstallRendered = rendered;
@@ -6260,13 +6263,31 @@ function renderInstall(report) {
        </div>`
     : "";
 
+  // Whether the appliance could name the disk it booted from. Null means it could not, and
+  // that is a different state from "no disk here is big enough": every disk carries a
+  // refusal, so the two look identical from `usable.length` alone and need opposite
+  // sentences. The server refuses the POST in this state and always has; this is the half
+  // that stops the page inviting somebody to make a request that cannot succeed.
+  const sourceKnown = report.source !== null && report.source !== undefined;
+
   document.getElementById("install").innerHTML = `
     <h3>Install to a disk</h3>
     <p class="warn"><strong>This erases the disk you choose, completely.</strong> MediaLith
-      copies the system it is running now onto it. The disk this console is running from is
-      not offered, and anything else you pick loses everything it holds.</p>
+      copies the system it is running now onto it. ${sourceKnown
+        ? `The disk this console is running from (<span class="mono">${esc(report.source)}</span>) is
+           not offered, and anything else you pick loses everything it holds.`
+        : `Nothing can be installed onto right now — see below.`}</p>
     <ul class="disks">${disks.map(row).join("")}</ul>
-    ${usable.length === 0
+    ${!sourceKnown
+      ? `<p class="warn"><strong>Installation is disabled.</strong> MediaLith cannot reliably
+           identify the device it booted from, so installation is disabled to protect existing
+           disks. It finds its own disk through the verified <span class="mono">/usr</span>
+           rather than by partition label, because labels are not unique once a second
+           MediaLith disk exists — and a guess here erases the running system.</p>
+         <p class="hint">Nothing is wrong with the disks listed above; they are refused
+           because the one that must be protected cannot be named. This is not a booted
+           MediaLith system, or its verified <span class="mono">/usr</span> is not mounted.</p>`
+      : usable.length === 0
       ? `<p class="hint">No disk here can be installed onto. Attach one and reload.</p>`
       : `<div class="field">
            <label for="install-confirm">Type the name of the disk to confirm</label>
