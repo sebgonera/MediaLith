@@ -4803,10 +4803,18 @@ function renderSummary() {
       gpu.health === "ready" ? "ready" : gpu.health === "degraded" ? "degraded"
         : gpu.health === "unavailable" ? "unavailable" : "",
       transcodeState,
-      // The consequence, not the verdict again. This is the sentence the whole project
-      // exists to be able to print, and "unavailable" on its own does not say that a
-      // high-bitrate file will stutter.
-      (VERDICT[gpu.health] || [])[1] || "",
+      // The consequence, not the verdict again -- and only where there is one. "Plex will
+      // transcode on the CPU. Expect stutter on high-bitrate files." is the sentence this
+      // whole project exists to be able to print, and `unavailable` on its own does not say
+      // it. But `ready` is the steady state of a working appliance, and there "Plex will
+      // transcode on the GPU." says what the word above it and the two facts below it have
+      // already said three times.
+      //
+      // So it follows the rule the Plex card beside it already follows: a sentence appears
+      // when it has something to explain. On a healthy machine that leaves all four cards
+      // carrying facts and nothing else, which is what closed most of the height they did
+      // not agree on -- prose was the variance.
+      gpu.health === "ready" ? "" : (VERDICT[gpu.health] || [])[1] || "",
       transcodeFacts,
       `<button class="ghost" data-goto="system">Graphics detail</button>`) +
     summaryCard("sum-storage", ICONS.disk, "Storage", storageLevel, storageState, "",
