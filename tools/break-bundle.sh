@@ -98,6 +98,49 @@ case "${VERSION}" in
         ;;
 esac
 
+# A stamp far in the future is refused, and this guard exists because the mistake was made.
+#
+# The stamp is the anti-rollback sequence, and an appliance records it when the boot entry is
+# installed -- before anyone can know the release is the broken one. So a broken bundle
+# stamped ahead of real time raises the machine's floor above the clock, and every *honest*
+# build made before that time is then refused as a downgrade. That is not a fault in the
+# appliance: it is doing exactly what ADR-0006 asks. It is a fault in the experiment, and it
+# cost a rebuild the evening this tool was last used.
+#
+# One minute above the release under test is all that is needed -- systemd-boot orders by
+# version, so a broken bundle only has to sort above the running one, not above the future.
+#
+# Real releases are stamped from `date -u` by post-image.sh and cannot trip this. It is
+# checked here rather than in sign-bundle.sh deliberately: signing a genuine release with a
+# scheduled future stamp is somebody's decision to make, and only this tool has a reason to
+# be handed a version by hand.
+# Five, not an hour. The threshold has to be tighter than the mistake it prevents, and the
+# mistake made here was thirty minutes -- so an hour would have let it straight through and
+# the guard would have been a decoration. A future stamp is never *needed*: the bundle only
+# has to sort above the release under test, which is in the past. The five minutes are slack
+# for a build host whose clock is a little ahead, not room for a decision.
+FUTURE_MINUTES=5
+python3 - "${VERSION}" "${FUTURE_MINUTES}" <<'PYTHON' || exit 1
+import calendar, sys, time
+
+version, allowed = sys.argv[1], int(sys.argv[2])
+stamp = version.split(".")[-1]
+wanted = calendar.timegm(time.strptime(stamp, "%Y%m%d%H%M"))
+ahead = (wanted - time.time()) / 60
+
+if ahead > allowed:
+    sys.exit(
+        f"{version} is stamped {ahead:.0f} minutes into the future, and this refuses more\n"
+        f"  than {allowed}.\n"
+        "  The stamp becomes the appliance's anti-rollback floor the moment the boot entry\n"
+        "  is installed -- before the release has proven itself -- so a future stamp on a\n"
+        "  bundle you intend to fail leaves the machine refusing every honest build made\n"
+        "  before that time, including the one it rolled back to.\n"
+        "  Remedy: one minute above the release under test is enough. systemd-boot orders\n"
+        "  by version, so it only has to sort above the running one."
+    )
+PYTHON
+
 [ -f "${GOOD}/update.json" ] || {
     printf >&2 'no update.json in %s, so that is not a bundle\n' "${GOOD}"
     printf >&2 '  remedy: point this at output/images/medialith-update\n'

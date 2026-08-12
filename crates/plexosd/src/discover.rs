@@ -264,18 +264,78 @@ pub fn schedule(
         ));
         std::thread::sleep(std::time::Duration::from_secs(FIRST_CHECK_DELAY_SECS));
         loop {
-            // An install owns the machine's attention and the same lock the check would
-            // want. Skipping this round is right rather than waiting: the next one is a day
-            // away and by then the install has long finished or long failed.
-            if update.snapshot().phase.is_running() {
-                log("an update is in progress, so this round's check is skipped");
-            } else if discovery.begin() {
-                check(&discovery);
-                log(&discovery.snapshot().detail);
-            }
+            // Read on every round rather than once, so switching automatic checking off
+            // takes effect at the next round instead of at the next boot. The daemon runs
+            // for weeks; a setting that needed a restart would be a setting somebody turned
+            // off and then watched the machine ignore.
+            let config = crate::settings::load(&crate::settings::path()).ok();
+            let mut say = |line: &str| log(line);
+            automatic_round(
+                config.as_ref(),
+                update.snapshot().phase.is_running(),
+                &discovery,
+                &mut say,
+            );
             std::thread::sleep(std::time::Duration::from_secs(INTERVAL_SECS + offset));
         }
     });
+}
+
+/// Why an automatic round asked nothing, or `None` if it should ask.
+///
+/// **Automatic only.** `Check now` reaches [`check`] directly and is deliberately not
+/// governed by this: the switch is about whether the appliance goes to the network *on its
+/// own*, and somebody standing at the console pressing a button has answered that question
+/// for themselves.
+///
+/// `None` for a configuration that could not be read, which is the one case where doing
+/// nothing would be worse. [`check`] loads the file itself, fails on it, and reports the
+/// failure where a person can see it; skipping silently would leave an appliance with a
+/// broken config looking like one with nothing to say.
+#[must_use]
+pub fn automatic_skip(
+    config: Option<&plexos_types::config::Config>,
+    install_running: bool,
+) -> Option<String> {
+    if install_running {
+        // An install owns the machine's attention and the same lock the check would want.
+        // Skipping this round is right rather than waiting: the next one is a day away and
+        // by then the install has long finished or long failed.
+        return Some("an update is in progress, so this round's check is skipped".to_owned());
+    }
+    match config {
+        Some(config) if !config.update_service.check => Some(
+            "automatic checking is switched off in Settings, so nothing was asked of the \
+             update service"
+                .to_owned(),
+        ),
+        _ => None,
+    }
+}
+
+/// One round of the automatic schedule. Returns whether it asked.
+///
+/// Split out of the thread above because the thread sleeps for a day and cannot be tested,
+/// and the thing worth testing is exactly the decision it makes at the top of each round.
+/// Before this existed the round asked unconditionally, so `[update_service].check = false`
+/// was stored, displayed, and did nothing — the fourth time this project has shipped a
+/// setting with no reader, and the first time it was one written the same evening.
+pub fn automatic_round(
+    config: Option<&plexos_types::config::Config>,
+    install_running: bool,
+    discovery: &Discovery,
+    log: &mut dyn FnMut(&str),
+) -> bool {
+    if let Some(why) = automatic_skip(config, install_running) {
+        log(&why);
+        return false;
+    }
+    if !discovery.begin() {
+        return false;
+    }
+    check(discovery);
+    log(&discovery.snapshot().detail);
+    true
 }
 
 /// What a channel file says.
@@ -685,6 +745,78 @@ mod tests {
         assert!(state.available.is_none());
         assert!(state.checked_seconds_ago.is_none());
         assert!(state.error.is_none());
+    }
+
+    /// A configuration with automatic checking in a chosen state.
+    ///
+    /// Built by parsing text rather than by constructing the struct, so a test here cannot
+    /// pass against a file the parser would reject.
+    fn config_with_automatic(check: bool) -> plexos_types::config::Config {
+        plexos_types::config::Config::parse(&format!(
+            // A source that is configured and refuses instantly. Configured, because the
+            // switch has to be tested on a machine that has somewhere to look; refusing
+            // instantly, because if the guard ever regresses this test must fail in
+            // milliseconds rather than sit in a sixty-second fetch timeout.
+            "schema_version = 1\n\n[update_service]\nurl = \"http://127.0.0.1:1\"\n\
+             check = {check}\n"
+        ))
+        .expect("a configuration this build writes")
+    }
+
+    #[test]
+    fn automatic_checking_switched_off_asks_nothing_at_all() {
+        // The bug this exists for: the setting was stored, shown in the console, and read by
+        // nothing, so an appliance told not to check went on checking every day. The proof
+        // that nothing happened is the state -- `check` sets a status for every outcome it
+        // has, including "not configured", so a discovery still reporting NeverChecked is one
+        // that was never entered, and therefore one that opened no socket.
+        let discovery = Discovery::new();
+        let mut said = String::new();
+        let asked = automatic_round(
+            Some(&config_with_automatic(false)),
+            false,
+            &discovery,
+            &mut |line| said.push_str(line),
+        );
+
+        assert!(
+            !asked,
+            "an automatic round must not ask when it is switched off"
+        );
+        assert_eq!(
+            discovery.snapshot().status,
+            Status::NeverChecked,
+            "nothing may have run: {said}"
+        );
+        assert!(said.contains("switched off"), "and it says why: {said}");
+    }
+
+    #[test]
+    fn the_switch_governs_the_schedule_and_not_the_button() {
+        // Check now goes to `check` directly. The switch is about whether the appliance
+        // reaches the network on its own; somebody pressing a button has answered that.
+        assert!(automatic_skip(Some(&config_with_automatic(true)), false).is_none());
+
+        let off = automatic_skip(Some(&config_with_automatic(false)), false)
+            .expect("switched off is a reason");
+        assert!(off.contains("Settings"), "{off}");
+    }
+
+    #[test]
+    fn an_install_in_flight_skips_the_round_whatever_the_switch_says() {
+        for check in [true, false] {
+            let why = automatic_skip(Some(&config_with_automatic(check)), true)
+                .expect("an install is always a reason to skip");
+            assert!(why.contains("update is in progress"), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_configuration_that_cannot_be_read_still_gets_checked_so_it_can_say_so() {
+        // The one case where doing nothing is worse. `check` reads the file itself, fails on
+        // it, and puts the failure where somebody can see it; skipping quietly would leave a
+        // machine with a broken config looking like a machine with nothing to report.
+        assert!(automatic_skip(None, false).is_none());
     }
 
     #[test]
