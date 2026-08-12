@@ -203,6 +203,16 @@ pub fn respond(request: &Request, env: &impl Environment, services: &Services) -
                      is not something this appliance will do.\n",
                 );
             }
+            // A bundle on a plugged-in medium has to be mounted for the whole update, not
+            // copied first: it is four hundred megabytes across several files, read from
+            // the manifest onwards. `mount_for_update` hands back a guard that lets go of
+            // the medium however the update ends -- including half-way, which is exactly
+            // when somebody wants to pull the stick out and try it somewhere else.
+            let medium = match mount_for_update(&source) {
+                Ok(medium) => medium,
+                Err(refusal) => return refusal,
+            };
+
             if !update.begin() {
                 return Response::text(
                     409,
@@ -210,9 +220,14 @@ pub fn respond(request: &Request, env: &impl Environment, services: &Services) -
                 );
             }
             let install = crate::update::wants_install(&request.body);
-            crate::update::spawn(update, source, install);
+            crate::update::spawn_holding(update, source, install, medium);
             Response::json(format!("{{\"install\":{install}}}"))
         }
+
+        // Bundles on a plugged-in medium: the alternative to an address, for a machine
+        // with no route to the build host. A POST, so the gate applies -- a list of what is
+        // on somebody's USB sticks is not for every reader on the LAN.
+        ("POST", "/api/update/media") => bundles_on_media(env),
 
         ("GET" | "HEAD", "/api/update") => match serde_json::to_string(&update.snapshot()) {
             Ok(json) => Response::json(json),
@@ -727,6 +742,129 @@ fn browser_pair_host() -> String {
             .reachable_at;
     crate::dashboard::model::prefer_covered(&mut addresses, crate::tls::covers);
     addresses.first().cloned().unwrap_or_default()
+}
+
+/// Mounts the medium a source is on, if it is on one.
+///
+/// `None` for an address and for a path that is not under the media root — an
+/// administrator naming a directory on `/var` is doing something legitimate and needs
+/// nothing mounted.
+///
+/// The volume is taken from the path rather than from the request, so there is no second
+/// field for a client to disagree with itself about: `/run/plexos-media/sdb1/…` names
+/// `sdb1` and nothing else does.
+fn mount_for_update(source: &str) -> Result<Option<crate::update::Mounted>, Response> {
+    let root = crate::media::mount_point("");
+    let Ok(rest) = std::path::Path::new(source).strip_prefix(&root) else {
+        return Ok(None);
+    };
+    let Some(volume) = rest
+        .components()
+        .next()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+    else {
+        return Ok(None);
+    };
+
+    // The device is looked up rather than taken from the path, so a name that is not a
+    // block device cannot become a mount attempt.
+    let device = format!("/dev/{volume}");
+    let point = crate::media::mount_point(&volume);
+    match crate::media::mount_ro(&device, &point) {
+        Ok(_) => Ok(Some(crate::update::Mounted::at(point))),
+        Err(error) => Err(Response::text(
+            409,
+            format!(
+                "the medium holding that bundle could not be mounted ({volume}: {error}). \
+                 Remedy: check that it is still plugged in, then scan again -- the paths a \
+                 scan returns are only good while the medium is there.\n"
+            ),
+        )),
+    }
+}
+
+/// Update bundles on plugged-in media.
+///
+/// The alternative to pasting an address, and an alternative rather than a replacement: a
+/// machine on the same network as the build host is better served by a URL, and a machine
+/// that is not -- or whose network is the thing being fixed -- needs this.
+///
+/// A bundle is a directory holding a signed manifest. That is the whole test, and it is the
+/// right one: it is what `tools/sign-bundle.sh` writes and what the updater reads first,
+/// so anything this lists is something the updater will at least give an honest answer
+/// about. Nothing here trusts it further than that -- the signature, the certificate chain,
+/// the revocation list and the anti-rollback floor are all still ahead of it, unchanged.
+fn bundles_on_media(env: &impl Environment) -> Response {
+    let running = crate::install::running_disk(env);
+    let Ok(volumes) = crate::media::volumes(env, running.as_deref()) else {
+        return Response::text(
+            500,
+            "the list of block devices could not be read, so no medium could be looked \
+             at.\n",
+        );
+    };
+
+    let mut found = Vec::new();
+    let mut skipped = Vec::new();
+
+    for volume in volumes {
+        let point = crate::media::mount_point(&volume.name);
+        match crate::media::mount_ro(&volume.device, &point) {
+            Ok(_) => {
+                found.extend(bundles_in(&point, &volume.name));
+                crate::media::unmount(&point);
+            }
+            Err(error) => skipped.push(format!("{}: {error}", volume.name)),
+        }
+    }
+
+    match json(&serde_json::json!({ "bundles": found, "skipped": skipped })) {
+        Ok(body) => Response::json(body),
+        Err(why) => Response::text(500, format!("{why}\n")),
+    }
+}
+
+/// Directories under `point` that hold a signed manifest.
+///
+/// One level down as well as the root, which is where `publish-update.sh` puts it: somebody
+/// copies `medialith-update` onto a stick and the stick is what gets plugged in.
+fn bundles_in(point: &std::path::Path, volume: &str) -> Vec<serde_json::Value> {
+    /// What makes a directory a bundle rather than a directory.
+    const MANIFEST: &str = "manifest.json";
+
+    let mut found = Vec::new();
+    let mut look = |dir: &std::path::Path| {
+        if !dir.join(MANIFEST).is_file() {
+            return;
+        }
+        // The release is read from the manifest rather than from the directory name,
+        // because the name is whoever copied it and the manifest is what will be verified.
+        let release = std::fs::read_to_string(dir.join(MANIFEST))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|value| {
+                value
+                    .get("release")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            });
+        found.push(serde_json::json!({
+            "volume": volume,
+            "path": dir.to_string_lossy(),
+            "release": release,
+            "signed": dir.join("manifest.json.sig").is_file(),
+        }));
+    };
+
+    look(point);
+    if let Ok(entries) = std::fs::read_dir(point) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                look(&entry.path());
+            }
+        }
+    }
+    found
 }
 
 /// Everything waiting for a decision. Authenticated by the gate.

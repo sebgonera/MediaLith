@@ -375,8 +375,41 @@ pub enum Outcome {
 
 /// Runs an update in a new thread, reporting into `job`.
 pub fn spawn(job: &Arc<Job>, source: String, install: bool) {
+    spawn_holding(job, source, install, None);
+}
+
+/// A mounted medium, unmounted when this is dropped.
+///
+/// The whole reason it exists is the difference between an update and a Plex package. A
+/// package is one file: `media::fetch` mounts, copies it, and unmounts, and the medium is
+/// free again in seconds. A bundle is a manifest, a signature and four hundred megabytes
+/// across several files, read over the whole length of the update -- so the medium has to
+/// stay mounted, and something has to let go of it whichever way the update ends.
+///
+/// `Drop` rather than an unmount at the end of the happy path. An update that fails
+/// half-way is exactly when somebody wants to pull the stick out and try it elsewhere.
+pub struct Mounted(std::path::PathBuf);
+
+impl Mounted {
+    /// Where the medium is mounted.
+    #[must_use]
+    pub fn at(point: std::path::PathBuf) -> Self {
+        Self(point)
+    }
+}
+
+impl Drop for Mounted {
+    fn drop(&mut self) {
+        crate::media::unmount(&self.0);
+    }
+}
+
+/// The same, holding a medium open until the job ends.
+pub fn spawn_holding(job: &Arc<Job>, source: String, install: bool, medium: Option<Mounted>) {
     let job = Arc::clone(job);
     std::thread::spawn(move || {
+        // Owned by the thread, so it is released when the update ends however it ends.
+        let _medium = medium;
         let outcome = run(&job, &source, install);
         job.finish(outcome.map_err(|error| error.to_string()));
     });
@@ -399,8 +432,14 @@ pub fn run(job: &Job, source: &str, install: bool) -> Result<Outcome, Box<dyn st
         );
     }
 
-    let curl = plexos_plex::tools::resolve("curl", &|p: &Path| p.exists())
-        .ok_or("curl is not in this image, so no bundle can be fetched")?;
+    // Only the network path needs it, and a machine updating from a stick should not be
+    // stopped by a program it is not going to run.
+    let curl = if is_local(source) {
+        PathBuf::from("/nonexistent-curl-not-needed-for-a-local-bundle")
+    } else {
+        plexos_plex::tools::resolve("curl", &|p: &Path| p.exists())
+            .ok_or("curl is not in this image, so no bundle can be fetched")?
+    };
 
     let running = running_version();
     let manifest = believe(job, &curl, source, &running)?;
@@ -688,6 +727,33 @@ fn revocations_in_force(job: &Job, curl: &Path, source: &str) -> Vec<String> {
 }
 
 /// Downloads one artifact and checks it against the digest the manifest declared.
+/// Whether a source is a place on this machine rather than an address on the network.
+///
+/// A bundle arrives one of two ways and this is the whole of the distinction: over HTTP
+/// from a build host, or on a USB stick somebody carried to the appliance. The second is
+/// what a machine with no route to the build host has, and it is what the appliance that
+/// went read-only needed.
+///
+/// Decided by what the source *is* rather than by a flag on the request, so one route, one
+/// field and one code path serve both. The alternative -- a second endpoint for local
+/// bundles -- is two implementations of "believe this manifest", which is the one procedure
+/// on this appliance that must never have a second implementation.
+fn is_local(source: &str) -> bool {
+    !source.starts_with("http://") && !source.starts_with("https://")
+}
+
+/// Reads a local file, with the same voice the network path uses.
+fn read_local(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    std::fs::read(path).map_err(|error| {
+        format!(
+            "could not read {path}: {error}. Remedy: check that the medium is still \
+             plugged in and that the directory holds a bundle -- it is the one \
+             tools/sign-bundle.sh wrote, and it contains {MANIFEST}."
+        )
+        .into()
+    })
+}
+
 fn stage(
     job: &Job,
     curl: &Path,
@@ -699,6 +765,19 @@ fn stage(
     let url = plexos_update::location::resolve(source, role, artifact)?;
     // Named by role, so nothing a publisher writes chooses a path on this appliance.
     let destination = staging.join(role.staging_name());
+
+    // A bundle on a stick is copied rather than fetched. Copied and not read into memory:
+    // the /usr image is three hundred megabytes and this appliance has a gigabyte of it.
+    if is_local(source) {
+        job.note(&format!("copying {} from the medium", role.staging_name()));
+        std::fs::copy(&url, &destination).map_err(|error| {
+            format!(
+                "could not copy {url}: {error}. Remedy: check that the medium is still \
+                 plugged in and has not been unmounted."
+            )
+        })?;
+        return Ok(destination);
+    }
 
     let output = std::process::Command::new(curl)
         .args(["--fail", "--silent", "--show-error", "--location"])
@@ -769,6 +848,9 @@ fn write_partition(
 
 /// Fetches a small document as the bytes that arrived.
 fn fetch_bytes(curl: &Path, url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if is_local(url) {
+        return read_local(url);
+    }
     let output = std::process::Command::new(curl)
         .args(["--fail", "--silent", "--show-error", "--location"])
         .arg("--max-time")
@@ -796,6 +878,16 @@ fn fetch_bytes(curl: &Path, url: &str) -> Result<Vec<u8>, Box<dyn std::error::Er
 /// meanings for an optional document.
 fn fetch_optional(curl: &Path, url: &str) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     const HTTP_ERROR: i32 = 22;
+
+    if is_local(url) {
+        // Absent is a real answer here, not a failure: a bundle published without a
+        // revocation list is the ordinary case.
+        return match std::fs::read(url) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!("could not read {url}: {error}").into()),
+        };
+    }
 
     let output = std::process::Command::new(curl)
         .args(["--fail", "--silent", "--show-error", "--location"])

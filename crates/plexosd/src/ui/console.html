@@ -5593,6 +5593,13 @@ function renderUpdate(report) {
       <input type="text" id="update-source" placeholder="paste the address publish-update.sh prints"
              autocomplete="off" spellcheck="false" value="${esc(sessionStorage.getItem(SOURCE_KEY) || "")}">
       <p class="hint" id="update-source-note" hidden></p>
+      <!-- The other way in. An address is right for a machine that can reach the build
+           host; this is right for one that cannot, or whose network is the thing being
+           fixed. Written into its own element, never replaced by a poll. -->
+      <div class="row">
+        <button id="update-media-scan" class="ghost">Look on a plugged-in medium</button>
+      </div>
+      <div id="update-media"></div>
     </div>
     <div class="row">
       <button id="update-check" ${busy ? "disabled" : ""}>Check</button>
@@ -5614,6 +5621,69 @@ function renderUpdate(report) {
     const field = document.getElementById("update-source");
     if (field) { field.focus(); field.setSelectionRange(caret, caret); }
   }
+}
+
+/**
+ * Looks for update bundles on plugged-in media.
+ *
+ * The alternative to typing an address, and an alternative rather than a replacement: the
+ * appliance whose USB stick went read-only had no way to be updated at all, and the one
+ * whose network is the thing being repaired has no route to a build host.
+ *
+ * What comes back is a list of directories holding a signed manifest. Choosing one fills
+ * the same field the address goes in, so there is one path through the update from here
+ * on -- the signature, the certificate chain, the revocation list and the anti-rollback
+ * floor are all still ahead of it, unchanged.
+ */
+async function scanUpdateMedia() {
+  const value = credential();
+  if (!value) {
+    sectionError("update", "An administrator credential is needed to look at media.");
+    return;
+  }
+  const out = document.getElementById("update-media");
+  out.innerHTML = `<div class="progress"><span class="now">Looking</span></div>`;
+
+  try {
+    const response = await fetch("/api/update/media", {
+      method: "POST", cache: "no-store",
+      headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(text.trim() || response.statusText);
+    const found = JSON.parse(text);
+
+    if (!found.bundles.length) {
+      out.innerHTML = `<p class="hint">No update bundle on any plugged-in medium.
+        ${found.skipped.length ? esc(found.skipped.join("; ")) : "Copy the whole "
+        + "medialith-update directory onto a stick and plug it in."}</p>`;
+      return;
+    }
+
+    // A path is only good while the medium is plugged in, so it is a choice to act on now
+    // rather than something to remember.
+    out.innerHTML = found.bundles.map(b => `
+      <div class="row">
+        <button class="ghost media-pick" data-path="${esc(b.path)}">
+          ${esc(b.release || "an unnamed bundle")} on ${esc(b.volume)}${
+            b.signed ? "" : " — unsigned, and this appliance will refuse it"}
+        </button>
+      </div>`).join("");
+  } catch (e) {
+    out.innerHTML = `<div class="progress failed"><div>${esc(String(e))}</div></div>`;
+  }
+}
+
+/** Fills the source field from a bundle somebody picked off a medium. */
+function chooseUpdateMedia(path) {
+  const field = document.getElementById("update-source");
+  field.value = path;
+  sessionStorage.setItem(SOURCE_KEY, path);
+  const note = document.getElementById("update-source-note");
+  if (note) note.hidden = true;
+  document.getElementById("update-media").innerHTML =
+    `<p class="hint">Using the bundle on that medium. Press Check or Install.</p>`;
 }
 
 async function startUpdate(install) {
@@ -7007,6 +7077,12 @@ document.addEventListener("click", event => {
   // somebody gives an icon to must not silently stop working.
   const clicked =
     event.target && event.target.closest ? event.target.closest("button") : null;
+  // Bundles found on a medium are drawn by a template, so they carry their path rather
+  // than an id apiece -- the same reasoning as the Overview's cards.
+  if (clicked && clicked.classList.contains("media-pick") && clicked.dataset.path) {
+    chooseUpdateMedia(clicked.dataset.path);
+    return;
+  }
   const id = clicked ? clicked.id : event.target ? event.target.id : "";
   if (id === "nav-toggle") {
     openDrawer(!document.getElementById("nav").classList.contains("open"));
@@ -7025,6 +7101,7 @@ document.addEventListener("click", event => {
   // listener bound to an element a redraw replaces is a listener that stops working.
   if (id === "bp-start" || id === "bp-start-again") { bpStart(); return; }
   if (id === "bp-cancel") { bpCancel(); return; }
+  if (id === "update-media-scan") { scanUpdateMedia(); return; }
   if (id === "approve-yes") { decideApproval(true); return; }
   if (id === "approve-deny") { decideApproval(false); return; }
   if (id === "health-toggle") {
