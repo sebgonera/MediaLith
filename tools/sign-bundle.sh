@@ -3,7 +3,13 @@
 # Turn the bundle post-image.sh produced into one an appliance will install: write the
 # ADR-0006 manifest and sign it.
 #
-#   tools/sign-bundle.sh <bundle-dir> <signing-key> <certificate-file> --channel <channel>
+#   tools/sign-bundle.sh <bundle-dir> <signing-key> <certificate-file> --channel <channel> \
+#       [--summary "one line"] [--note "what changed"]... [--importance security]
+#
+# The summary, notes and importance are for a person reading the console and are the only
+# fields here that no decision consults. A release published without them is a plain release
+# and not a broken one -- which is what makes it safe to leave them out of an emergency
+# security build at three in the morning.
 #
 # The channel is explicit and has no default. It used to be the literal string "dev" written
 # into the manifest here, which was harmless while nothing on an appliance read it and is
@@ -40,13 +46,31 @@ CERT="${3:-}"
 shift 3 2>/dev/null || true
 
 CHANNEL=""
+SUMMARY=""
+IMPORTANCE=""
+NOTES=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --channel) CHANNEL="${2:-}"; shift 2 ;;
         --channel=*) CHANNEL="${1#--channel=}"; shift ;;
+        --summary) SUMMARY="${2:-}"; shift 2 ;;
+        --summary=*) SUMMARY="${1#--summary=}"; shift ;;
+        --note) NOTES+=("${2:-}"); shift 2 ;;
+        --note=*) NOTES+=("${1#--note=}"); shift ;;
+        --importance) IMPORTANCE="${2:-}"; shift 2 ;;
+        --importance=*) IMPORTANCE="${1#--importance=}"; shift ;;
         *) printf >&2 'unrecognised argument %s\n' "$1"; exit 2 ;;
     esac
 done
+
+case "${IMPORTANCE}" in
+    ""|normal|recommended|security) ;;
+    *)
+        printf >&2 '%s is not an importance. Remedy: normal, recommended or security.\n' "${IMPORTANCE}"
+        printf >&2 '  It changes the wording of a notification and nothing else -- it can never\n'
+        printf >&2 '  make a release installable or refuse one.\n'
+        exit 2 ;;
+esac
 
 usage() {
     printf >&2 'usage: tools/sign-bundle.sh <bundle-dir> <signing-key> <certificate-file> --channel <stable|beta|dev>\n'
@@ -87,10 +111,11 @@ SIGN=(cargo run --quiet --manifest-path "${REPO}/Cargo.toml" -p plexos-update --
 # Written by python rather than by a heredoc because every number in it comes out of
 # another document, and a shell that gets one of them subtly wrong produces a manifest that
 # signs and verifies and then fails a digest check after an 83 MB download.
-python3 - "${BUNDLE}" "${CERT}" "${CHANNEL}" <<'PYTHON'
+python3 - "${BUNDLE}" "${CERT}" "${CHANNEL}" "${SUMMARY}" "${IMPORTANCE}" "${NOTES[@]}" <<'PYTHON'
 import base64, json, sys
 
 bundle, cert_path, channel = sys.argv[1], sys.argv[2], sys.argv[3]
+summary, importance, notes = sys.argv[4], sys.argv[5], sys.argv[6:]
 
 with open(f"{bundle}/update.json") as f:
     described = json.load(f)
@@ -149,11 +174,25 @@ manifest = {
     },
 }
 
+# Display metadata, and omitted entirely when there is none. An appliance ignores fields it
+# does not know and treats absent ones as "an ordinary release with nothing to say", so a
+# security release written in a hurry with no notes installs exactly like any other -- which
+# is the property that makes it safe for these to be optional (ADR-0020).
+if summary:
+    manifest["summary"] = summary
+if notes:
+    manifest["notes"] = notes
+if importance:
+    manifest["importance"] = importance
+
 with open(f"{bundle}/manifest.json", "w") as f:
     json.dump(manifest, f, indent=2)
     f.write("\n")
 
-print(f"manifest for {release}, channel {channel}, sequence {stamp}, signed by {key_id}")
+said = f", {importance}" if importance else ""
+print(f"manifest for {release}, channel {channel}{said}, sequence {stamp}, signed by {key_id}")
+if notes:
+    print(f"  {len(notes)} release {'note' if len(notes) == 1 else 'notes'}")
 PYTHON
 
 # ---------------------------------------------------------------------------
