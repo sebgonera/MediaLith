@@ -752,7 +752,23 @@ fn write_slot(
 
     let staging = Path::new(STAGING);
     let _ = std::fs::remove_dir_all(staging);
-    std::fs::create_dir_all(staging)?;
+    // The first write of the whole update, and therefore the first thing a failing disk
+    // fails. It used to pass the bare io::Error up, so an appliance whose USB enclosure had
+    // dropped off the bus reported `Input/output error (os error 5)` under a log line saying
+    // the signature had verified -- a message naming neither the path, the cause, nor
+    // anything to do about it, attached to an update that was fine. Seen on the second
+    // appliance, twice.
+    std::fs::create_dir_all(staging).map_err(|error| {
+        format!(
+            "could not prepare {}: {error}. Nothing has been written to a partition and this \
+             appliance still runs {running}. Remedy: this is /var rather than the update -- \
+             the manifest verified and the download had not started. An I/O error here means \
+             the disk /var lives on stopped answering, which on a machine booting from \
+             removable storage is the enclosure, the cable or the port before it is the \
+             drive. `dmesg` names it.",
+            staging.display()
+        )
+    })?;
 
     job.step(Phase::Downloading, &format!("downloading {version}"));
     let usr = stage(job, curl, source, staging, Role::Usr, &manifest.usr.image)?;

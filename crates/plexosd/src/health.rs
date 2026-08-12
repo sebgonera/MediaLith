@@ -140,9 +140,21 @@ pub fn check_var_writable(var: &Path) -> Check {
                 detail: format!("{} accepts writes", var.display()),
             };
         }
+        // No claim about rolling back. Whether this boot can roll back is a fact about the
+        // boot entry -- an entry the bootloader is still counting can, and a permanent one
+        // cannot, because the gate deliberately stops restarting once a slot is permanent.
+        // A check that reads /var knows nothing about the ESP, and the sentence was wrong
+        // exactly where it was read most: on the second appliance, whose USB enclosure had
+        // dropped off the bus hours after its slot went permanent, it promised a recovery
+        // that was never going to happen. A rollback would not have helped in any case --
+        // the fault is on /var, which is the one thing rollback leaves alone.
         Err(error) => format!(
-            "{} is not writable: {error}. The slot will roll back; check the disk \
-             and the filesystem before reinstalling.",
+            "{} is not writable: {error}. Remedy: this is the disk rather than the release, \
+             so an update or a rollback fixes nothing -- /var is what a rollback leaves \
+             alone. An I/O error means the disk stopped answering, which on a machine \
+             booting from removable storage is the enclosure, the cable or the port before \
+             it is the drive; a read-only remount instead means the filesystem gave up and \
+             `dmesg` says why.",
             var.display()
         ),
     };
@@ -238,7 +250,13 @@ pub fn check_plex(plex_root: &Path, probe: &dyn Fn() -> bool) -> Check {
         Check {
             name: PLEX_HTTP,
             status: Status::Fail,
-            detail: "installed but not answering on loopback; the slot will roll back".to_owned(),
+            // Same correction as var-writable above: whether anything rolls back depends on
+            // the boot entry, which this check cannot see. What it can say is what it
+            // observed and what follows from it.
+            detail: "installed but not answering on loopback. If this boot is still on \
+                     trial the slot will be handed back; if it is already permanent nothing \
+                     will, and the supervisor keeps trying to start it."
+                .to_owned(),
         }
     }
 }
@@ -272,7 +290,18 @@ mod tests {
     fn an_unwritable_var_fails_with_a_remedy() {
         let result = check_var_writable(Path::new("/proc/nonexistent-dir"));
         assert_eq!(result.status, Status::Fail);
-        assert!(result.detail.contains("roll back"), "{}", result.detail);
+        assert!(result.detail.contains("Remedy:"), "{}", result.detail);
+
+        // And it does not promise a rollback. This check reads /var and cannot see the boot
+        // entry, so it cannot know whether anything is still on trial -- and the appliance
+        // where it mattered had a permanent slot, so the promise was false in the one place
+        // somebody was reading it. A rollback would not have helped anyway: the fault is on
+        // the surface a rollback leaves alone.
+        assert!(
+            !result.detail.contains("The slot will roll back"),
+            "{}",
+            result.detail
+        );
     }
 
     #[test]
