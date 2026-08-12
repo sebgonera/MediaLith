@@ -53,6 +53,7 @@ PLEXOSD_LICENSE = NOT CHOSEN
 PLEXOSD_OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS = \
 	--exclude=target \
 	--exclude=output \
+	--exclude=output-* \
 	--exclude=.git
 
 # The workspace's own target triple, not Buildroot's x86_64-buildroot-linux-gnu.

@@ -63,6 +63,7 @@ PLEXOS_GPU_LICENSE = NOT CHOSEN
 PLEXOS_GPU_OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS = \
 	--exclude=target \
 	--exclude=output \
+	--exclude=output-* \
 	--exclude=.git
 
 # The workspace's own target triple, not Buildroot's x86_64-buildroot-linux-gnu.
