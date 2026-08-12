@@ -573,5 +573,93 @@ else
     check "slot B is left empty" "${empty}" "00000000000000000000000000000000"
 fi
 
+# --------------------------------------------------------------------------
+stage "stage 7 — every shipped kernel module is one something loads"
+#
+# CONFIG_MODULES=y exists for exactly one reason: NVIDIA's open kernel modules are
+# out-of-tree and cannot be built in. Everything else in this image is `=y`, and there is
+# no udev, no kmod and no modprobe -- so a `.ko` that arrives for any other reason is a
+# feature that is silently gone. It compiles, it installs, it passes every test, and the
+# thing it does never happens on a machine.
+#
+# That is not hypothetical. Turning MODULES on handed kconfig a third answer for every
+# tristate symbol and it took it eleven times: `efivarfs` was caught and pinned, and the
+# other eight modules shipped for a further release. One of them was
+# `x86_pkg_temp_thermal`, which publishes the only thermal zone that reports the processor
+# die -- so the activity card fell back to a chassis sensor and reported a real temperature
+# of the wrong thing, with nothing failing and nothing logged.
+#
+# The allow-list is not a list. It is `plexos_init::nvidia::MODULES` -- the names PID 1
+# actually passes to `finit_module` -- read out of the source. A hand-kept list would be a
+# second place to update and therefore a place to forget; taking it from the loader makes
+# "shipped but never loaded" impossible to express rather than merely tested for.
+NVIDIA_RS="${BOARD_DIR}/../../../../crates/plexos-init/src/nvidia.rs"
+MODULES_DIR="${OUTPUT}/target/usr/lib/modules"
+if [ ! -r "${NVIDIA_RS}" ]; then
+    skipped "the whole stage" "needs ${NVIDIA_RS} to read the loader's own module list"
+elif [ ! -d "${MODULES_DIR}" ]; then
+    skipped "the whole stage" "no ${MODULES_DIR}; nothing has installed modules into the target"
+else
+    # The names between the brackets of `pub const MODULES: [&str; N] = [...]`, one per
+    # line. Parsed rather than duplicated, for the reason in the comment above.
+    #
+    # awk's range and not sed's: sed looks for the closing pattern from the *next* line, so
+    # a declaration that opens and closes on one line runs on to the next `];` in the file
+    # and sweeps up every quoted string in between. That is not a hypothetical either --
+    # this stage was written with sed and reported ten modules missing, with names like
+    # `blkext` and `vendor` taken from unrelated code further down.
+    LOADED=$(awk '/pub const MODULES/,/;/' "${NVIDIA_RS}" \
+             | grep -oE '"[a-z0-9_-]+"' | tr -d '"' | sort -u)
+    assert "the loader's module list can be read" "[ -n '${LOADED}' ]" \
+           "pub const MODULES in nvidia.rs did not parse; this stage cannot check anything without it"
+
+    # And that it was read *whole*. The declaration states its own length, so comparing the
+    # count against it turns a parser that quietly matched too much or too little into a
+    # failed build -- which is the mistake this stage has already made once.
+    DECLARED=$(grep -oE 'pub const MODULES: \[&str; [0-9]+\]' "${NVIDIA_RS}" \
+               | grep -oE '[0-9]+')
+    check "the list is read whole, against the length it declares" \
+          "$(printf '%s\n' "${LOADED}" | grep -c .)" "${DECLARED:-?}"
+
+    SHIPPED=$(find "${MODULES_DIR}" -name '*.ko' -printf '%f\n' 2>/dev/null \
+              | sed 's/\.ko$//' | sort -u)
+
+    # Every shipped module must be one the loader names. The failure prints the module,
+    # because "an unexpected module is present" is not something anybody can act on.
+    unexpected=""
+    for module in ${SHIPPED}; do
+        printf '%s\n' "${LOADED}" | grep -qx "${module}" || unexpected="${unexpected} ${module}"
+    done
+    assert "no module ships that nothing loads${unexpected:+ (found:${unexpected})}" \
+           "[ -z '${unexpected}' ]" \
+           "each of those is built as a module and never loaded, so the feature behind it is absent on the machine: pin its CONFIG_* to =y in linux.fragment, or to =n if MediaLith does not want it"
+
+    # And the other direction, which the rule above cannot see: a module the loader expects
+    # and the image does not carry is an RTX machine that comes up with no NVDEC.
+    missing=""
+    for module in ${LOADED}; do
+        printf '%s\n' "${SHIPPED}" | grep -qx "${module}" || missing="${missing} ${module}"
+    done
+    if [ -n "${missing}" ]; then
+        # Not a failure when the package is off: a build without BR2_PACKAGE_PLEXOS_NVIDIA
+        # is a legitimate build, and it is the one every Intel-only image makes.
+        if grep -q '^BR2_PACKAGE_PLEXOS_NVIDIA=y' "${BOARD_DIR}/../../../configs/plexos_x86_64_defconfig" 2>/dev/null; then
+            bad "every module the loader names is shipped (missing:${missing})" \
+                "plexos-init will call finit_module on a path that does not exist; check the plexos-nvidia package built"
+        else
+            skipped "every module the loader names is shipped" \
+                    "BR2_PACKAGE_PLEXOS_NVIDIA is not set, so there is nothing to ship"
+        fi
+    else
+        ok "every module the loader names is shipped"
+    fi
+
+    # Named on its own because it is the one that was actually wrong, and because a
+    # regression here is invisible: the page keeps showing a temperature.
+    assert "the processor die thermal driver is built in, not shipped as a module" \
+           "! find '${MODULES_DIR}' -name 'x86_pkg_temp_thermal.ko' | grep -q ." \
+           "CONFIG_X86_PKG_TEMP_THERMAL went back to =m: nothing loads it, the x86_pkg_temp zone never appears, and metrics falls back to acpitz -- a chassis sensor reported as the processor"
+fi
+
 printf '\npassed %d, failed %d, skipped %d\n' "${pass}" "${fail}" "${skip}"
 [ "${fail}" -eq 0 ]
