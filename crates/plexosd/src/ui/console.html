@@ -1807,6 +1807,167 @@
   }
   .ab-out.is-untaken { opacity: .6; }
 
+  /* ------------------------------------------------------------------------------------
+     EVENTS.
+
+     Two full-width cards of prose, one of them four lines explaining a filename convention,
+     with two thirds of a 1500 px window empty underneath. It read as documentation because
+     it was documentation.
+
+     The machine records three things: a rollback, if one happened; what the gate did with
+     the entry this boot; and what booted. Three is few, and drawing them as a timeline is
+     still right -- one real event shown properly says what this view will be, and the shape
+     is what makes "there is nothing before this" read as a limitation rather than as a page
+     that failed to load. The limitation sits beside it as a card with a list in it, which a
+     reader can check off, instead of a paragraph, which they cannot.
+     ------------------------------------------------------------------------------------ */
+  .evgrid {
+    display: grid;
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+    gap: var(--gap-card);
+    align-items: stretch;
+  }
+  .evgrid > .card { margin: 0; }
+  @media (max-width: 78rem) {
+    .evgrid { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  .timeline { list-style: none; margin: 0; padding: 0; }
+  .tl-item {
+    position: relative;
+    display: grid;
+    grid-template-columns: .75rem minmax(0, 1fr);
+    gap: var(--gap-inline);
+    padding: 0 0 var(--s-4) var(--s-1);
+  }
+  .tl-item:last-child { padding-bottom: 0; }
+  .tl-item:not(:last-child)::before {
+    content: "";
+    position: absolute;
+    left: .59rem;
+    top: 1rem;
+    bottom: 0;
+    width: 2px;
+    background: var(--border);
+  }
+  .tl-dot {
+    width: .75rem;
+    height: .75rem;
+    margin-top: .3rem;
+    border-radius: var(--radius-pill);
+    background: var(--muted);
+    box-shadow: 0 0 0 3px var(--surface-card);
+    position: relative;
+    z-index: 1;
+  }
+  .tl-item.is-good .tl-dot { background: var(--ready); }
+  .tl-item.is-bad .tl-dot { background: var(--unavailable); }
+  .tl-body { min-width: 0; }
+  .tl-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--gap-inline);
+  }
+  .tl-what { font-size: var(--t-meta); font-weight: 600; }
+  .tl-when { font-size: var(--t-micro); color: var(--muted); }
+  .tl-detail { margin-top: var(--s-1); font-size: var(--t-meta); color: var(--muted); }
+  .tl-detail p { margin: 0 0 var(--s-1); }
+  /* The machine's own words, kept exactly as it says them -- a boot entry filename is a
+     thing somebody types into a mount, so it may not be prettified. */
+  .tl-raw {
+    display: block;
+    margin-top: var(--s-2);
+    padding: var(--s-2) var(--s-3);
+    background: var(--surface-inset);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    font-size: var(--t-micro);
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    /* Bounded, and it scrolls. Plex's start-up record is twenty lines on the machine this
+       was built against and has no ceiling in principle -- one entry that grows without
+       limit turns a timeline into a log file with a heading. Roughly eight lines, which is
+       enough to see what kind of thing it is and to scroll for the rest. */
+    max-height: 9.5rem;
+    overflow: auto;
+  }
+  .tl-why { margin-top: var(--s-2); }
+  .tl-why > summary {
+    cursor: pointer;
+    font-size: var(--t-micro);
+    color: var(--muted);
+  }
+  .tl-why > summary:hover { color: var(--ink); }
+
+  .lim-head {
+    margin: 0 0 var(--s-2);
+    font-size: var(--t-card);
+    font-weight: 600;
+    color: var(--muted);
+  }
+  .lim-list {
+    margin: var(--s-2) 0;
+    padding-left: var(--s-4);
+    font-size: var(--t-meta);
+    color: var(--muted);
+    display: grid;
+    gap: var(--s-1);
+  }
+  /* Dashed, because this card describes something that is not there. The one place on the
+     page where a border says "absent" rather than "grouped". */
+  .lim { border-style: dashed; }
+
+  /* A segmented choice: one control, three exclusive states, and the pressed one is the
+     answer. Not three buttons -- three buttons look like three actions, and choosing what
+     to look at is not an action. */
+  .segmented {
+    display: inline-flex;
+    margin-bottom: var(--gap-card);
+    padding: 2px;
+    background: var(--surface-inset);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+  button.seg {
+    min-height: var(--control-h-sm);
+    padding: var(--pad-control-sm);
+    border: 1px solid transparent;
+    border-radius: var(--radius-xs);
+    background: none;
+    box-shadow: none;
+    color: var(--muted);
+    font-size: var(--t-meta);
+    font-weight: 500;
+  }
+  button.seg:hover { color: var(--ink); }
+  button.seg.on {
+    background: var(--surface-card);
+    border-color: var(--border);
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: var(--shadow-sm);
+  }
+  button.seg[disabled] { opacity: .45; }
+  .seg-count {
+    margin-left: .35rem;
+    font-size: var(--t-micro);
+    color: var(--muted);
+    font-weight: 500;
+  }
+
+  /* The filter itself. One attribute on the container, and the rows answer to it -- so a
+     redraw of the list needs to know nothing about what was chosen, and the choice cannot
+     be lost by a poll. */
+  #events-body[data-filter="system"] .tl-item[data-group="plex"],
+  #events-body[data-filter="plex"] .tl-item[data-group="system"] { display: none; }
+  /* The rule that joins the dots is drawn on "not the last item", and hiding rows makes a
+     different row last. Without this the track trails past the final visible entry into
+     nothing, which is the sort of thing that looks like a rendering fault. */
+  #events-body[data-filter="system"] .tl-item[data-group="system"]:has(~ .tl-item[data-group="plex"]:last-child)::before,
+  #events-body[data-filter="plex"] .tl-item[data-group="plex"]:last-child::before { display: none; }
+
   /* A filesystem's headline: the figure people came for, what it is out of, and the state
      as a word beside it. */
   .cap {
@@ -2631,7 +2792,18 @@
         <h2>Events</h2>
         <p class="lede">What this machine has recorded about itself. Not much yet, and this
            view says which parts are missing rather than filling them in.</p>
-        <div id="events-body">
+        <!-- The filter lives here, in the markup, and not inside `#events-body` -- which
+             `renderEvents` replaces wholesale. A control a person set, inside a region a
+             poll rewrites, is a control that resets itself under their hand; this page has
+             already paid for that twice, with the process table and the activity card's
+             disclosure. It writes `data-filter` on the group below and CSS does the rest, so
+             nothing has to be re-applied after a redraw. -->
+        <div class="segmented" role="group" aria-label="Which events to show">
+          <button class="seg on" data-filter="all" aria-pressed="true">All</button>
+          <button class="seg" data-filter="system" aria-pressed="false">System</button>
+          <button class="seg" data-filter="plex" aria-pressed="false">Plex</button>
+        </div>
+        <div id="events-body" data-filter="all">
           <p class="empty">Loading…</p>
         </div>
       </section>
@@ -5281,55 +5453,156 @@ function renderEvents() {
   // The one durable record on this machine. It survives a rollback because it is written to
   // /var, which is the only surface a rollback leaves alone -- everything else that could
   // explain the boot went away with the /usr that was reverted.
+  // Every entry on this timeline is something the machine actually reported, and the whole
+  // list is three long because three is how many things it records. It is drawn as a
+  // timeline anyway: one real event, shown properly, says more about what this view will be
+  // than five invented ones, and the shape is what makes "there is nothing before this"
+  // legible as a limitation rather than as a page that failed to load.
+  const ago = latestStatus && typeof latestStatus.uptime_seconds === "number"
+    ? humanUptime(latestStatus.uptime_seconds) + " ago"
+    : "this boot";
+
+  const entry = (level, head, when, body, detail, group = "system") => `
+    <li class="tl-item is-${level}" data-group="${group}">
+      <span class="tl-dot" aria-hidden="true"></span>
+      <div class="tl-body">
+        <div class="tl-head">
+          <span class="tl-what">${head}</span>
+          <span class="tl-when">${esc(when)}</span>
+        </div>
+        ${body ? `<div class="tl-detail">${body}</div>` : ""}
+        ${detail ? `<details class="tl-why"><summary>Why it is written this way</summary>
+             <p class="hint">${detail}</p></details>` : ""}
+      </div>
+    </li>`;
+
+  // The one durable record on this machine, and the only entry here that outlives a restart.
+  // It survives a rollback because it is written to /var, which is the only surface a
+  // rollback leaves alone -- everything else that could explain the boot went away with the
+  // /usr that was reverted. First on the timeline when it exists, because it is the reason
+  // the boot under it happened at all.
   const rolled = rollback
-    ? `<section class="card">
-         <h3>Rollback record</h3>
-         <div class="progress failed">
-           <span class="now">Handed back from ${esc(rollback.version || "an unknown version")}${rollback.slot ? ` on slot ${esc(rollback.slot)}` : ""}</span>
-           <div>${rollback.version && rollback.version === update.running
-              ? "That is the version running now, so it was installed again or it was this slot that failed."
-              : "The bootloader gave up on it and came back to the system below."}</div>
-           ${rollback.tries_left !== null && rollback.tries_left !== undefined
-              ? `<div>Tries left when it was written: <span class="mono">${esc(rollback.tries_left)}</span>.</div>` : ""}
-           <div class="log">${esc((rollback.failures || []).join("\n") || rollback.verdict || "")}</div>
-         </div>
-         <p class="hint">Written to <span class="mono">/var/lib/plexos/update/rollback.json</span>,
-            which is why it is still here: reverting <span class="mono">/usr</span> takes the
-            log, the verdict and the version string with it, and the system that comes back
-            cannot tell it is a replacement.</p>
-       </section>`
+    ? entry("bad",
+        `Handed back from <span class="mono">${esc(rollback.version || "an unknown version")}</span>`,
+        rollback.slot ? `slot ${rollback.slot}` : "earlier",
+        `<p>${rollback.version && rollback.version === update.running
+            ? "That is the version running now, so it was installed again, or it was this slot that failed."
+            : "The bootloader gave up on it and came back to the system below."}</p>
+         ${rollback.tries_left !== null && rollback.tries_left !== undefined
+            ? `<p>Tries left when it was written: <span class="mono">${esc(rollback.tries_left)}</span>.</p>` : ""}
+         ${(rollback.failures || []).length || rollback.verdict
+            ? `<span class="mono tl-raw">${esc((rollback.failures || []).join("\n") || rollback.verdict)}</span>` : ""}`,
+        `Written to <span class="mono">/var/lib/plexos/update/rollback.json</span>, which is
+         why it is still here: reverting <span class="mono">/usr</span> takes the log, the
+         verdict and the version string with it, and the system that comes back cannot tell
+         it is a replacement.`)
     : "";
 
+  // The gate's verdict, read out of the string rather than restated: a name that lost its
+  // `+n-m` counter is the gate having marked the slot permanent.
+  const permanent = /\+\d+-\d+\.efi\s*->\s*\S+?(?<!\+\d+-\d+)\.efi/.test(update.gate || "");
   const gate = update.gate
-    ? `<section class="card">
-         <h3>This boot</h3>
-         <p><span class="mono">${esc(update.gate)}</span></p>
-         <p class="hint">What the health gate did with the entry this machine booted. A name
-            losing its <span class="mono">+n-m</span> counter is the gate marking the slot
-            permanent — the success half of ADR-0005. The <span class="mono">plexos-</span>
-            prefix is the filename as it actually is on the EFI partition: an internal name
-            kept from before this appliance was called MediaLith, because the release that
-            <em>installs</em> an update names the entry and the release that <em>boots</em>
-            it has to recognise the name. Shown as it is so that mounting the partition
-            finds it.</p>
-       </section>`
+    ? entry(
+        permanent ? "good" : "note",
+        permanent ? "Boot health gate — slot made permanent" : "Boot health gate",
+        ago,
+        `<span class="mono tl-raw">${esc(update.gate)}</span>`,
+        `A name losing its <span class="mono">+n-m</span> counter is the gate marking the
+         slot permanent — the success half of ADR-0005. The <span class="mono">plexos-</span>
+         prefix is the filename as it actually is on the EFI partition: an internal name kept
+         from before this appliance was called MediaLith, because the release that
+         <em>installs</em> an update names the entry and the release that <em>boots</em> it
+         has to recognise the name. Shown as it is so that mounting the partition finds it.`)
     : "";
 
-  const markup = `${rolled}${gate}
-    <div class="absent">
-      <strong>Persistent event history is not available yet.</strong>
-      Nothing on this appliance writes an event log: there is no
-      <span class="mono">/var/log</span> writer, no clock synchronisation to timestamp one
-      against, and no retention policy for a <span class="mono">/var</span> whose largest
-      writer is never pruned. Those three are listed together in
-      <span class="mono">docs/PRODUCTION-READINESS.md</span> as items with no owner, and they
-      have to be answered before a log is worth keeping.
-      ${rolled || gate ? "What is above is what the machine records today, and it is durable." : ""}
+  const booted = update.running
+    ? entry("note", `Booted <span class="mono">${esc(update.running)}</span>`, ago,
+        update.slot ? `on slot <span class="mono">${esc(update.slot)}</span>` : "")
+    : "";
+
+  // Plex's own record, which is a different subject from the boot gate above it and was
+  // sitting on the provisioning route with nothing pointing at it. These are the lines
+  // `plexosd` captured while starting Plex -- the confinement sequence, in the machine's own
+  // words. Deliberately one entry rather than twenty: it is one event, and its detail is a
+  // log. Nothing here is timestamped, because nothing on this appliance can timestamp it,
+  // and the entry says "this boot" rather than inventing a clock.
+  const provision = latestProvision || {};
+  const plexLines = provision.plex_log || [];
+  const plexStart = provision.running && plexLines.length
+    ? entry("good", "Plex started under confinement", ago,
+        `<p>Joined its cgroup, took the Landlock policy, and dropped to uid 900 before
+            <span class="mono">execve</span>.</p>
+         <span class="mono tl-raw">${esc(plexLines.join("\n"))}</span>`,
+        `Captured rather than reported: the child's output is piped and drained on a thread,
+         because a confined process whose stderr went to the attached screen had two failures
+         diagnosed by re-running its policy on a build host and reasoning backwards.`,
+        "plex")
+    : "";
+
+  const installLines = provision.log || [];
+  const plexInstall = installLines.length
+    ? entry("note", "Plex installation", ago,
+        `<span class="mono tl-raw">${esc(installLines.join("\n"))}</span>`,
+        `Download, signature against the pinned key, manifest, app image, mount, confine,
+         start — the sequence ADR-0010 defines, as this console ran it.`,
+        "plex")
+    : "";
+
+  const timeline = `${rolled}${gate}${booted}${plexInstall}${plexStart}`;
+
+  const markup = `
+    <div class="evgrid">
+      <section class="card">
+        <h3>This boot</h3>
+        ${timeline
+          ? `<ol class="timeline">${timeline}</ol>`
+          : `<p class="empty">The appliance has reported nothing about this boot yet.</p>`}
+      </section>
+      <!-- The limitation, as a card with a shape rather than as a paragraph. Three
+           prerequisites, listed, because a reader can check off a list and cannot check off
+           a sentence -- and because naming them is what makes this an admission with a
+           remedy instead of an apology. -->
+      <section class="card lim">
+        <h3>Before this boot</h3>
+        <p class="lim-head">No persistent history</p>
+        <p class="hint">Nothing on this appliance writes an event log, and three things have
+           to exist before one is worth keeping:</p>
+        <ul class="lim-list">
+          <li>a writer for <span class="mono">/var/log</span></li>
+          <li>a clock to timestamp entries against</li>
+          <li>a retention policy for a <span class="mono">/var</span> whose largest writer is
+              never pruned</li>
+        </ul>
+        <p class="hint">All three are in <span class="mono">docs/PRODUCTION-READINESS.md</span>
+           as items with no owner. What is beside this is what the machine records today, and
+           it survives a restart.</p>
+      </section>
     </div>`;
 
   if (markup === lastEventsRendered) return;
   lastEventsRendered = markup;
   host.innerHTML = markup;
+
+  // The counts, onto the filter buttons -- which live outside this region, so writing to
+  // them is safe and reading them back is not needed. A segment with nothing behind it is
+  // disabled rather than hidden: a filter that appears and disappears as a machine changes
+  // state is one nobody can learn.
+  const counts = {
+    system: [rolled, gate, booted].filter(Boolean).length,
+    plex: [plexInstall, plexStart].filter(Boolean).length,
+  };
+  counts.all = counts.system + counts.plex;
+  for (const button of document.querySelectorAll(".segmented button.seg")) {
+    const n = counts[button.dataset.filter] ?? 0;
+    button.disabled = n === 0;
+    let tally = button.querySelector(".seg-count");
+    if (!tally) {
+      tally = document.createElement("span");
+      tally.className = "seg-count";
+      button.appendChild(tally);
+    }
+    tally.textContent = String(n);
+  }
 }
 
 function render(status) {
@@ -7844,6 +8117,21 @@ document.addEventListener("click", event => {
   const item = event.target && event.target.closest ? event.target.closest(".navitem") : null;
   if (item) {
     navTo(item.dataset.view);
+    return;
+  }
+  // The events filter. Delegated like everything else here, and it writes one attribute on
+  // the container -- the rows answer to CSS, so a redraw of the list needs to know nothing
+  // about what was chosen and cannot lose it.
+  const seg = event.target && event.target.closest ? event.target.closest("button.seg") : null;
+  if (seg) {
+    const group = seg.closest(".segmented");
+    for (const b of group.querySelectorAll("button.seg")) {
+      const on = b === seg;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    const body = document.getElementById("events-body");
+    if (body) body.dataset.filter = seg.dataset.filter;
     return;
   }
   // The same, for the cards on the Overview that point at a view. `data-goto` rather than an
