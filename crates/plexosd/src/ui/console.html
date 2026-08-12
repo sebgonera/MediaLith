@@ -571,6 +571,15 @@
      between two kinds of thing, and it reads as one at 16 px and as a crowd at 12.
      ------------------------------------------------------------------------------------ */
   .card > * + * { margin-top: var(--s-4); }
+  /* And one level into a wrapper that has no opinion of its own. Several renderers group
+     blocks in a bare `<div>` for reasons that are about the code rather than about the
+     layout, and the rhythm stopped at it: measured on the Plex view, a hint two pixels under
+     the paragraph above it while its neighbours in the same card had sixteen.
+     `div:not([class])` is the property and not a guess -- a container that carries a class
+     carries a layout with it, and every one of those on this page (`.row`, `.field`,
+     `.segmented`, the grids) already answers the spacing question with its own `gap`. An
+     unclassed div answers nothing, so the card keeps answering for it. */
+  .card > div:not([class]) > * + * { margin-top: var(--s-4); }
   /* A heading is a label for what follows it, so it sits closer to it than blocks sit to
      each other -- and `.card h3` already carries that spacing below itself. */
   .card > h3 + * { margin-top: 0; }
