@@ -764,7 +764,7 @@
     letter-spacing: var(--track-eyebrow);
     color: var(--muted);
   }
-  .field > input, .field > select { width: 100%; min-width: 0; }
+  .field > input, .field > select, .field > .selectbox { width: 100%; min-width: 0; }
   /* The help under a control, rather than a paragraph between two of them. */
   .field > .hint { margin: 0; font-size: var(--t-meta); }
   /* Addresses and paths get more room; a hostname and a timezone do not need it. */
@@ -1347,12 +1347,98 @@
      buttons: the exact regression the trap list already records, reproduced by raising a
      specificity nobody was watching. A tier added here must keep this selector at one
      class's worth of weight. */
-  button:not(.ghost, .quiet, .linkish) {
+  button:not(.ghost, .quiet, .linkish, .selectbtn) {
     background: var(--accent);
     border-color: var(--accent);
     color: var(--accent-ink);
   }
-  button:not(.ghost, .quiet, .linkish):hover { filter: brightness(1.07); }
+  button:not(.ghost, .quiet, .linkish, .selectbtn):hover { filter: brightness(1.07); }
+
+  /* ------------------------------------------------------------------------------------
+     THE LISTBOX.
+     The native select keeps the value and comes out of the flow; the button and the list are
+     what a person sees. Sized and coloured from the same tokens as every other control,
+     which is the whole point -- the popup was the one surface on this page the palette could
+     not reach.
+     ------------------------------------------------------------------------------------ */
+  .selectbox { position: relative; display: block; min-width: 0; }
+  /* Out of sight and out of the layout, still in the document, still the value, still what
+     every form reader here looks at. Not `display: none`, which would take it out of the
+     form as well. */
+  .selectbox > select {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    min-height: 0;
+    padding: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+  button.selectbtn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--gap-inline);
+    width: 100%;
+    min-height: var(--control-h);
+    padding: 0 .7rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background-color: var(--surface-card);
+    color: var(--ink);
+    font-size: var(--t-body);
+    font-weight: 500;
+    text-align: left;
+    box-shadow: none;
+  }
+  button.selectbtn:hover { border-color: var(--muted); }
+  .selectbox.selectbox-open > button.selectbtn { border-color: var(--border-active); }
+  .selectbtn-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The chevron, drawn rather than typed, so it cannot be selected with the label or read
+     aloud as punctuation. */
+  button.selectbtn::after {
+    content: "";
+    flex: 0 0 auto;
+    width: .7rem;
+    height: .47rem;
+    background-color: currentColor;
+    opacity: .65;
+    clip-path: polygon(0 0, 50% 100%, 100% 0, 88% 0, 50% 76%, 12% 0);
+  }
+
+  .selectlist {
+    position: absolute;
+    z-index: 40;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    margin: 0;
+    padding: var(--s-1);
+    list-style: none;
+    background: var(--surface-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow);
+    /* 598 timezones. It scrolls, and the chosen one is scrolled to when it opens. */
+    max-height: 16rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .selectopt {
+    padding: .35rem .55rem;
+    border-radius: var(--radius-xs);
+    font-size: var(--t-meta);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+  }
+  /* Where the keyboard is. Distinct from what is chosen, because while arrowing they are two
+     different rows and collapsing them would hide which one Enter takes. */
+  .selectopt.active { background: var(--surface-inset); }
+  .selectopt.on { color: var(--accent); font-weight: 600; }
+  .selectopt.on::after { content: " \2713"; }
+  .selectopt:hover { background: var(--surface-inset); }
 
   button.ghost {
     background: var(--surface-card);
@@ -3103,6 +3189,144 @@ function unfold(key) {
 ///
 /// Cheap and idempotent: the generated cards come out of their templates already correct,
 /// and this exists for the ones that persist across a redraw.
+// ------------------------------------------------------------------------------------
+// A list that can still be styled once it is open.
+//
+// `appearance: none` reaches the closed control and nothing else. The popup a native
+// `<select>` opens is drawn by the operating system: no border, no radius, no palette, no
+// type scale of ours, and no way to reach any of it from CSS. On a page where everything
+// else is chosen that popup is the one surface that still looks like 1998 -- and the
+// timezone list, at 598 entries, is where it is worst.
+//
+// **The native select stays.** It stays in the DOM, it stays the value, and it stays what
+// `val()` and every form reader on this page look at, so none of them has to know this
+// exists. What is added is a button and a listbox that write back to it and fire `change`,
+// which is also what makes this safe to remove: delete the enhancement and the form still
+// works, with the operating system's popup back.
+//
+// The options are built when the list opens and thrown away when it shuts. 598 `<li>`
+// elements standing in the document for the life of the page, in a card that redraws on a
+// signature, is a cost with no reader.
+// ------------------------------------------------------------------------------------
+const SELECT_OPEN = "selectbox-open";
+
+function selectLabel(select) {
+  const option = select.options[select.selectedIndex];
+  return option ? option.textContent : "";
+}
+
+function closeSelect(box) {
+  const list = box.querySelector(".selectlist");
+  if (list) list.remove();
+  box.classList.remove(SELECT_OPEN);
+  const button = box.querySelector(".selectbtn");
+  if (button) {
+    button.setAttribute("aria-expanded", "false");
+    button.removeAttribute("aria-activedescendant");
+  }
+}
+
+function closeAllSelects(except) {
+  for (const box of document.querySelectorAll("." + SELECT_OPEN)) {
+    if (box !== except) closeSelect(box);
+  }
+}
+
+function openSelect(box) {
+  const select = box.querySelector("select");
+  const button = box.querySelector(".selectbtn");
+  if (!select || !button || box.classList.contains(SELECT_OPEN)) return;
+  closeAllSelects(box);
+
+  const list = document.createElement("ul");
+  list.className = "selectlist";
+  list.setAttribute("role", "listbox");
+  list.id = (select.id || "select") + "-list";
+  [...select.options].forEach((option, index) => {
+    const item = document.createElement("li");
+    item.className = "selectopt";
+    item.setAttribute("role", "option");
+    item.id = list.id + "-" + index;
+    item.dataset.index = String(index);
+    item.textContent = option.textContent;
+    const chosen = index === select.selectedIndex;
+    item.setAttribute("aria-selected", chosen ? "true" : "false");
+    if (chosen) item.classList.add("on");
+    list.appendChild(item);
+  });
+  box.appendChild(list);
+  box.classList.add(SELECT_OPEN);
+  button.setAttribute("aria-expanded", "true");
+  button.setAttribute("aria-controls", list.id);
+  markActive(box, select.selectedIndex);
+  const active = list.children[select.selectedIndex];
+  if (active) active.scrollIntoView({ block: "nearest" });
+}
+
+/// Moves the highlight without committing. `aria-activedescendant` is what tells a screen
+/// reader where the highlight is while the focus stays on the button, which is the whole
+/// reason the listbox is not focusable itself.
+function markActive(box, index) {
+  const list = box.querySelector(".selectlist");
+  const button = box.querySelector(".selectbtn");
+  if (!list || !button) return;
+  const items = list.children;
+  const at = Math.max(0, Math.min(items.length - 1, index));
+  for (const item of items) item.classList.remove("active");
+  const item = items[at];
+  if (!item) return;
+  item.classList.add("active");
+  button.setAttribute("aria-activedescendant", item.id);
+  item.scrollIntoView({ block: "nearest" });
+}
+
+function activeIndex(box) {
+  const item = box.querySelector(".selectopt.active");
+  return item ? Number(item.dataset.index) : -1;
+}
+
+/// Commits a choice and tells everything that was listening to the native control.
+function chooseSelect(box, index) {
+  const select = box.querySelector("select");
+  const button = box.querySelector(".selectbtn");
+  if (!select || index < 0 || index >= select.options.length) return;
+  select.selectedIndex = index;
+  if (button) button.querySelector(".selectbtn-label").textContent = selectLabel(select);
+  closeSelect(box);
+  if (button) button.focus();
+  // The event every existing handler is bound to. Without this the settings form would
+  // never learn that the timezone changed.
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+/// Wraps every select that has not been wrapped yet. Idempotent, because it runs whenever
+/// the document changes and most of those changes have nothing to do with a select.
+function enhanceSelects() {
+  for (const select of document.querySelectorAll("select:not([data-enhanced])")) {
+    select.dataset.enhanced = "1";
+    const box = document.createElement("div");
+    box.className = "selectbox";
+    select.parentNode.insertBefore(box, select);
+    box.appendChild(select);
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "selectbtn";
+    button.setAttribute("aria-haspopup", "listbox");
+    button.setAttribute("aria-expanded", "false");
+    // The name a screen reader reads. The `<label for>` in the markup points at the select,
+    // which is now the hidden half, so the button borrows it.
+    const label = select.id
+      ? document.querySelector(`label[for="${select.id}"]`) : null;
+    if (label) button.setAttribute("aria-label", label.textContent.trim());
+    const text = document.createElement("span");
+    text.className = "selectbtn-label";
+    text.textContent = selectLabel(select);
+    button.appendChild(text);
+    box.appendChild(button);
+  }
+}
+
 function applyFolds() {
   for (const card of document.querySelectorAll("[data-fold]")) {
     card.classList.toggle("folded", folded.has(card.dataset.fold));
@@ -8244,7 +8468,83 @@ async function power(action, label) {
 // every poll, and a listener attached to the old one goes with it -- the click would
 // simply stop working after a second, which is the kind of fault nobody reports because
 // it looks like a slow page.
+// Everything the native control does with a keyboard, because a list that looks better and
+// answers to fewer keys is not an improvement. Type-ahead matters most here: the timezone
+// list is 598 entries, and arrowing to "Europe/Warsaw" is not a thing anybody will do.
+let selectTyped = "";
+let selectTypedAt = 0;
+document.addEventListener("keydown", event => {
+  const box = event.target && event.target.closest ? event.target.closest(".selectbox") : null;
+  if (!box) return;
+  const select = box.querySelector("select");
+  if (!select) return;
+  const open = box.classList.contains(SELECT_OPEN);
+  const at = open ? activeIndex(box) : select.selectedIndex;
+  const last = select.options.length - 1;
+  const key = event.key;
+
+  const move = index => {
+    event.preventDefault();
+    if (!open) { openSelect(box); return; }
+    markActive(box, index);
+  };
+
+  if (key === "ArrowDown") return move(at + 1);
+  if (key === "ArrowUp") return move(at - 1);
+  if (key === "Home") return move(0);
+  if (key === "End") return move(last);
+  if (key === "PageDown") return move(at + 8);
+  if (key === "PageUp") return move(at - 8);
+  if (key === "Escape" && open) {
+    event.preventDefault();
+    closeSelect(box);
+    return;
+  }
+  if (key === "Enter" || key === " ") {
+    event.preventDefault();
+    if (!open) openSelect(box); else chooseSelect(box, at);
+    return;
+  }
+  if (key === "Tab" && open) { closeSelect(box); return; }
+
+  // One printable character: extend the buffer if the last keystroke was recent, start a new
+  // one if it was not, and jump to the first option that begins with it.
+  if (key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    const now = Date.now();
+    selectTyped = now - selectTypedAt > 900 ? key : selectTyped + key;
+    selectTypedAt = now;
+    const wanted = selectTyped.toLowerCase();
+    const found = [...select.options]
+      .findIndex(o => o.textContent.toLowerCase().startsWith(wanted));
+    if (found >= 0) {
+      event.preventDefault();
+      if (!open) openSelect(box);
+      markActive(box, found);
+    }
+  }
+});
+
 document.addEventListener("click", event => {
+  // The custom listbox, first, and folded into this dispatcher rather than given a listener
+  // of its own -- there is one place clicks are resolved on this page and a test holds it
+  // that way. Choosing an option and toggling the button both end here; every other click
+  // shuts whatever list is open and then carries on to the arms below, which is why this is
+  // not an early return.
+  const option = event.target && event.target.closest
+    ? event.target.closest(".selectopt") : null;
+  if (option) {
+    chooseSelect(option.closest(".selectbox"), Number(option.dataset.index));
+    return;
+  }
+  const selectButton = event.target && event.target.closest
+    ? event.target.closest(".selectbtn") : null;
+  if (selectButton) {
+    const box = selectButton.closest(".selectbox");
+    if (box.classList.contains(SELECT_OPEN)) closeSelect(box); else openSelect(box);
+    return;
+  }
+  closeAllSelects(null);
+
   // Navigation first, and by `closest` rather than by target: a nav item contains an icon
   // and a label, and a click landing on either of those has a target that is not the button.
   const item = event.target && event.target.closest ? event.target.closest(".navitem") : null;
@@ -8466,6 +8766,22 @@ if (SOLO) {
   startTerminalWindow();
 } else {
   applyFolds();
+  enhanceSelects();
+
+  // Every select on this page except the theme one is inside a region a poll rewrites, so
+  // enhancing once at start-up would cover exactly one of them. An observer rather than a
+  // call at the end of each render: a call has to be remembered by whoever adds the next
+  // select, and this is a property of the document instead -- if a select appears, it is
+  // wrapped. Coalesced into a frame because the activity card redraws twice a second and
+  // almost none of those mutations involve a select.
+  let selectPass = 0;
+  new MutationObserver(() => {
+    if (selectPass) return;
+    selectPass = requestAnimationFrame(() => {
+      selectPass = 0;
+      enhanceSelects();
+    });
+  }).observe(document.body, { childList: true, subtree: true });
 
   // The URL is the one source of truth for which view is showing, so the back button steps
   // between them and a link to `#network` opens on it.
