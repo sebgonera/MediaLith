@@ -514,7 +514,6 @@
 
   /* The certificate fingerprint: complete, and no longer the loudest thing on the card. */
   .fingerprint {
-    margin-top: var(--s-4);
     padding-top: var(--s-3);
     border-top: 1px solid var(--border);
   }
@@ -551,6 +550,30 @@
        load rather than one somebody shut. */
     align-items: start;
   }
+
+  /* ------------------------------------------------------------------------------------
+     ONE VERTICAL RHYTHM.
+
+     Separation is a property of adjacency, not something a block declares about itself.
+     Measured before this existed: every `.row` on the page had 12 px above it and **zero
+     below**, because `margin-top` was the only thing anyone had written -- so a row of
+     buttons butted straight into the data under it, and the "Connected" banner did the same
+     to the interface list. Reported from a machine, twice, in two different cards.
+
+     Enumerating the offenders -- `.row + *`, `.server + *`, and so on -- is the antipattern
+     this sheet has already paid for three times over: the list is right until somebody adds
+     the next block. This says the thing that is actually true, which is that blocks in a
+     card are separated from each other, and the blocks stop carrying their own opinion
+     about it. `.row`, `.field`, `.check`, `.fingerprint` and `.ab-track` had a `margin-top`
+     each and no longer do; two margins for one gap is how 12 becomes 28.
+
+     `--s-4` and not `--s-3`: a control row ending and a data list beginning is a boundary
+     between two kinds of thing, and it reads as one at 16 px and as a crowd at 12.
+     ------------------------------------------------------------------------------------ */
+  .card > * + * { margin-top: var(--s-4); }
+  /* A heading is a label for what follows it, so it sits closer to it than blocks sit to
+     each other -- and `.card h3` already carries that spacing below itself. */
+  .card > h3 + * { margin-top: 0; }
 
   /* THE CARD, declared once.
      It used to be declared twice — here with `border-radius: 10px; padding: 1rem 1.1rem`,
@@ -676,7 +699,6 @@
     flex-wrap: wrap;
     align-items: center;
     gap: var(--gap-control);
-    margin-top: var(--s-3);
   }
   /* A field in a row shares the row's spacing rather than adding its own. */
   .row > .field { margin-top: 0; }
@@ -768,7 +790,6 @@
   .field {
     display: grid;
     gap: var(--s-1);
-    margin-top: var(--s-4);
     /* A ceiling, because a text field the width of a 1600 px card is not easier to type an
        address into -- it is only harder to see where it ends. */
     max-width: 30rem;
@@ -823,7 +844,6 @@
     display: flex;
     align-items: center;
     gap: var(--gap-inline);
-    margin-top: var(--s-4);
   }
   /* Inside a field the field already provides the spacing; two margins would stack. */
   .field > .check { margin-top: 0; }
@@ -1918,7 +1938,7 @@
      more than the appliance knows, so every state here is derived in `lifecycleMarkup`
      from what /api/update reports, and the branch is unmarked until the gate has ruled.
      ------------------------------------------------------------------------------------ */
-  .ab-track { margin-top: var(--s-4); }
+  .ab-track { }
   .ab-steps, .ab-branch { list-style: none; margin: 0; padding: 0; }
 
   .ab-step {
