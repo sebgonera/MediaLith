@@ -146,24 +146,39 @@ Two consequences worth naming:
 
 ### 1.3 There is no production update channel
 
-`tools/publish-update.sh` is `python3 -m http.server` over a directory, says so, and
-is right to be that for development. The design already permits a trivial production
-channel — the manifest is signed over exact bytes and sources are bare file names,
-so any static HTTPS host or object store works with no re-signing — but nothing
-provides one, and three pieces around it are missing:
+**Revised 2026-08-12 (ADR-0020).** The three pieces named here have been built; the
+thing they were pieces *of* still does not exist. What is closed, and what is not:
 
-- **Channels.** The manifest has a `channel` field; `sign-bundle.sh:97` hardcodes
-  `"dev"`. Nothing selects a channel on the appliance.
-- **Discovery.** Every update today is an operator POST with an explicit source URL.
-  There is no configured default source (`DEFAULT_SOURCE` is deliberately empty),
-  no periodic check, and no notification that an update exists. For an appliance
-  whose owner is not its builder, "updates happen when someone types a URL" is not
-  an update story.
-- **Revocation publishing.** The appliance fetches `revocations.json` from the update
-  source, and nothing in `tools/` publishes one — issuing a revocation is a manual
-  `plexos-sign revoke` plus hand-copying. The one mechanism that exists for a
-  compromised signing key needs to be as routine as publishing an update, because it
-  will be needed at the worst possible moment.
+- **Channels — closed.** `sign-bundle.sh` takes an explicit `--channel` and refuses
+  without one. `[updates].channel` is read, and `plexos_update::plan` refuses a
+  manifest published to any other channel, naming both sides and both remedies.
+  One feed per channel, no inheritance.
+- **Discovery — closed as a mechanism.** `[update_service].url` and a channel file
+  give an appliance somewhere to look; `plexosd::discover` checks about once a day,
+  five minutes after the daemon starts and never as part of the health gate, and the
+  console reports a verified release or a check that failed. It downloads nothing and
+  installs nothing without being asked.
+- **Revocation publishing — closed.** `tools/publish-revocations.sh` copies a
+  root-signed list into every release directory in a tree, and the procedure for
+  producing one is written at the top of that script rather than in somebody's memory.
+  It does not invent an empty list: signing needs the root key.
+
+**What remains open, and it is the important half:**
+
+- **There is no MediaLith update service.** No host, no domain, no published tree. The
+  product default is empty and every appliance ships with system updates unconfigured,
+  which is the honest state and not a working one. `tools/publish-update.sh` is still
+  `python3 -m http.server` over a directory, and is still right to be that for a bench.
+- **The root key is a development key** whose private half is on a build host. Nothing
+  about this section changes that; see §1.1.
+- **Production HTTPS depends on §1.4.** Discovery over `https://` is implemented and
+  TLS validation is not weakened to make it work — which means an appliance whose clock
+  is wrong may be unable to reach a real update service at all. **Automatic update
+  discovery works; production HTTPS deployment still depends on the
+  clock-synchronisation work below.**
+
+Update *distribution* is therefore not complete. What is complete is everything on the
+appliance and everything in the publishing tooling.
 
 ### 1.4 The appliance cannot tell the time, and the trust chain consults the clock
 

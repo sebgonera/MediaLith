@@ -58,6 +58,19 @@ pub enum Refusal {
         /// What this is.
         expected: &'static str,
     },
+    /// The manifest was published to a channel other than the one this appliance tracks.
+    ///
+    /// One feed per channel and no inheritance: a beta device does not quietly take stable
+    /// releases, and a stable device never sees a beta one. Inheritance sounds harmless and
+    /// is the rule nobody can state afterwards — "which of these two releases will this
+    /// machine take" stops having one answer, and the honest version of that answer is what
+    /// an owner is entitled to.
+    WrongChannel {
+        /// The channel the manifest was published to.
+        offered: Channel,
+        /// The channel this appliance is configured to track.
+        tracked: Channel,
+    },
     /// The manifest names a channel or an image format this release does not know.
     ///
     /// Both are `Unknown` variants that exist so an old device can read a new publisher's
@@ -99,6 +112,15 @@ impl std::fmt::Display for Refusal {
                  check the address it was fetched from. Nothing about the signature makes \
                  an image for another product bootable here."
             ),
+            Self::WrongChannel { offered, tracked } => write!(
+                f,
+                "this release was published to the {offered} channel and this appliance \
+                 tracks {tracked}. Nothing is wrong with the update; it is not the one this \
+                 machine asked for. Remedy: either set the update channel to {offered} in \
+                 Settings, or take this release from the {tracked} feed once it has been \
+                 promoted there. Promotion publishes the same bytes, so the release you \
+                 eventually get is the one that was tested."
+            ),
             Self::Unrecognised { field } => write!(
                 f,
                 "this update declares a {field} this release does not know. Remedy: it \
@@ -126,7 +148,14 @@ pub fn capacity_of(label: &str) -> Option<u64> {
 }
 
 /// Decides what to do with an update on a machine running `running_slot` at
-/// `running_version`.
+/// `running_version` and tracking `tracked`.
+///
+/// The channel is passed in rather than read here for the same reason the version is: this
+/// module knows nothing about where an appliance keeps its settings, and a decision
+/// function that reads a file is one that cannot be tested against the case it is for.
+/// `Channel` and not `Option<Channel>` — an appliance configured to a word this build
+/// cannot name has no channel to compare against, and the caller has to say so in its own
+/// words rather than have that arrive here as a comparison that fails for the wrong reason.
 ///
 /// The manifest is taken as a [`Manifest`] and not as a [`crate::trust::Verified`], which
 /// is deliberate in one direction only: this is a decision about sizes and version
@@ -139,6 +168,7 @@ pub fn capacity_of(label: &str) -> Option<u64> {
 pub fn plan(
     running_slot: Slot,
     running_version: &str,
+    tracked: Channel,
     manifest: &Manifest,
 ) -> Result<Decision, Refusal> {
     // Never the running slot. This is the single most important line in the crate: the
@@ -154,6 +184,15 @@ pub fn plan(
     }
     if manifest.channel == Channel::Unknown {
         return Err(Refusal::Unrecognised { field: "channel" });
+    }
+    // After the unknown check, because the two failures are different and the messages are
+    // not interchangeable: a word this build cannot read was published for a newer
+    // appliance, and a word it can read is a release meant for other machines.
+    if manifest.channel != tracked {
+        return Err(Refusal::WrongChannel {
+            offered: manifest.channel,
+            tracked,
+        });
     }
     if manifest.usr.format == ImageFormat::Unknown {
         return Err(Refusal::Unrecognised {
@@ -257,7 +296,9 @@ mod tests {
         // dm-verity from the running slot; writing that partition corrupts the machine
         // doing the writing, and the two-slot layout exists so that cannot happen.
         for running in Slot::ALL {
-            let Decision::Install { target, .. } = plan(running, "0.1.0.1", &ok()).unwrap() else {
+            let Decision::Install { target, .. } =
+                plan(running, "0.1.0.1", Channel::Stable, &ok()).unwrap()
+            else {
                 panic!("a newer bundle installs");
             };
             assert_ne!(target, running);
@@ -269,7 +310,7 @@ mod tests {
     fn the_same_version_is_up_to_date_rather_than_an_error() {
         // Asking "is there an update" and being told "no" is a normal answer to a normal
         // question, not a failure to report.
-        let decision = plan(Slot::A, "0.1.0.2", &ok()).unwrap();
+        let decision = plan(Slot::A, "0.1.0.2", Channel::Stable, &ok()).unwrap();
         assert_eq!(
             decision,
             Decision::UpToDate {
@@ -283,7 +324,7 @@ mod tests {
         // The failure this prevents is the confusing one: the write succeeds, the entry
         // is installed, and the machine reboots into the same version it had, because
         // systemd-boot orders entries newest-first and the old one still wins.
-        let error = plan(Slot::A, "0.1.0.9", &ok()).unwrap_err();
+        let error = plan(Slot::A, "0.1.0.9", Channel::Stable, &ok()).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("appears to do nothing"), "{message}");
         assert!(message.contains("Publish a higher version"), "{message}");
@@ -292,7 +333,13 @@ mod tests {
     #[test]
     fn an_image_that_does_not_fit_is_refused_before_anything_is_written() {
         let capacity = capacity_of("usr_b").unwrap();
-        let error = plan(Slot::A, "0.1.0.1", &manifest("0.1.0.2", capacity + 1, 1024)).unwrap_err();
+        let error = plan(
+            Slot::A,
+            "0.1.0.1",
+            Channel::Stable,
+            &manifest("0.1.0.2", capacity + 1, 1024),
+        )
+        .unwrap_err();
         assert_eq!(
             error,
             Refusal::ImageTooLarge {
@@ -306,7 +353,13 @@ mod tests {
     #[test]
     fn an_oversized_verity_tree_is_refused_too() {
         let capacity = capacity_of("usr_b_hash").unwrap();
-        let error = plan(Slot::A, "0.1.0.1", &manifest("0.1.0.2", 1024, capacity + 1)).unwrap_err();
+        let error = plan(
+            Slot::A,
+            "0.1.0.1",
+            Channel::Stable,
+            &manifest("0.1.0.2", 1024, capacity + 1),
+        )
+        .unwrap_err();
         assert!(matches!(error, Refusal::VerityTooLarge { .. }));
     }
 
@@ -354,7 +407,7 @@ mod tests {
         // is the check no signature can make.
         let mut other = ok();
         other.product = "someone-elses-appliance".to_owned();
-        let error = plan(Slot::A, "0.1.0.1", &other).unwrap_err();
+        let error = plan(Slot::A, "0.1.0.1", Channel::Stable, &other).unwrap_err();
         assert_eq!(
             error,
             Refusal::WrongProduct {
@@ -366,6 +419,76 @@ mod tests {
     }
 
     #[test]
+    fn a_stable_appliance_does_not_take_a_development_release() {
+        // The check that had never existed. The manifest has carried a channel since v1,
+        // sign-bundle.sh has always written "dev", and every appliance in the field is
+        // configured to "stable" by default -- so until this, the word decided nothing and
+        // a development build installed itself on a machine asking for stable releases.
+        let mut development = ok();
+        development.channel = Channel::Dev;
+        let error = plan(Slot::A, "0.1.0.1", Channel::Stable, &development).unwrap_err();
+        assert_eq!(
+            error,
+            Refusal::WrongChannel {
+                offered: Channel::Dev,
+                tracked: Channel::Stable,
+            }
+        );
+
+        let message = error.to_string();
+        assert!(
+            message.contains("dev") && message.contains("stable"),
+            "{message}"
+        );
+        assert!(message.contains("Remedy:"), "{message}");
+        // Both ways out, because only one of them is the reader's to take: whoever owns the
+        // appliance can change the setting, and whoever publishes can promote.
+        assert!(message.contains("Settings"), "{message}");
+        assert!(message.contains("promoted"), "{message}");
+    }
+
+    #[test]
+    fn each_channel_takes_its_own_feed_and_nothing_else() {
+        // One feed per channel, no inheritance. Written as a full matrix rather than as the
+        // two cases that came to mind, because the interesting half of this rule is what it
+        // refuses -- a beta device quietly taking stable releases is the version of this
+        // that looks reasonable and cannot be stated afterwards.
+        for tracked in Channel::ALL {
+            for offered in Channel::ALL {
+                let mut manifest = ok();
+                manifest.channel = offered;
+                let outcome = plan(Slot::A, "0.1.0.1", tracked, &manifest);
+                if offered == tracked {
+                    assert!(
+                        matches!(outcome, Ok(Decision::Install { .. })),
+                        "{tracked} must take its own channel, got {outcome:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        outcome.unwrap_err(),
+                        Refusal::WrongChannel { offered, tracked },
+                        "a {tracked} appliance must not take a {offered} release"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_channel_is_checked_before_the_version_and_the_size() {
+        // Ordering with a consequence for what a person reads. A release from another
+        // channel that also happens to be older is not "too old" -- it was never this
+        // machine's release, and saying "publish a higher version" about it sends the
+        // publisher to fix something that is not wrong.
+        let mut older_and_elsewhere = manifest("0.0.9", 1024, 1024);
+        older_and_elsewhere.channel = Channel::Beta;
+        assert!(matches!(
+            plan(Slot::A, "0.1.0.1", Channel::Stable, &older_and_elsewhere).unwrap_err(),
+            Refusal::WrongChannel { .. }
+        ));
+    }
+
+    #[test]
     fn reading_a_document_from_the_future_is_not_the_same_as_installing_one() {
         // The Unknown variants exist so an old appliance can parse a new publisher's
         // manifest and say something useful. Installing one would mean guessing what an
@@ -374,14 +497,14 @@ mod tests {
         let mut future = ok();
         future.channel = Channel::Unknown;
         assert_eq!(
-            plan(Slot::A, "0.1.0.1", &future).unwrap_err(),
+            plan(Slot::A, "0.1.0.1", Channel::Stable, &future).unwrap_err(),
             Refusal::Unrecognised { field: "channel" }
         );
 
         let mut future = ok();
         future.usr.format = ImageFormat::Unknown;
         assert!(matches!(
-            plan(Slot::A, "0.1.0.1", &future).unwrap_err(),
+            plan(Slot::A, "0.1.0.1", Channel::Stable, &future).unwrap_err(),
             Refusal::Unrecognised { .. }
         ));
     }
@@ -393,7 +516,7 @@ mod tests {
         // the wrong one would make every build look identical to every other.
         let newer = manifest("0.1.0.202607291323", 1024, 1024);
         let Decision::Install { version, .. } =
-            plan(Slot::A, "0.1.0.202607281844", &newer).unwrap()
+            plan(Slot::A, "0.1.0.202607281844", Channel::Stable, &newer).unwrap()
         else {
             panic!("a later build stamp is an update");
         };

@@ -280,8 +280,8 @@ address" and is not the same as a root of trust.
 ### Every publish
 
 ```
-tools/sign-bundle.sh output/images/plexos-update \
-    ~/.plexos-keys/signing-dev ~/.plexos-keys/signing-dev.cert
+tools/sign-bundle.sh output/images/medialith-update \
+    ~/.plexos-keys/signing-dev-2 ~/.plexos-keys/signing-dev-2.cert --channel dev
 tools/publish-update.sh
 ```
 
@@ -290,6 +290,41 @@ tools/publish-update.sh
 "will the machine take this" is answered on the build host rather than after a 74 MB
 download onto a machine in another room. `publish-update.sh` refuses to serve a bundle with
 no signed manifest, for the same reason.
+
+**`--channel` is required and has no default** (ADR-0020). An appliance refuses a release
+published to a channel it does not track, so the word has to be said rather than assumed —
+and defaulting to `stable` would put a development build on every machine that forgot the
+flag. Set the appliance's own channel in the console under **System → System updates**; a
+machine that has never been told is on `stable` and will refuse a `dev` bundle, correctly.
+
+### Publishing where an appliance can find it by itself
+
+The above is the bench path: it serves one bundle and somebody pastes the address. The
+other path is a static tree an appliance polls on its own, which is files and no server:
+
+```
+tools/publish-release.sh ~/updates output/images/medialith-update
+python3 -m http.server 8080 --directory ~/updates
+```
+
+That writes `channels/dev.json` and `releases/<release>/`, with the manifest named for its
+channel and the artefacts stored once. Point an appliance at
+`http://<build-host>:8080` under **System → System updates**, set its channel to `dev`, and
+it finds the release by itself within a day — or immediately with **Check now**.
+
+Promotion publishes the *same bytes* to another channel. Nothing is rebuilt and nothing is
+copied; a small manifest is re-signed beside the artefacts, and every digest is checked
+against the file on disk first:
+
+```
+tools/promote-release.sh ~/updates 0.1.1.202608250900 beta \
+    ~/.plexos-keys/signing-dev-2 ~/.plexos-keys/signing-dev-2.cert
+```
+
+A release identifier names bytes: publishing a release string that is already in the tree
+with different artefacts is refused, in both directions — the bundle must also match its own
+manifest, because an artefact rebuilt after signing is how a channel comes to point at bytes
+nobody published.
 
 The build stamp is load-bearing. `PLEXOS_VERSION` must end in `YYYYMMDDHHMM`, because that
 number is the manifest's anti-rollback `sequence` as well as the string `systemd-boot`
@@ -306,6 +341,11 @@ cargo run -p plexos-update --bin plexos-sign -- revoke \
 Served beside the manifest, it is picked up on the next check and stored. The counter must
 increase with every list published: an appliance keeps the highest it has seen, so an older
 list — genuinely root-signed, from before the revocation — un-revokes nothing.
+
+In a static tree the list has to be beside *every* manifest, because an appliance reads it
+from the directory it fetched its manifest from. `tools/publish-revocations.sh <tree> <list>`
+copies it into every release directory; the document is a few hundred bytes and the one that
+matters is whichever release a channel points at now.
 
 ## Secure Boot
 

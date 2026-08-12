@@ -67,6 +67,29 @@ pub const STAGING: &str = "/var/lib/plexos/update/staging";
 /// How long the whole fetch may take.
 pub const FETCH_TIMEOUT_SECS: u64 = 1800;
 
+/// How long a small document may take.
+///
+/// The manifest, its signature, the revocation list and a channel file are all a few
+/// kilobytes. A minute is generous for any of them and is the difference between a source
+/// that is down and a request that never returns.
+pub const DOCUMENT_TIMEOUT_SECS: u64 = 60;
+
+/// Largest small document this will read.
+///
+/// A manifest is about four kilobytes and a certificate a few hundred bytes. Without a
+/// bound, an update *check* — which is the thing that happens by itself, unattended, once a
+/// day — is a request that whoever answers can turn into a download of any size they like.
+/// The artefacts are bounded by the sizes the signed manifest declares and by the partition
+/// they must fit; these documents had nothing.
+pub const MAX_DOCUMENT_BYTES: u64 = 1024 * 1024;
+
+/// How many redirects a fetch may follow.
+///
+/// Following them at all is deliberate — a static host that moves a tree behind a redirect
+/// is exactly the kind of thing this has to keep working with — but an unbounded chain is a
+/// way to make a check take for ever without ever failing.
+pub const MAX_REDIRECTS: u32 = 5;
+
 /// Lines of progress kept, bounded for the same reason provisioning bounds its own.
 pub const MAX_LOG_LINES: usize = 200;
 
@@ -373,6 +396,65 @@ pub enum Outcome {
     UpToDate,
 }
 
+/// Where a bundle's documents are, once something has decided where to look.
+///
+/// A base and a file name rather than a base alone, because discovery and the bench put the
+/// manifest in different places for the same reason: the artefacts are addressed by bare
+/// names beside the manifest, so a channel that wants its own signed document has to put it
+/// in the release's directory under its own name (ADR-0020). Pasting an address keeps the
+/// name it always had, so nothing about the bench workflow moves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bundle {
+    /// Directory the manifest and every artefact are fetched from.
+    pub base: String,
+    /// Name of the manifest within it. [`MANIFEST`] unless discovery chose otherwise.
+    pub manifest: String,
+}
+
+impl Bundle {
+    /// The bundle at an address somebody typed, or a directory on a plugged-in medium.
+    #[must_use]
+    pub fn at(source: &str) -> Self {
+        Self {
+            base: source.to_owned(),
+            manifest: MANIFEST.to_owned(),
+        }
+    }
+
+    /// The manifest's own address.
+    #[must_use]
+    pub fn manifest_url(&self) -> String {
+        format!("{}/{}", self.base, self.manifest)
+    }
+
+    /// The detached signature's address.
+    ///
+    /// The manifest's name with `.sig` after it, so a channel-specific manifest and its
+    /// signature cannot come apart: one name is derived from the other rather than both
+    /// being constructed, which is the mistake that would verify one document against
+    /// another document's signature.
+    #[must_use]
+    pub fn signature_url(&self) -> String {
+        format!("{}.sig", self.manifest_url())
+    }
+}
+
+/// What a bundle turned out to be, once it had been believed and judged.
+///
+/// The whole of "may this appliance install this", with nothing downloaded. Discovery and
+/// the installer both end up here, and neither has its own copy of any of it — the reason
+/// this type exists is that two implementations of "believe this manifest" is the one
+/// duplication this appliance must never have.
+#[derive(Debug, Clone)]
+pub struct Evaluation {
+    /// The manifest, verified.
+    pub manifest: plexos_types::manifest::Manifest,
+    /// Who vouched for it.
+    pub signature: Signature,
+    /// What should happen about it.
+    pub decision: Decision,
+}
+
 /// Runs an update in a new thread, reporting into `job`.
 pub fn spawn(job: &Arc<Job>, source: String, install: bool) {
     spawn_holding(job, source, install, None);
@@ -415,6 +497,28 @@ pub fn spawn_holding(job: &Arc<Job>, source: String, install: bool, medium: Opti
     });
 }
 
+/// Installs whatever the configured update service offers on the tracked channel.
+///
+/// The other way in, and the one an owner uses: no address is typed, because the appliance
+/// already knows where to look. What happens after the address is resolved is the same code
+/// as every other update — the feed chooses which signed manifest is evaluated and nothing
+/// else, so this path is not a shorter one through the checks (ADR-0020).
+pub fn spawn_from_service(job: &Arc<Job>, install: bool) {
+    let job = Arc::clone(job);
+    std::thread::spawn(move || {
+        let outcome = crate::discover::locate_configured()
+            .map_err(Into::into)
+            .and_then(|bundle| {
+                job.note(&format!(
+                    "the update service offers {}",
+                    bundle.manifest_url()
+                ));
+                run_bundle(&job, &bundle, install)
+            });
+        job.finish(outcome.map_err(|error: Box<dyn std::error::Error>| error.to_string()));
+    });
+}
+
 /// Checks an update and, if `install`, writes it.
 ///
 /// # Errors
@@ -422,30 +526,30 @@ pub fn spawn_holding(job: &Arc<Job>, source: String, install: bool, medium: Opti
 /// write goes to the slot that is not running, and the boot entry that works is never
 /// touched.
 pub fn run(job: &Job, source: &str, install: bool) -> Result<Outcome, Box<dyn std::error::Error>> {
-    if source.is_empty() {
-        return Err(
-            "no update source was given, and there is no default: paste the \
-                    address that tools/publish-update.sh prints on the build host. \
-                    Guessing where to fetch a whole operating system from is not \
-                    something this appliance will do."
-                .into(),
-        );
-    }
+    run_bundle(job, &Bundle::at(source), install)
+}
 
-    // Only the network path needs it, and a machine updating from a stick should not be
-    // stopped by a program it is not going to run.
-    let curl = if is_local(source) {
-        PathBuf::from("/nonexistent-curl-not-needed-for-a-local-bundle")
-    } else {
-        plexos_plex::tools::resolve("curl", &|p: &Path| p.exists())
-            .ok_or("curl is not in this image, so no bundle can be fetched")?
-    };
+/// The same, for a bundle whose manifest is not called `manifest.json`.
+///
+/// # Errors
+/// Anything that stops the update.
+pub fn run_bundle(
+    job: &Job,
+    bundle: &Bundle,
+    install: bool,
+) -> Result<Outcome, Box<dyn std::error::Error>> {
+    let curl = curl_for(bundle)?;
+
+    let evaluation = evaluate(bundle, &curl, &mut |event| match event {
+        Event::Note(line) => job.note(line),
+        Event::Verified { release, signature } => job.with(|state| {
+            state.available = Some(release.to_owned());
+            state.signature = Some(signature.clone());
+        }),
+    })?;
 
     let running = running_version();
-    let manifest = believe(job, &curl, source, &running)?;
-
-    let slot = running_slot();
-    let (target, version) = match plexos_update::plan(slot, &running, &manifest)? {
+    let (target, version) = match evaluation.decision {
         Decision::UpToDate { running } => {
             job.note(&format!("this appliance already runs {running}"));
             return Ok(Outcome::UpToDate);
@@ -454,14 +558,118 @@ pub fn run(job: &Job, source: &str, install: bool) -> Result<Outcome, Box<dyn st
     };
 
     job.note(&format!(
-        "running {running} on slot {slot}; {version} would go to slot {target}"
+        "running {running} on slot {}; {version} would go to slot {target}",
+        running_slot()
     ));
     if !install {
         return Ok(Outcome::Available(version));
     }
 
-    write_slot(job, &curl, source, &manifest, target, &version, &running)?;
+    write_slot(
+        job,
+        &curl,
+        &bundle.base,
+        &evaluation.manifest,
+        target,
+        &version,
+        &running,
+    )?;
     Ok(Outcome::Written(version))
+}
+
+/// Something worth reporting while a bundle is being judged.
+///
+/// One parameter instead of two closures, and [`Event::Verified`] exists for one reason:
+/// who signed a manifest has to be reportable even when the manifest is then *refused*.
+/// The sharpest case this project has actually seen is a correctly signed release refused
+/// by the anti-rollback counter — "the signature is valid and the answer is still no" is
+/// the sentence that makes the counter comprehensible, and it needs both halves.
+pub enum Event<'a> {
+    /// A line for whoever is watching.
+    Note(&'a str),
+    /// The manifest verified, before anything decided what to do about it.
+    Verified {
+        /// The release it offers.
+        release: &'a str,
+        /// What vouched for it.
+        signature: &'a Signature,
+    },
+}
+
+/// The `curl` a bundle at this location needs, or a refusal.
+///
+/// A bundle on a plugged-in medium needs none, and a machine updating from a stick should
+/// not be stopped by a program it is not going to run.
+pub(crate) fn curl_for(bundle: &Bundle) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if bundle.base.is_empty() {
+        return Err(
+            "no update source was given, and there is no default: paste the \
+             address that tools/publish-update.sh prints on the build host, or \
+             configure an update service. Guessing where to fetch a whole operating \
+             system from is not something this appliance will do."
+                .into(),
+        );
+    }
+    if is_local(&bundle.base) {
+        return Ok(PathBuf::from(
+            "/nonexistent-curl-not-needed-for-a-local-bundle",
+        ));
+    }
+    plexos_plex::tools::resolve("curl", &|p: &Path| p.exists())
+        .ok_or_else(|| "curl is not in this image, so no bundle can be fetched".into())
+}
+
+/// Everything that decides whether this appliance may install a bundle, with nothing
+/// downloaded.
+///
+/// The signature chain, the revocation list, the anti-rollback floor, the product, the
+/// channel, the format, the sizes and the version. Shared by the installer and by automatic
+/// discovery, which is the whole point: a check that reached a different conclusion from
+/// the install that follows it would be a page promising something the machine then
+/// refuses.
+///
+/// # Errors
+/// Anything that makes the bundle unusable, in the words of whichever layer refused it.
+pub fn evaluate(
+    bundle: &Bundle,
+    curl: &Path,
+    watch: &mut dyn FnMut(Event),
+) -> Result<Evaluation, Box<dyn std::error::Error>> {
+    // Before the fetch. An appliance configured to a channel this release cannot name has
+    // nothing to compare a manifest against, and finding that out after downloading one
+    // would be a diagnostic arriving late about a setting nobody has to leave the page to
+    // fix.
+    let tracked = tracked_channel()?;
+    let running = running_version();
+    let (manifest, signature) = believe(watch, curl, bundle, &running)?;
+    let decision = plexos_update::plan(running_slot(), &running, tracked, &manifest)?;
+    Ok(Evaluation {
+        manifest,
+        signature,
+        decision,
+    })
+}
+
+/// The channel this appliance tracks, or why it cannot be told.
+///
+/// Two failures, and neither is the updater's fault, so both name the file rather than the
+/// update: a configuration that will not parse, and a channel word this release does not
+/// have. The second is the interesting one — an appliance set to a channel from a newer
+/// release must refuse to check rather than fall back to stable, because falling back would
+/// quietly take releases its owner did not ask for.
+fn tracked_channel() -> Result<plexos_types::manifest::Channel, String> {
+    let config = crate::settings::load(&crate::settings::path())?;
+    config.updates.tracked().ok_or_else(|| {
+        format!(
+            "this appliance is configured to track the {:?} update channel, which this \
+             release does not know. Remedy: set it to one of {} in Settings. Nothing was \
+             fetched: a release cannot be judged against a channel that has no meaning here.",
+            config.updates.channel,
+            plexos_types::manifest::Channel::ALL
+                .map(plexos_types::manifest::Channel::as_str)
+                .join(", ")
+        )
+    })
 }
 
 /// Fetches the manifest and returns it only if this appliance may act on it.
@@ -469,31 +677,30 @@ pub fn run(job: &Job, source: &str, install: bool) -> Result<Outcome, Box<dyn st
 /// Everything that can refuse an update before a byte of it is downloaded: the signature
 /// chain, the revocation list, and the anti-rollback floor.
 fn believe(
-    job: &Job,
+    watch: &mut dyn FnMut(Event),
     curl: &Path,
-    source: &str,
+    bundle: &Bundle,
     running: &str,
-) -> Result<plexos_types::manifest::Manifest, Box<dyn std::error::Error>> {
+) -> Result<(plexos_types::manifest::Manifest, Signature), Box<dyn std::error::Error>> {
     // The manifest is held as the bytes that arrived and is never re-encoded on the way to
     // the signature check. `fetch_text` would be enough to parse it and would quietly
     // replace anything invalid with U+FFFD, which is a manifest that parses, verifies
     // against nothing, and reports a signature failure about a document nobody mistyped.
-    let raw = plexos_types::manifest::RawManifest::new(fetch_bytes(
-        curl,
-        &format!("{source}/{MANIFEST}"),
-    )?);
-    let signature = trust::decode_signature(&fetch_text(curl, &format!("{source}/{SIGNATURE}"))?)?;
+    let raw =
+        plexos_types::manifest::RawManifest::new(fetch_document(curl, &bundle.manifest_url())?);
+    let signature = trust::decode_signature(&fetch_text(curl, &bundle.signature_url())?)?;
 
-    let revoked = revocations_in_force(job, curl, source);
+    let revoked = revocations_in_force(watch, curl, &bundle.base);
     let now = expiry_clock(running);
     let policy = trust::Policy::of_this_build(now.as_deref()).revoking(&revoked);
 
     let verified = trust::verify(&policy, &raw, &signature)?;
-    job.with(|state| {
-        state.available = Some(verified.manifest.release.clone());
-        state.signature = Some(Signature::from(&verified));
+    let signed_by = Signature::from(&verified);
+    watch(Event::Verified {
+        release: &verified.manifest.release,
+        signature: &signed_by,
     });
-    job.note(&format!(
+    watch(Event::Note(&format!(
         "{} is signed by {}, certified by root key {}{}",
         verified.manifest.release,
         verified.key_id,
@@ -504,7 +711,7 @@ fn believe(
         } else {
             ""
         }
-    ));
+    )));
 
     // Before the plan, because being offered a downgrade is a different thing from being
     // offered something that does not fit, and the first one is the one worth saying out
@@ -518,12 +725,12 @@ fn believe(
         verified.manifest.min_sequence,
         floor,
     )?;
-    job.note(&format!(
+    watch(Event::Note(&format!(
         "sequence {} is at or above the {floor} this appliance has accepted",
         verified.manifest.sequence
-    ));
+    )));
 
-    Ok(verified.manifest)
+    Ok((verified.manifest, signed_by))
 }
 
 /// Downloads the update and writes it to the slot that is not running.
@@ -674,7 +881,7 @@ fn expiry_clock(running: &str) -> Option<String> {
 /// stays in force. The list an appliance holds can only be replaced by a root-signed one
 /// with a higher counter, so somebody who can answer at this address can withhold a
 /// revocation but cannot withdraw one.
-fn revocations_in_force(job: &Job, curl: &Path, source: &str) -> Vec<String> {
+fn revocations_in_force(watch: &mut dyn FnMut(Event), curl: &Path, source: &str) -> Vec<String> {
     let path = Path::new(plexos_types::paths::REVOCATION_FILE);
     let held = std::fs::read_to_string(path)
         .ok()
@@ -686,7 +893,9 @@ fn revocations_in_force(job: &Job, curl: &Path, source: &str) -> Vec<String> {
         // No list published here is the ordinary case and says nothing about the one held.
         Ok(None) => return held.revoked,
         Err(error) => {
-            job.note(&format!("could not ask for a revocation list: {error}"));
+            watch(Event::Note(&format!(
+                "could not ask for a revocation list: {error}"
+            )));
             return held.revoked;
         }
     };
@@ -694,13 +903,13 @@ fn revocations_in_force(job: &Job, curl: &Path, source: &str) -> Vec<String> {
     match trust::verify_revocations(trust::ROOT_KEYS, &offered) {
         Ok(list) if list.supersedes(&held) => {
             if let Err(error) = plexos_update::atomic::write(path, offered.as_bytes()) {
-                job.note(&format!(
+                watch(Event::Note(&format!(
                     "a newer revocation list was accepted but could not be stored \
                      ({error}), so it applies to this update and will have to be fetched \
                      again for the next one"
-                ));
+                )));
             }
-            job.note(&format!(
+            watch(Event::Note(&format!(
                 "revocation list updated to counter {}; {} signing {} no longer believed",
                 list.counter,
                 list.revoked.len(),
@@ -709,7 +918,7 @@ fn revocations_in_force(job: &Job, curl: &Path, source: &str) -> Vec<String> {
                 } else {
                     "keys are"
                 }
-            ));
+            )));
             list.revoked
         }
         // Two silences, for two reasons. A list that is not newer is what every ordinary
@@ -718,9 +927,9 @@ fn revocations_in_force(job: &Job, curl: &Path, source: &str) -> Vec<String> {
         // refuse the manifest, which says the same thing and says it better.
         Ok(_) | Err(trust::TrustError::NoRootKeys) => held.revoked,
         Err(error) => {
-            job.note(&format!(
+            watch(Event::Note(&format!(
                 "the revocation list published here was not used: {error}"
-            ));
+            )));
             held.revoked
         }
     }
@@ -847,14 +1056,24 @@ fn write_partition(
 }
 
 /// Fetches a small document as the bytes that arrived.
-fn fetch_bytes(curl: &Path, url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+///
+/// Bounded in three directions, because this is the fetch an automatic check makes on its
+/// own: how long it may take, how many redirects it may follow, and how much it may be sent.
+pub(crate) fn fetch_document(
+    curl: &Path,
+    url: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     if is_local(url) {
         return read_local(url);
     }
     let output = std::process::Command::new(curl)
         .args(["--fail", "--silent", "--show-error", "--location"])
         .arg("--max-time")
-        .arg("60")
+        .arg(DOCUMENT_TIMEOUT_SECS.to_string())
+        .arg("--max-filesize")
+        .arg(MAX_DOCUMENT_BYTES.to_string())
+        .arg("--max-redirs")
+        .arg(MAX_REDIRECTS.to_string())
         .arg(url)
         .output()?;
     if !output.status.success() {
@@ -871,7 +1090,7 @@ fn fetch_bytes(curl: &Path, url: &str) -> Result<Vec<u8>, Box<dyn std::error::Er
     Ok(output.stdout)
 }
 
-/// [`fetch_bytes`], where the document not being there is an answer rather than a failure.
+/// [`fetch_document`], where the document not being there is an answer rather than a failure.
 ///
 /// curl exits 22 for an HTTP error status when `--fail` is given, which separates "the
 /// publisher does not serve this" from "the network is broken" — and those have opposite
@@ -892,7 +1111,11 @@ fn fetch_optional(curl: &Path, url: &str) -> Result<Option<Vec<u8>>, Box<dyn std
     let output = std::process::Command::new(curl)
         .args(["--fail", "--silent", "--show-error", "--location"])
         .arg("--max-time")
-        .arg("60")
+        .arg(DOCUMENT_TIMEOUT_SECS.to_string())
+        .arg("--max-filesize")
+        .arg(MAX_DOCUMENT_BYTES.to_string())
+        .arg("--max-redirs")
+        .arg(MAX_REDIRECTS.to_string())
         .arg(url)
         .output()?;
 
@@ -910,7 +1133,7 @@ fn fetch_optional(curl: &Path, url: &str) -> Result<Option<Vec<u8>>, Box<dyn std
 
 /// Fetches a small document as text, for things that are text by definition.
 fn fetch_text(curl: &Path, url: &str) -> Result<String, Box<dyn std::error::Error>> {
-    Ok(String::from_utf8_lossy(&fetch_bytes(curl, url)?).into_owned())
+    Ok(String::from_utf8_lossy(&fetch_document(curl, url)?).into_owned())
 }
 
 #[cfg(test)]

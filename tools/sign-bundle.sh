@@ -3,7 +3,13 @@
 # Turn the bundle post-image.sh produced into one an appliance will install: write the
 # ADR-0006 manifest and sign it.
 #
-#   tools/sign-bundle.sh <bundle-dir> <signing-key> <certificate-file>
+#   tools/sign-bundle.sh <bundle-dir> <signing-key> <certificate-file> --channel <channel>
+#
+# The channel is explicit and has no default. It used to be the literal string "dev" written
+# into the manifest here, which was harmless while nothing on an appliance read it and is
+# not harmless now: an appliance refuses a release published to a channel it does not track.
+# Defaulting to stable would be the dangerous direction -- a development build reaching every
+# machine because a flag was forgotten -- so there is no default at all.
 #
 # Deliberately not part of the build. The build runs on whatever host has the Buildroot
 # tree; the signing key is the thing that must not be on every such host, and a build that
@@ -31,14 +37,38 @@ set -euo pipefail
 BUNDLE="${1:-}"
 KEY="${2:-}"
 CERT="${3:-}"
+shift 3 2>/dev/null || true
+
+CHANNEL=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --channel) CHANNEL="${2:-}"; shift 2 ;;
+        --channel=*) CHANNEL="${1#--channel=}"; shift ;;
+        *) printf >&2 'unrecognised argument %s\n' "$1"; exit 2 ;;
+    esac
+done
 
 usage() {
-    printf >&2 'usage: tools/sign-bundle.sh <bundle-dir> <signing-key> <certificate-file>\n'
+    printf >&2 'usage: tools/sign-bundle.sh <bundle-dir> <signing-key> <certificate-file> --channel <stable|beta|dev>\n'
     printf >&2 '  the bundle is <output>/images/medialith-update\n'
     exit 2
 }
 
 [ -n "${BUNDLE}" ] && [ -n "${KEY}" ] && [ -n "${CERT}" ] || usage
+
+case "${CHANNEL}" in
+    stable|beta|dev) ;;
+    "")
+        printf >&2 'no --channel was given, and there is no default.\n'
+        printf >&2 '  An appliance refuses a release published to a channel it does not track,\n'
+        printf >&2 '  so this has to be said rather than assumed. Defaulting to stable would put\n'
+        printf >&2 '  a development build on every machine that forgot the flag.\n'
+        printf >&2 '  Remedy: --channel dev while testing, then promote with tools/promote-release.sh.\n'
+        exit 2 ;;
+    *)
+        printf >&2 '%s is not a channel. Remedy: one of stable, beta, dev.\n' "${CHANNEL}"
+        exit 2 ;;
+esac
 
 [ -f "${BUNDLE}/update.json" ] || {
     printf >&2 '%s has no update.json, so it is not a bundle post-image.sh produced\n' "${BUNDLE}"
@@ -57,10 +87,10 @@ SIGN=(cargo run --quiet --manifest-path "${REPO}/Cargo.toml" -p plexos-update --
 # Written by python rather than by a heredoc because every number in it comes out of
 # another document, and a shell that gets one of them subtly wrong produces a manifest that
 # signs and verifies and then fails a digest check after an 83 MB download.
-python3 - "${BUNDLE}" "${CERT}" <<'PYTHON'
+python3 - "${BUNDLE}" "${CERT}" "${CHANNEL}" <<'PYTHON'
 import base64, json, sys
 
-bundle, cert_path = sys.argv[1], sys.argv[2]
+bundle, cert_path, channel = sys.argv[1], sys.argv[2], sys.argv[3]
 
 with open(f"{bundle}/update.json") as f:
     described = json.load(f)
@@ -94,7 +124,7 @@ def artifact(described, name):
 manifest = {
     "manifest_version": 1,
     "product": "plexos",
-    "channel": "dev",
+    "channel": channel,
     "os_version": ".".join(parts[:3]),
     "release": release,
     "sequence": int(stamp),
@@ -123,7 +153,7 @@ with open(f"{bundle}/manifest.json", "w") as f:
     json.dump(manifest, f, indent=2)
     f.write("\n")
 
-print(f"manifest for {release}, sequence {stamp}, signed by {key_id}")
+print(f"manifest for {release}, channel {channel}, sequence {stamp}, signed by {key_id}")
 PYTHON
 
 # ---------------------------------------------------------------------------
@@ -144,3 +174,6 @@ else
 fi
 
 printf 'signed %s\n' "${BUNDLE}"
+printf '  channel: %s -- an appliance tracking any other channel will refuse this\n' "${CHANNEL}"
+printf '  publish it into a static tree with:\n'
+printf '    tools/publish-release.sh <tree> %s\n' "${BUNDLE}"

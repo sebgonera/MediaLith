@@ -453,6 +453,73 @@ pub fn patch(config: &mut Config, body: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Merges the update sections of an incoming document (ADR-0020).
+///
+/// Separate from [`patch`] for the reason [`patch_network`] is: these fields decide what
+/// this appliance will fetch and believe, so they are validated here rather than discovered
+/// to be nonsense by a background thread at four in the morning.
+///
+/// # Errors
+/// A message naming the field, for a channel this build cannot honour or an address that is
+/// not one.
+pub fn patch_updates(config: &mut Config, body: &[u8]) -> Result<(), String> {
+    let document: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("the request body is not JSON: {e}"))?;
+
+    if let Some(channel) = document.get("updates").and_then(|u| u.get("channel")) {
+        let channel = channel
+            .as_str()
+            .ok_or_else(|| "updates.channel must be a string".to_owned())?
+            .trim();
+        // Refused here rather than stored and puzzled over later. The file format tolerates
+        // a word it cannot name -- it has to, or a release that knows a fourth channel
+        // strands the one you roll back to -- but a person typing one into this console is
+        // making a mistake, and the honest moment to say so is now.
+        if plexos_types::manifest::Channel::from_config(channel).is_none() {
+            return Err(format!(
+                "{channel:?} is not an update channel this release knows. Remedy: choose \
+                 one of {}.",
+                plexos_types::manifest::Channel::ALL
+                    .map(plexos_types::manifest::Channel::as_str)
+                    .join(", ")
+            ));
+        }
+        config.updates.channel.clear();
+        config.updates.channel.push_str(channel);
+    }
+
+    let Some(service) = document.get("update_service") else {
+        return Ok(());
+    };
+
+    if let Some(url) = service.get("url") {
+        let url = url
+            .as_str()
+            .ok_or_else(|| "update_service.url must be a string".to_owned())?
+            .trim();
+        // Empty is a setting and not a failure: it is how somebody turns automatic checking
+        // off for good, and it is the state every appliance ships in.
+        if !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err(format!(
+                "{url:?} is not an update service address. Remedy: it starts with https:// \
+                 (or http:// on a bench), and it is the directory holding channels/ and \
+                 releases/ — not a file inside it. Leave it empty to switch automatic \
+                 checking off."
+            ));
+        }
+        config.update_service.url.clear();
+        config.update_service.url.push_str(url);
+    }
+
+    if let Some(check) = service.get("check") {
+        config.update_service.check = check
+            .as_bool()
+            .ok_or_else(|| "update_service.check must be true or false".to_owned())?;
+    }
+
+    Ok(())
+}
+
 /// Merges the `network` section of an incoming document.
 ///
 /// Separate from [`patch`] because the caller has to know whether addressing was touched
@@ -536,6 +603,58 @@ mod tests {
         let error = load(&path).expect_err("must refuse");
         assert!(error.contains("Remedy:"), "{error}");
         assert!(error.contains("how they vanish"), "{error}");
+    }
+
+    #[test]
+    fn the_update_service_and_channel_can_be_set_and_cleared() {
+        let mut config = Config::default();
+        patch_updates(
+            &mut config,
+            br#"{"updates":{"channel":"dev"},
+                 "update_service":{"url":"http://192.168.2.165:8080/tree","check":false}}"#,
+        )
+        .expect("a channel this build knows and an address");
+        assert_eq!(config.updates.channel, "dev");
+        assert!(config.update_service.is_configured());
+        assert!(!config.update_service.check);
+
+        // Clearing the field is how somebody switches automatic checking off for good, so
+        // it must not be mistaken for a malformed address.
+        patch_updates(&mut config, br#"{"update_service":{"url":"  "}}"#)
+            .expect("empty is a value");
+        assert!(!config.update_service.is_configured());
+
+        // And a body about something else leaves all of it alone, which is what makes the
+        // page able to save one field at a time.
+        patch_updates(&mut config, br#"{"system":{"hostname":"cinema"}}"#).expect("no-op");
+        assert_eq!(config.updates.channel, "dev");
+    }
+
+    #[test]
+    fn a_channel_nobody_publishes_to_is_refused_at_the_moment_it_is_typed() {
+        // The file format has to tolerate a word it cannot name -- otherwise a release that
+        // knows a fourth channel strands the release you roll back to -- but a person
+        // choosing one here is making a mistake, and the console is where it can be said.
+        let mut config = Config::default();
+        let error = patch_updates(&mut config, br#"{"updates":{"channel":"lts"}}"#).unwrap_err();
+        assert!(error.contains("lts"), "{error}");
+        assert!(error.contains("stable, beta, dev"), "{error}");
+        assert_eq!(config.updates.channel, "stable", "and nothing was changed");
+    }
+
+    #[test]
+    fn an_update_service_that_is_not_an_address_is_refused_with_the_shape_it_wants() {
+        let mut config = Config::default();
+        for bad in [
+            r#"{"update_service":{"url":"192.168.2.165:8080"}}"#,
+            r#"{"update_service":{"url":"file:///etc"}}"#,
+            r#"{"update_service":{"url":"updates.example/medialith"}}"#,
+        ] {
+            let error = patch_updates(&mut config, bad.as_bytes()).unwrap_err();
+            assert!(error.contains("Remedy:"), "{bad}: {error}");
+            assert!(error.contains("channels/"), "{bad}: {error}");
+        }
+        assert!(!config.update_service.is_configured());
     }
 
     #[test]

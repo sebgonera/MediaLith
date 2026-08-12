@@ -507,6 +507,30 @@
   /* Buttons are styled once, further down, on the element itself. See the comment on that
      rule for what naming a container cost, twice. */
   .plex .hint { color: var(--muted); font-size: .9rem; margin: .4rem 0 0; }
+
+  /* What a release says it changed. A list rather than a paragraph because a publisher
+     writes it as one, and because three short lines are read and one long sentence is not. */
+  .notes {
+    margin: .6rem 0 0;
+    padding-left: 1.1rem;
+    color: var(--muted);
+    font-size: .92rem;
+  }
+  .notes li { margin-bottom: .3rem; }
+
+  /* A card that wants reading before the ones around it. One border and no red: the only
+     thing on this page entitled to alarm somebody is a machine that is actually broken, and
+     a security release is a thing to install rather than an emergency to survive. */
+  .card.attention { border-color: var(--degraded); }
+
+  /* The disclosure holding the development update source. Styled on the element, like the
+     buttons below: a rule that enumerated where disclosures live would miss the next one. */
+  details.card > summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--text);
+  }
+  details.card[open] > summary { margin-bottom: .6rem; }
   .plex .visit {
     display: inline-block;
     margin-top: .8rem;
@@ -2051,6 +2075,12 @@
         <h2>Overview</h2>
         <p class="lede">Whether this appliance is working, and what is wrong if it is not.</p>
 
+        <!-- Empty unless there is a trusted newer release, and one line when there is. A
+             permanent banner for an ordinary update is how a notice becomes furniture; a
+             security release gets stronger words and still not a red box. Its own element,
+             so the poll that fills it replaces nothing else. -->
+        <div id="overview-update"></div>
+
         <div class="summary">
           <div class="sum" id="sum-plex"><div class="head">Plex</div>
             <div class="state">…</div></div>
@@ -2218,9 +2248,45 @@
           <p class="empty">Loading…</p>
         </div>
         <section class="card plex" id="update" data-fold="update" aria-live="polite">
-          <h3>System update</h3>
+          <h3>MediaLith</h3>
           <p class="empty">Loading…</p>
         </section>
+
+        <!-- Plex is updated by a different mechanism and on somebody else's schedule, so it
+             is named here and pointed at rather than folded into the card above. An owner
+             reading "update available" has to be able to tell which of the two things it is
+             about; a system update never changes the Plex version, and vice versa. -->
+        <section class="card plex" id="update-plex" aria-live="polite">
+          <h3>Plex Media Server</h3>
+          <p class="empty">Loading…</p>
+        </section>
+
+        <!-- Written once, in the markup, and never replaced by a poll. Everything a person
+             types into or opens lives here for that reason: the card above redraws on a
+             timer, and a region on a timer destroys anything opened inside it -- which is
+             how the process table and the activity card's disclosure came to shut
+             themselves twice a second. -->
+        <details class="card" id="update-manual">
+          <summary>Update from an address or a plugged-in medium</summary>
+          <p class="hint">The development path, and the one this project has always used. An
+             address is right for a machine that can reach a build host; a plugged-in medium
+             is right for one that cannot, or whose network is the thing being repaired.
+             Everything after the address is identical — the signature, the certificate
+             chain, the revocation list, the anti-rollback floor and the channel are all
+             still ahead of it.</p>
+          <div class="row">
+            <input type="text" id="update-source" placeholder="paste the address publish-update.sh prints"
+                   autocomplete="off" spellcheck="false">
+          </div>
+          <p class="hint" id="update-source-note" hidden></p>
+          <div class="row">
+            <button id="update-source-check" class="ghost">Check this address</button>
+            <button id="update-source-install">Install from this address</button>
+            <button id="update-media-scan" class="ghost">Look on a plugged-in medium</button>
+          </div>
+          <div id="update-media"></div>
+        </details>
+
         <div id="sys-settings"></div>
         <section class="card plex" id="install" data-fold="install" aria-live="polite">
           <h3>Install to a disk</h3>
@@ -2814,6 +2880,66 @@ function addressingCard() {
     </div>`;
 }
 
+/**
+ * Where this appliance looks for MediaLith releases, and how often (ADR-0020).
+ *
+ * Its own card rather than three more fields in Settings, because it is the one form on
+ * this page whose answers decide what the machine will fetch and believe. The address is
+ * shown plainly and not hidden behind an "advanced" disclosure, and that is a decision with
+ * an expiry date on it: there is no public MediaLith update service yet, so for now the
+ * only honest thing to put in this field is a build host, and hiding the field would hide
+ * the only way anybody has of setting it.
+ */
+function updatesCard() {
+  const c = settingsView ? (settingsView.config || {}) : null;
+  const updates = (c || {}).updates || {};
+  const service = (c || {}).update_service || {};
+  const channels = ["stable", "beta", "dev"];
+  const current = updates.channel || "stable";
+  // A channel this build cannot name is still shown, because it is what the file says and a
+  // form that silently displayed something else would be lying about the machine.
+  const offered = channels.includes(current) ? channels : [current].concat(channels);
+
+  // One return and one `id="update-config"`, deliberately -- a loading branch and a loaded
+  // branch each carrying the id is exactly what `no_id_is_given_to_two_elements` exists to
+  // catch, and it caught this one before it reached a machine.
+  return `
+    <div class="card form" id="update-config">
+      <h3>System updates</h3>
+      ${!c ? `<p class="empty">Loading…</p>` : `
+      <p class="hint">These settings are about MediaLith itself — the kernel, the drivers,
+         the firmware and this console. Plex is updated separately, in
+         <button class="linkish" data-goto="plex">the Plex view</button>.</p>
+      <div class="field">
+        <label for="set-channel">Update channel</label>
+        <select id="set-channel">${
+          offered.map(ch => `<option value="${esc(ch)}"${ch === current ? " selected" : ""}>${esc(ch)}</option>`).join("")
+        }</select>
+        <p class="hint">Each channel is a separate feed. A machine on stable never sees a
+           beta release, and a release reaches stable by being promoted — the same bytes,
+           tested, published again.</p>
+      </div>
+      <div class="field">
+        <label for="set-update-url">Update service</label>
+        <input type="text" id="set-update-url" autocomplete="off" spellcheck="false"
+               placeholder="address of an update service" value="${esc(service.url || "")}">
+        <p class="hint">The directory holding <span class="mono">channels/</span> and
+           <span class="mono">releases/</span>. Empty means this appliance never looks for a
+           release by itself, which is how every MediaLith ships today.</p>
+      </div>
+      <div class="field">
+        <label for="set-update-check">
+          <input type="checkbox" id="set-update-check"${service.check === false ? "" : " checked"}>
+          Check for releases automatically
+        </label>
+        <p class="hint">About once a day. Checking only: nothing is downloaded and nothing
+           is installed without somebody pressing the button.</p>
+      </div>
+      <div class="row"><button id="update-config-save">Save update settings</button></div>
+      <div id="update-config-result"></div>`}
+    </div>`;
+}
+
 function settingsCard() {
   if (!settingsView) {
     return `<div class="card form"><h3>Settings</h3>
@@ -3011,6 +3137,8 @@ async function loadSettings() {
   // own fields by id without caring which view is showing.
   const host = document.getElementById("settings");
   if (host) host.outerHTML = hostedSettingsCard();
+  const updates = document.getElementById("update-config");
+  if (updates) updates.outerHTML = updatesCard();
   // The snapshot reads the hostname and the timezone off this reply, and this is the only
   // thing that fetches it -- so a snapshot drawn before the settings arrived has to be told.
   renderSnapshot();
@@ -3040,9 +3168,14 @@ async function loadSettings() {
 /// asked for.
 async function saveSettings(which) {
   const network = which === "network";
-  const out = document.getElementById(network ? "net-result" : "settings-result");
-  const button = document.getElementById(network ? "net-save" : "settings-save");
-  const label = network ? "Save addressing" : "Save settings";
+  const form = which === "updates"
+    ? { out: "update-config-result", button: "update-config-save", label: "Save update settings" }
+    : network
+      ? { out: "net-result", button: "net-save", label: "Save addressing" }
+      : { out: "settings-result", button: "settings-save", label: "Save settings" };
+  const out = document.getElementById(form.out);
+  const button = document.getElementById(form.button);
+  const label = form.label;
   const value = credential();
   if (!value) {
     if (out) out.innerHTML = `<div class="progress failed"><span class="now">Not saved</span>
@@ -3066,6 +3199,15 @@ async function saveSettings(which) {
       body.network = { mode: pendingMode || "dhcp" };
     }
     pendingMode = null;
+  } else if (which === "updates") {
+    // Sent as its own two sections, so a save here cannot revert a hostname and a save
+    // there cannot revert a channel: `settings::patch*` leaves anything the body does not
+    // mention alone, which is what lets three forms share one document and one endpoint.
+    body.updates = { channel: val("set-channel") };
+    body.update_service = {
+      url: val("set-update-url"),
+      check: (document.getElementById("set-update-check") || {}).checked !== false,
+    };
   } else {
     body.system = { hostname: val("set-hostname"), timezone: val("set-timezone") };
   }
@@ -4869,10 +5011,26 @@ function render(status) {
     return box;
   }, () => { observeTerminalSize(); termStatus("no session"); });
 
+  // The development source field is in the markup rather than in a template, so its value
+  // has to be restored once. sessionStorage and not localStorage, for the same reason the
+  // device token uses it: it belongs to this tab and this sitting.
+  const sourceField = document.getElementById("update-source");
+  if (sourceField && !sourceField.dataset.wired) {
+    sourceField.dataset.wired = "yes";
+    sourceField.value = sessionStorage.getItem(SOURCE_KEY) || "";
+    sourceField.addEventListener("input", event => {
+      sessionStorage.setItem(SOURCE_KEY, event.target.value);
+      // The nudge goes as soon as it has been acted on. A hint that stays after it has been
+      // answered reads as an error that will not clear.
+      const note = document.getElementById("update-source-note");
+      if (note) note.hidden = true;
+    });
+  }
+
   hostOnce("sys-settings", () => {
     const box = document.createElement("div");
     box.className = "wide";
-    box.innerHTML = hostedSettingsCard();
+    box.innerHTML = hostedSettingsCard() + updatesCard();
     return box;
   });
 
@@ -5584,6 +5742,10 @@ function renderUpdate(report) {
   if (busy || phase === "failed") unfold("update");
   const rollback = report.rollback;
   const signedWith = report.signature;
+  // Everything drawn below, and nothing else. A field added to this card has to be added
+  // here too, or it appears at the next unrelated redraw and looks intermittent -- which is
+  // exactly what happened to the "Signed by" line when it was new.
+  const found = report.availability || {};
   const rendered = JSON.stringify([
     phase, report.detail, report.error, report.running, report.slot,
     report.available, report.staged, report.gate, (report.log || []).length,
@@ -5591,6 +5753,12 @@ function renderUpdate(report) {
     // Part of the key, or a check that verifies a manifest would not redraw the section
     // that says which key verified it: this is the only field that changes on its own.
     signedWith ? signedWith.key_id : null,
+    found.status, found.detail, found.available, found.channel, found.source,
+    found.error, found.summary, found.importance, (found.notes || []).join("|"),
+    // Bucketed, not the raw number. "last checked" moves every second and redrawing the
+    // card every second would take away anything a person had selected in it.
+    found.checked_seconds_ago === null || found.checked_seconds_ago === undefined
+      ? null : Math.floor(found.checked_seconds_ago / 60),
   ]);
   if (rendered === lastUpdateRendered) return;
   lastUpdateRendered = rendered;
@@ -5634,52 +5802,156 @@ function renderUpdate(report) {
     : "";
 
   document.getElementById("update").innerHTML = `
-    <h3>System update</h3>
-    ${slotsMarkup(report)}
-    ${lifecycleMarkup(report, phase)}
+    <h3>MediaLith</h3>
     <dl>
-      ${report.available ? `<dt>Offered</dt><dd class="mono">${esc(report.available)}</dd>` : ""}
+      <dt>Current</dt><dd class="mono">${esc(report.running || "unknown")} <span class="hint">on slot ${esc(report.slot || "?")}</span></dd>
+      <dt>Channel</dt><dd>${esc(found.channel || "stable")}</dd>
+      <dt>Last checked</dt><dd>${esc(lastCheckedWords(found))}</dd>
       ${report.gate ? `<dt>This boot</dt><dd>${esc(report.gate)}</dd>` : ""}
       ${signedBy}
     </dl>
+    ${availabilityMarkup(found, report)}
     ${rolledBack}
     ${developmentKey ? `<p class="hint">${developmentKey}</p>` : ""}
+    ${slotsMarkup(report)}
+    ${lifecycleMarkup(report, phase)}
     <!-- One line on purpose. A test asserts this sentence is on the page, because it is the
          question anybody hesitating over that button is actually asking, and reflowing it
          across two lines is enough to make the assertion miss it. -->
     <p class="hint">If the new system fails to boot three times, the bootloader comes back to this one by itself, and nobody has to be at the machine for that to happen.</p>
-    <div class="row">
-      <input type="text" id="update-source" placeholder="paste the address publish-update.sh prints"
-             autocomplete="off" spellcheck="false" value="${esc(sessionStorage.getItem(SOURCE_KEY) || "")}">
-      <p class="hint" id="update-source-note" hidden></p>
-      <!-- The other way in. An address is right for a machine that can reach the build
-           host; this is right for one that cannot, or whose network is the thing being
-           fixed. Written into its own element, never replaced by a poll. -->
-      <div class="row">
-        <button id="update-media-scan" class="ghost">Look on a plugged-in medium</button>
-      </div>
-      <div id="update-media"></div>
-    </div>
-    <div class="row">
-      <button id="update-check" ${busy ? "disabled" : ""}>Check</button>
-      <button id="update-install" ${busy ? "disabled" : ""}>Download and install</button>
-    </div>
     ${progress}`;
 
-  document.getElementById("update-check").addEventListener("click", () => startUpdate(false));
-  document.getElementById("update-install").addEventListener("click", () => startUpdate(true));
-  document.getElementById("update-source").addEventListener("input", event => {
-    sessionStorage.setItem(SOURCE_KEY, event.target.value);
-    // The nudge goes as soon as it has been acted on. A hint that stays after it has been
-    // answered reads as an error that will not clear.
-    const note = document.getElementById("update-source-note");
-    if (note) note.hidden = true;
-  });
+  renderOverviewUpdate(found);
 
-  if (typing) {
-    const field = document.getElementById("update-source");
-    if (field) { field.focus(); field.setSelectionRange(caret, caret); }
+  // No listeners bound here. Every button in this card is inside a region a poll replaces,
+  // and a listener attached to an element a redraw throws away is one that stops working
+  // after a second -- the kind of fault nobody reports, because it reads as a slow page.
+  // The delegated handler at the bottom of this file addresses them by id.
+}
+
+/**
+ * The one line the Overview says about releases, and only when there is one to say.
+ *
+ * Deliberately not a state that persists: an appliance that is up to date says nothing here
+ * at all, because a notice that is always present is one nobody reads by the second week.
+ */
+function renderOverviewUpdate(found) {
+  const host = document.getElementById("overview-update");
+  if (!host) return;
+  if ((found.status || "") !== "available") { host.innerHTML = ""; return; }
+  const security = found.importance === "security";
+  host.innerHTML = `
+    <div class="card ${security ? "attention" : ""}" id="overview-update-card">
+      <p>${security ? "<strong>A MediaLith security update is available.</strong>" : "A MediaLith update is available."}
+         <span class="mono">${esc(found.available || "")}</span>${
+           found.summary ? ` — ${esc(found.summary)}` : ""}
+         <button class="linkish" data-goto="system">Read it and install</button>.</p>
+    </div>`;
+}
+
+/**
+ * How long ago the appliance last asked, in words.
+ *
+ * Elapsed rather than a time of day, because this machine has no clock synchronisation and
+ * a wall-clock "last checked at 14:12" can be years wrong while "4 minutes ago" cannot be.
+ */
+function lastCheckedWords(found) {
+  const ago = found.checked_seconds_ago;
+  if (ago === null || ago === undefined) return "never";
+  if (ago < 90) return "just now";
+  const minutes = Math.round(ago / 60);
+  if (minutes < 60) return minutes + " min ago";
+  const hours = Math.round(minutes / 60);
+  return hours === 1 ? "an hour ago" : hours + " hours ago";
+}
+
+/**
+ * What the update service last said, and the one button that follows from it.
+ *
+ * Every branch is a different sentence on purpose. The one that must never be reachable by
+ * accident is "up to date" for a check that failed: an appliance being handed manifests it
+ * cannot authenticate would then look exactly like an appliance with nothing to do.
+ */
+function availabilityMarkup(found, report) {
+  const busy = ["checking", "downloading", "writing", "activating"].includes(report.phase || "idle");
+  const status = found.status || "never_checked";
+  const notes = (found.notes || []).length
+    ? `<ul class="notes">${(found.notes || []).map(n => `<li>${esc(n)}</li>`).join("")}</ul>`
+    : "";
+  const checkButton = `<button id="update-check" class="ghost" ${busy ? "disabled" : ""}>Check now</button>`;
+
+  if (status === "not_configured") {
+    return `
+      <p>System updates are not configured, so this appliance never looks for one.</p>
+      <p class="hint">An update service is a plain web address holding
+         <span class="mono">channels/</span> and <span class="mono">releases/</span>. There
+         is no public MediaLith one yet — until there is, set the address of a build host
+         below, or update from a bundle by hand.</p>`;
   }
+
+  if (status === "failed") {
+    // Named as a check that failed, never as an absence of updates. The two are opposite
+    // states and only one of them is a claim about what this machine is running.
+    return `
+      <div class="progress failed">
+        <span class="now">Update check failed</span>
+        <div>${esc(found.detail || "")}</div>
+        ${found.error ? `<div class="log">${esc(found.error)}</div>` : ""}
+      </div>
+      <div class="row">${checkButton}</div>`;
+  }
+
+  if (status === "available") {
+    const security = found.importance === "security";
+    return `
+      <div class="progress">
+        <span class="now">${security ? "Security update available" : "Update available"}</span>
+        <div class="mono">${esc(found.available || "")}</div>
+        ${found.summary ? `<div>${esc(found.summary)}</div>` : ""}
+      </div>
+      ${notes}
+      <div class="row">
+        ${checkButton}
+        <button id="update-install" ${busy ? "disabled" : ""}>Download and install</button>
+      </div>`;
+  }
+
+  if (status === "checking") {
+    return `<p>Asking the update service what it has…</p><div class="row">${checkButton}</div>`;
+  }
+
+  if (status === "up_to_date") {
+    return `<p>MediaLith is up to date.</p><div class="row">${checkButton}</div>`;
+  }
+
+  return `
+    <p>No check for a MediaLith release has been made yet.</p>
+    <div class="row">${checkButton}</div>`;
+}
+
+/** Asks the appliance to consult its own update service. */
+async function checkForRelease() {
+  const value = credential();
+  if (!value) {
+    sectionError("update", "An administrator credential is needed to check for a release.");
+    return;
+  }
+  try {
+    const response = await fetch("/api/update/check", {
+      method: "POST", cache: "no-store",
+      headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (!response.ok) {
+      sectionError("update", await response.text());
+      return;
+    }
+  } catch (error) {
+    sectionError("update", String(error));
+    return;
+  }
+  lastUpdateRendered = null;
+  updateTick();
 }
 
 /**
@@ -5745,7 +6017,7 @@ function chooseUpdateMedia(path) {
     `<p class="hint">Using the bundle on that medium. Press Check or Install.</p>`;
 }
 
-async function startUpdate(install) {
+async function startUpdate(install, from) {
   const value = credential();
   if (!value) {
     sectionError("update", "The device token is needed to check for or install an update. Enter it in the Device token box at the top of this page.");
@@ -5753,29 +6025,36 @@ async function startUpdate(install) {
   }
   if (install && !confirm("Download and write a new system to the other slot?")) return;
 
-  // An empty field is not an attempt that failed, so nothing is attempted. Said beside
-  // the field rather than in the section's error line, and the field is focused, because
-  // the answer to "what do I do" is "type here" and the cursor is the shortest way to say
-  // it. This used to POST, fail, and leave the card reading "Failed -- the update failed"
-  // at somebody who had not filled anything in.
-  const field = document.getElementById("update-source");
-  const source = (field.value || "").trim();
-  if (!source) {
-    const note = document.getElementById("update-source-note");
-    if (note) {
-      // No example address here. The page carries exactly one absolute URL -- Plex's own
-      // interface, built from this machine's host -- and a test enforces that, because a
-      // second one is how a CDN or a font sneaks in. An address typed into a hint is not
-      // one this appliance can vouch for anyway.
-      note.textContent =
-        "Paste the address that publish-update.sh prints on the build host. It ends in "
-        + "/medialith-update.";
-      note.hidden = false;
+  // Two ways in and one path afterwards. `from` is the empty string when the release came
+  // from the appliance's own update service -- there is nothing to type, and the body
+  // carries no source at all, which is what tells the daemon to consult the service it is
+  // configured with. Anything else is the development field below.
+  let source = from === undefined ? null : from;
+  if (source === null) {
+    // An empty field is not an attempt that failed, so nothing is attempted. Said beside
+    // the field rather than in the section's error line, and the field is focused, because
+    // the answer to "what do I do" is "type here" and the cursor is the shortest way to say
+    // it. This used to POST, fail, and leave the card reading "Failed -- the update failed"
+    // at somebody who had not filled anything in.
+    const field = document.getElementById("update-source");
+    source = ((field || {}).value || "").trim();
+    if (!source) {
+      const note = document.getElementById("update-source-note");
+      if (note) {
+        // No example address here. The page carries exactly one absolute URL -- Plex's own
+        // interface, built from this machine's host -- and a test enforces that, because a
+        // second one is how a CDN or a font sneaks in. An address typed into a hint is not
+        // one this appliance can vouch for anyway.
+        note.textContent =
+          "Paste the address that publish-update.sh prints on the build host. It ends in "
+          + "/medialith-update.";
+        note.hidden = false;
+      }
+      if (field) field.focus();
+      return;
     }
-    field.focus();
-    return;
   }
-  const body = { install, source };
+  const body = source ? { install, source } : { install };
 
   try {
     const response = await fetch(UPDATE_ENDPOINT, {
@@ -5797,6 +6076,39 @@ async function startUpdate(install) {
     return;
   }
   updateTick();
+}
+
+/**
+ * Plex's own version, in the System view, beside MediaLith's and never merged with it.
+ *
+ * Two update mechanisms, two cards, two sentences. A MediaLith release does not change the
+ * Plex version and a Plex update does not change the operating system, and an owner reading
+ * "update available" is entitled to know which of the two it is about. Drawn from the
+ * provisioning report the page already polls, so this adds no request.
+ */
+function renderPlexSoftware() {
+  const host = document.getElementById("update-plex");
+  if (!host) return;
+  const report = latestProvision || {};
+  const installed = report.installed_version;
+  const latest = report.latest_version;
+  const body = !installed
+    ? `<p>Plex is not installed on this appliance.
+         <button class="linkish" data-goto="plex">Install it</button>.</p>`
+    : `<dl>
+         <dt>Installed</dt><dd class="mono">${esc(installed)}</dd>
+         ${latest
+           ? `<dt>Plex offers</dt><dd class="mono">${esc(latest)}${
+                latest === installed ? " — up to date" : ""}</dd>`
+           : ""}
+       </dl>
+       ${latest && latest !== installed
+         ? `<p>A newer Plex is available. It is installed from
+              <button class="linkish" data-goto="plex">the Plex view</button>, and it is not
+              a MediaLith update: nothing about it changes the operating system.</p>`
+         : `<p class="hint">Plex updates are separate from MediaLith updates and are managed
+              in <button class="linkish" data-goto="plex">the Plex view</button>.</p>`}`;
+  host.innerHTML = `<h3>Plex Media Server</h3>${body}`;
 }
 
 async function updateTick() {
@@ -5838,6 +6150,9 @@ async function plexTick() {
   // with a different signature -- so reading the report from inside that early return would
   // have left the summary showing the first reply for ever.
   latestProvision = report;
+  // The System view names Plex's version beside MediaLith's, and this is where that number
+  // arrives. Cheap, and it cannot disagree with the Plex view because it is the same reply.
+  renderPlexSoftware();
   renderSummary();
 
   renderPlex(report);
@@ -7161,6 +7476,13 @@ document.addEventListener("click", event => {
   if (id === "bp-start" || id === "bp-start-again") { bpStart(); return; }
   if (id === "bp-cancel") { bpCancel(); return; }
   if (id === "update-media-scan") { scanUpdateMedia(); return; }
+  // The two ways to install, and the difference is only where the address came from.
+  // An empty string means "the release the update service offered", which is the path an
+  // owner uses and the one that needs nothing typed.
+  if (id === "update-check") { checkForRelease(); return; }
+  if (id === "update-install") { startUpdate(true, ""); return; }
+  if (id === "update-source-check") { startUpdate(false); return; }
+  if (id === "update-source-install") { startUpdate(true); return; }
   if (id === "approve-yes") { decideApproval(true); return; }
   if (id === "approve-deny") { decideApproval(false); return; }
   if (id === "health-toggle") {
@@ -7182,6 +7504,7 @@ document.addEventListener("click", event => {
     event.target.remove();
   }
   if (id === "settings-save") saveSettings("identity");
+  if (id === "update-config-save") saveSettings("updates");
   if (id === "net-save") saveSettings("network");
   if (id === "token-rotate") rotateToken();
   if (id === "net-confirm") confirmNetwork();

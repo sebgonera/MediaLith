@@ -72,6 +72,12 @@ pub struct Services {
     pub plex: std::sync::Arc<crate::plex::Handle>,
     /// The state of any OS update.
     pub update: std::sync::Arc<crate::update::Job>,
+    /// What is known about releases this appliance is not running (ADR-0020).
+    ///
+    /// Beside the update job rather than inside it, because they answer different
+    /// questions: one is a job that writes a partition, and this is a fact about the world
+    /// that stays true whether or not anybody is installing anything.
+    pub discovery: std::sync::Arc<crate::discover::Discovery>,
     /// The state of any install-to-disk.
     pub install: std::sync::Arc<crate::install::Job>,
     /// The state of any wireless scan or join.
@@ -88,6 +94,7 @@ impl Services {
             provision: std::sync::Arc::new(crate::provision::Job::new()),
             plex: std::sync::Arc::new(crate::plex::Handle::new()),
             update: std::sync::Arc::new(crate::update::Job::new()),
+            discovery: std::sync::Arc::new(crate::discover::Discovery::new()),
             install: std::sync::Arc::new(crate::install::Job::new()),
             wifi: std::sync::Arc::new(crate::wifi::Job::new()),
             metrics: std::sync::Arc::new(crate::metrics::Sampler::new()),
@@ -124,6 +131,7 @@ pub fn respond(request: &Request, env: &impl Environment, services: &Services) -
         provision: job,
         plex,
         update,
+        discovery,
         install,
         wifi,
         metrics,
@@ -195,13 +203,33 @@ pub fn respond(request: &Request, env: &impl Environment, services: &Services) -
             // update, and it must not leave a failed update behind for the page to draw.
             let source = crate::update::source_in(&request.body);
             if source.trim().is_empty() {
-                return Response::text(
-                    400,
-                    "no update source was given. Remedy: paste the address that \
-                     tools/publish-update.sh prints on the build host, then press the \
-                     button again. Guessing where to fetch a whole operating system from \
-                     is not something this appliance will do.\n",
-                );
+                // No address means "the release you showed me", which is the ordinary way
+                // in for somebody who did not build this machine: the appliance already
+                // knows where to look, and the feed it reads is the same one the check
+                // read. It resolves on the job's thread rather than here, because that
+                // fetch can take a minute against a service that is down and a request
+                // must not be held open for it.
+                let configured = crate::settings::load(&crate::settings::path())
+                    .is_ok_and(|config| config.update_service.is_configured());
+                if !configured {
+                    return Response::text(
+                        400,
+                        "no update source was given, and this appliance has no update \
+                         service configured. Remedy: set one in Settings, or paste the \
+                         address that tools/publish-update.sh prints on the build host. \
+                         Guessing where to fetch a whole operating system from is not \
+                         something this appliance will do.\n",
+                    );
+                }
+                if !update.begin() {
+                    return Response::text(
+                        409,
+                        "An update is already running. Watch it at GET /api/update.\n",
+                    );
+                }
+                let install = crate::update::wants_install(&request.body);
+                crate::update::spawn_from_service(update, install);
+                return Response::json(format!("{{\"install\":{install}}}"));
             }
             // A bundle on a plugged-in medium has to be mounted for the whole update, not
             // copied first: it is four hundred megabytes across several files, read from
@@ -229,10 +257,38 @@ pub fn respond(request: &Request, env: &impl Environment, services: &Services) -
         // on somebody's USB sticks is not for every reader on the LAN.
         ("POST", "/api/update/media") => bundles_on_media(env),
 
-        ("GET" | "HEAD", "/api/update") => match serde_json::to_string(&update.snapshot()) {
-            Ok(json) => Response::json(json),
-            Err(error) => Response::text(500, format!("could not serialise progress: {error}\n")),
-        },
+        // Asking the configured update service whether there is a newer MediaLith release,
+        // and installing nothing. A POST for the reason `/api/provision/check` is one: it
+        // reaches the network on the appliance's behalf. That changes no state here and is
+        // still a thing an administrator credential should gate, because "make this machine
+        // talk to that address" is an instruction and not a question.
+        //
+        // The periodic check needs none of this. It is the appliance asking on its own
+        // behalf, from a thread nobody had to authenticate to.
+        ("POST", "/api/update/check") => {
+            if update.snapshot().phase.is_running() {
+                return Response::text(
+                    409,
+                    "An update is already running, and it is checking the same thing. \
+                     Watch it at GET /api/update.\n",
+                );
+            }
+            if !discovery.begin() {
+                return Response::json("{\"checking\":true}".to_owned());
+            }
+            let checking = std::sync::Arc::clone(discovery);
+            std::thread::spawn(move || crate::discover::check(&checking));
+            Response::json("{\"checking\":true}".to_owned())
+        }
+
+        ("GET" | "HEAD", "/api/update") => {
+            match serde_json::to_string(&update_report(update, discovery)) {
+                Ok(json) => Response::json(json),
+                Err(error) => {
+                    Response::text(500, format!("could not serialise progress: {error}\n"))
+                }
+            }
+        }
 
         // What a new appliance still needs, in order (ADR-0016). Read-only and derived
         // entirely from state other endpoints already report, so it cannot disagree with
@@ -1181,6 +1237,7 @@ fn save_settings(body: &[u8]) -> Result<String, String> {
     let previous = crate::settings::load(&path)?;
     let mut config = previous.clone();
     crate::settings::patch(&mut config, body)?;
+    crate::settings::patch_updates(&mut config, body)?;
     let touched_network = crate::settings::patch_network(&mut config, body)?;
 
     let mut log = |line: &str| println!("plexosd: addressing: {line}");
@@ -1267,18 +1324,7 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     // On every boot rather than only when something changes it: the kernel forgets its
     // hostname at reboot, so a name set once and never re-applied lasts until the power
     // goes off.
-    match crate::settings::load(&crate::settings::path()) {
-        Ok(config) => {
-            let applied = crate::settings::apply(&config);
-            log(&format!("hostname: {:?}", applied.hostname));
-            log(&format!("timezone: {:?}", applied.timezone));
-        }
-        Err(error) => log(&format!(
-            "could not read the configuration: {error}. The machine runs with kernel \
-             defaults, and the settings page says the same thing rather than showing \
-             defaults as though they were somebody's choices."
-        )),
-    }
+    apply_stored_configuration(log);
 
     // Created before the network is brought up, because the rejoin below reports into it
     // and the page polls it: a wireless network that fails to come back has to be visible
@@ -1349,6 +1395,7 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     let job = std::sync::Arc::new(crate::provision::Job::new());
     let plex = std::sync::Arc::new(crate::plex::Handle::new());
     let update = std::sync::Arc::new(crate::update::Job::new());
+    let discovery = std::sync::Arc::new(crate::discover::Discovery::new());
 
     // Before Plex, not after. The Landlock policy is built when Plex starts, from the
     // paths that exist then; mounting a library afterwards may leave it unreachable, and
@@ -1415,6 +1462,14 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
         }
     });
 
+    // After the gate's thread is started and not before it, so that nothing about an update
+    // service can be in flight while the question "is this boot healthy" is still open. The
+    // first check is minutes away in any case; the ordering is here to make the rule
+    // readable rather than to make it true (ADR-0020).
+    crate::discover::schedule(&discovery, &update, |line| {
+        println!("plexosd: updates: {line}");
+    });
+
     // After the network, so the first frame already carries the address a browser should
     // be pointed at; before `serve_tls`, which never returns.
     spawn_dashboard(first_boot_code);
@@ -1428,6 +1483,7 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
         provision: std::sync::Arc::clone(&job),
         plex,
         update,
+        discovery,
         install: std::sync::Arc::new(crate::install::Job::new()),
         wifi: served_wifi,
         metrics: std::sync::Arc::new(crate::metrics::Sampler::new()),
@@ -1439,6 +1495,51 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
         move |request, reader| upload_route(request, reader, &uploading_job, &uploading_plex),
         log,
     )
+}
+
+/// Puts the stored configuration into force, at every boot.
+///
+/// A failure is reported and not fatal. An appliance whose configuration file will not parse
+/// still has to serve its console — that page is where somebody fixes the file — and it says
+/// the same thing rather than drawing defaults as though they were anybody's choices.
+fn apply_stored_configuration(log: &mut dyn FnMut(&str)) {
+    match crate::settings::load(&crate::settings::path()) {
+        Ok(config) => {
+            let applied = crate::settings::apply(&config);
+            log(&format!("hostname: {:?}", applied.hostname));
+            log(&format!("timezone: {:?}", applied.timezone));
+        }
+        Err(error) => log(&format!(
+            "could not read the configuration: {error}. The machine runs with kernel \
+             defaults, and the settings page says the same thing rather than showing \
+             defaults as though they were somebody's choices."
+        )),
+    }
+}
+
+/// What `GET /api/update` answers: the job, and what is known about releases beyond it.
+///
+/// Flattened, so every field the page has always read stays exactly where it was and the
+/// new state arrives beside it under one name. One request rather than two, because the two
+/// halves are read together in one card and a page that polled them separately could draw
+/// "up to date" next to a version it had just been told about.
+#[derive(Debug, serde::Serialize)]
+struct UpdateReport {
+    /// The install job.
+    #[serde(flatten)]
+    progress: crate::update::Progress,
+    /// What the update service last said (ADR-0020).
+    availability: crate::discover::Availability,
+}
+
+fn update_report(
+    update: &std::sync::Arc<crate::update::Job>,
+    discovery: &std::sync::Arc<crate::discover::Discovery>,
+) -> UpdateReport {
+    UpdateReport {
+        progress: update.snapshot(),
+        availability: discovery.snapshot(),
+    }
 }
 
 /// Starts the screen attached to the machine (ADR-0019).

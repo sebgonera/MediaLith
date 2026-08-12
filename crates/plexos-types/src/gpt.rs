@@ -713,7 +713,13 @@ mod tests {
         file.sync_all().ok()?;
         drop(file);
 
+        // In C, because every assertion below reads English out of this. util-linux is
+        // translated, so on a host whose locale is not English `sfdisk --list` answers
+        // "Typ etykiety dysku: gpt" and a test that greps for "Disklabel type" fails while
+        // the bytes it is about are perfect. Found on the build host, which is Polish.
         let out = std::process::Command::new(program)
+            .env("LC_ALL", "C")
+            .env("LANG", "C")
             .args(args)
             .arg(&path)
             .output()
