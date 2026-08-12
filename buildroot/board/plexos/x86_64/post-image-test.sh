@@ -338,28 +338,183 @@ else
             | sed 's/-[0-9]\+\.ucode$//' | sort | uniq -d | tr '\n' ' ')
     check "one API revision of each variant is carried" "${dupes:-none}" "none"
 
-    # And the half that pruning can get wrong. iwlwifi asks for revisions from its
-    # UCODE_API_MAX downwards, so a blob numbered above every MAX this kernel defines is
-    # one it will never open -- and keeping only that one puts the card back to having no
+    # And the half that pruning can get wrong. iwlwifi asks for revisions from its family's
+    # UCODE_API_MAX downwards to that family's _MIN, so a blob outside that window is one
+    # the card will never open -- and keeping only that one puts it back to having no
     # firmware, on an image whose firmware directory is visibly not empty. The code that
-    # changes when this fails is install_wifi_firmware: keep the newest revision the
-    # kernel still asks for, not the newest that exists.
+    # changes when this fails is install_wifi_firmware: keep the newest revision the kernel
+    # still asks for, not the newest that exists.
     #
-    # The bound is the highest MAX across all families rather than the one belonging to
-    # each variant, so what it catches is linux-firmware outrunning the kernel outright.
-    # A single family running ahead while another lags would pass. Pinning per family
-    # needs a variant-to-cfg table, and a hardcoded table that drifts is the failure this
-    # is trying to prevent rather than a stricter version of it.
+    # This was written against the highest MAX in the whole tree, which is a bound that
+    # cannot see the failure worth catching. The AX210 family accepts 89 and the 8000s
+    # accept up to 36, so an `iwlwifi-8265-37.ucode` appearing in linux-firmware would sit
+    # far below the global maximum, pass, and be the only 8265 file shipped -- an 8265 with
+    # no firmware, reported as fine.
+    #
+    # The mapping is derived, not written down. Each family declares its filename prefix as
+    # <TOKEN>_FW_PRE, its window as <TOKEN>_UCODE_API_MAX/_MIN, and then ties the two
+    # together itself:
+    #
+    #   MODULE_FIRMWARE(IWL3160_MODULE_FIRMWARE(IWL7260_UCODE_API_MAX));
+    #
+    # which is the kernel saying that the 3160's files are requested in the 7260's window --
+    # a fact no table assembled by hand would have got right, and the same shape as the 3165
+    # asking for 7265D files.
     if [ -z "${KCFG}" ]; then
         skipped "revisions are ones this kernel asks for" "no kernel source under ${OUTPUT}/build"
     else
-        api_max=$(grep -h 'UCODE_API_MAX' "${KCFG}"/*.c 2>/dev/null | grep -oE '[0-9]+$' | sort -n | tail -1)
-        too_new=$(for f in "${GOT}"/iwlwifi-*.ucode; do
-                      r=$(basename "${f}" | sed -n 's/.*-\([0-9]\+\)\.ucode$/\1/p')
-                      [ -n "${r}" ] && [ "${r}" -gt "${api_max:-0}" ] && basename "${f}"
-                  done | tr '\n' ' ')
-        check "no blob is numbered above any API this kernel asks for (max ${api_max:-?})" \
-              "${too_new:-none}" "none"
+        declare -A FW_PRE_OF=() PRE_FILE_OF=() API_MAX_OF=() API_MIN_OF=() \
+                   FILE_APIS=() RANGE_OF=()
+
+        # Which token declares which filename prefix, and in which file -- the file
+        # matters, for the reason the intersection below explains.
+        while IFS=: read -r file token value; do
+            [ -n "${token}" ] || continue
+            FW_PRE_OF["${token}"]="${value}"
+            PRE_FILE_OF["${value}"]="${file}"
+        done < <(grep -HE '^#define[[:space:]]+[A-Za-z0-9_]+_FW_PRE[[:space:]]+"' "${KCFG}"/*.c 2>/dev/null \
+                 | sed -E 's|^([^:]+):#define[[:space:]]+([A-Za-z0-9_]+)_FW_PRE[[:space:]]+"([^"]+)".*|\1:\2:\3|')
+
+        while IFS=: read -r file token value; do
+            [ -n "${token}" ] || continue
+            API_MAX_OF["${token}"]="${value}"
+            FILE_APIS["${file}"]="${FILE_APIS[${file}]:-}${token} "
+        done < <(grep -HE '^#define[[:space:]]+[A-Za-z0-9_]+_UCODE_API_MAX[[:space:]]+[0-9]+' "${KCFG}"/*.c 2>/dev/null \
+                 | sed -E 's|^([^:]+):#define[[:space:]]+([A-Za-z0-9_]+)_UCODE_API_MAX[[:space:]]+([0-9]+).*|\1:\2:\3|')
+
+        while IFS=: read -r file token value; do
+            [ -n "${token}" ] && API_MIN_OF["${token}"]="${value}"
+        done < <(grep -HE '^#define[[:space:]]+[A-Za-z0-9_]+_UCODE_API_MIN[[:space:]]+[0-9]+' "${KCFG}"/*.c 2>/dev/null \
+                 | sed -E 's|^([^:]+):#define[[:space:]]+([A-Za-z0-9_]+)_UCODE_API_MIN[[:space:]]+([0-9]+).*|\1:\2:\3|')
+
+        # The join, and how much of the window it is entitled to enforce.
+        #
+        # `iwl_get_ucode_api_versions()` builds the window a device actually asks for from
+        # **two** declarations: the MAC family's and the RF module's, intersected, with
+        # fallbacks when they do not overlap. Which of the two a firmware prefix is declared
+        # beside decides how much this test can say about it, and the kernel's own file
+        # layout is what separates them:
+        #
+        #   7000.c, 8000.c, 9000.c, 22000.c   declare a prefix and the family window it
+        #                                     belongs to. Self-contained -- enforce both ends.
+        #
+        #   rf-hr.c, rf-jf.c, rf-gf.c         declare a prefix beside the *RF* window only.
+        #                                     The MAC half is in a struct this cannot read.
+        #
+        # That second case is not academic. `IWL_QU_B_HR_B_FW_PRE` sits in rf-hr.c whose
+        # window is 100..100, while a Qu's MAC family is 22000 at 77..77 -- so the device
+        # asks for 77, which is exactly what linux-firmware ships. The first version of this
+        # check enforced the RF window on its own and reported three perfectly good blobs as
+        # sixteen revisions too old.
+        #
+        # What is still sound for those is the **upper** bound: the effective maximum is
+        # min(MAC, RF), so it can never exceed the RF's. A blob above it is one no device
+        # can request whatever its MAC says. The lower bound is not knowable here, and is
+        # not guessed at.
+        note_family() {
+            local pre="$1" api="$2" file="$3"
+            [ -n "${pre}" ] || return 0
+            [ -n "${API_MAX_OF[${api}]:-}" ] || return 0
+            case "$(basename "${file}")" in
+                rf-*) RANGE_OF["${pre}"]="0 ${API_MAX_OF[${api}]} upper" ;;
+                *)    RANGE_OF["${pre}"]="${API_MIN_OF[${api}]:-0} ${API_MAX_OF[${api}]} full" ;;
+            esac
+        }
+
+        # `${call%_FW}` covers the families whose macro is spelled
+        # <TOKEN>_FW_MODULE_FIRMWARE against a <TOKEN>_FW_PRE define.
+        while IFS=: read -r file call api; do
+            pre="${FW_PRE_OF[${call}]:-}"
+            [ -n "${pre}" ] || pre="${FW_PRE_OF[${call%_FW}]:-}"
+            note_family "${pre}" "${api}" "${file}"
+        done < <(grep -HE '^MODULE_FIRMWARE\([A-Za-z0-9_]+_MODULE_FIRMWARE\([A-Za-z0-9_]+_UCODE_API_MAX\)\)' "${KCFG}"/*.c 2>/dev/null \
+                 | sed -E 's|^([^:]+):MODULE_FIRMWARE\(([A-Za-z0-9_]+)_MODULE_FIRMWARE\(([A-Za-z0-9_]+)_UCODE_API_MAX\)\).*|\1:\2:\3|')
+
+        # The AX210-era parts advertise firmware *and* their platform NVM through a second
+        # macro, so a reader that knows only MODULE_FIRMWARE misses them entirely -- which
+        # is how so-a0-gf-a0 and ty-a0-gf-a0 came to be checked against nothing but the
+        # whole-tree maximum.
+        while IFS=: read -r file token api; do
+            note_family "${FW_PRE_OF[${token%_FW_PRE}]:-}" "${api}" "${file}"
+        done < <(grep -HE '^IWL_FW_AND_PNVM\([A-Za-z0-9_]+,[[:space:]]*[A-Za-z0-9_]+_UCODE_API_MAX\)' "${KCFG}"/*.c 2>/dev/null \
+                 | sed -E 's|^([^:]+):IWL_FW_AND_PNVM\(([A-Za-z0-9_]+),[[:space:]]*([A-Za-z0-9_]+)_UCODE_API_MAX\).*|\1:\2:\3|')
+
+        assert "the kernel's own family-to-API mapping was derived (${#RANGE_OF[@]} families)" \
+               "[ '${#RANGE_OF[@]}' -gt 10 ]" \
+               "the parse found almost nothing, so every variant would fall through to the weak check and this stage would go quiet"
+
+        # The parse has to still cover the families this image actually carries, or it
+        # degrades to the old global bound without anybody noticing. Named ones, because a
+        # count cannot tell which family stopped resolving.
+        unmapped=""
+        for want in iwlwifi-7260 iwlwifi-3160 iwlwifi-7265 iwlwifi-7265D iwlwifi-3168 \
+                    iwlwifi-8000C iwlwifi-8265 iwlwifi-cc-a0 \
+                    iwlwifi-9000-pu-b0-jf-b0 iwlwifi-9260-th-b0-jf-b0 \
+                    iwlwifi-Qu-b0-hr-b0 iwlwifi-Qu-c0-hr-b0 iwlwifi-QuZ-a0-hr-b0 \
+                    iwlwifi-Qu-b0-jf-b0 iwlwifi-Qu-c0-jf-b0 iwlwifi-QuZ-a0-jf-b0 \
+                    iwlwifi-so-a0-jf-b0; do
+            [ -n "${RANGE_OF[${want}]:-}" ] || unmapped="${unmapped} ${want}"
+        done
+        check "every family this image carries resolved to its own window" "${unmapped:-none}" "none"
+
+        # A window for the variants the kernel names at runtime rather than declaring: the
+        # AX210 and later parts build `iwlwifi-<mac>-<step>-<rf>-<step>` from hardware IDs
+        # in iwl_drv_get_fwname_pre(), so no static prefix exists to join against. They fall
+        # back to the whole-tree maximum, and the stage says which ones did rather than
+        # letting a weaker check look like the strong one.
+        global_max=$(grep -h 'UCODE_API_MAX' "${KCFG}"/*.c 2>/dev/null | grep -oE '[0-9]+$' | sort -n | tail -1)
+
+        out_of_range=""
+        fell_back=""
+        upper_only=""
+        for f in "${GOT}"/iwlwifi-*.ucode; do
+            [ -e "${f}" ] || continue
+            base=$(basename "${f}")
+            rev="${base##*-}"; rev="${rev%.ucode}"
+            case "${rev}" in ''|*[!0-9]*) continue ;; esac
+            variant="${base%-*}"
+
+            if [ -z "${RANGE_OF[${variant}]:-}" ]; then
+                fell_back="${fell_back} ${variant}"
+                [ "${rev}" -gt "${global_max:-0}" ] \
+                    && out_of_range="${out_of_range} ${base}[above every API in the tree, ${global_max}]"
+                continue
+            fi
+
+            read -r fmin fmax fkind <<< "${RANGE_OF[${variant}]}"
+            if [ "${rev}" -gt "${fmax}" ]; then
+                out_of_range="${out_of_range} ${base}[this family tops out at ${fmax}, too new]"
+            elif [ "${fkind}" = "full" ] && [ "${fmin}" -gt 0 ] && [ "${rev}" -lt "${fmin}" ]; then
+                out_of_range="${out_of_range} ${base}[this family asks ${fmin}..${fmax}, too old]"
+            fi
+            [ "${fkind}" = "upper" ] && upper_only="${upper_only} ${variant}"
+        done
+
+        check "every retained revision is inside its own family's window" \
+              "${out_of_range:-none}" "none"
+
+        # And the failure it exists for, exercised rather than assumed -- a check nobody has
+        # seen fail is a check nobody knows works. This is the exact case the whole-tree
+        # bound could not see: the 8000s top out at 36 while the tree's maximum is 100, so a
+        # revision 37 appearing in linux-firmware would be kept as the newest 8265 file,
+        # never requested by any 8265, and sail past a global comparison.
+        read -r _ eight_max _ <<< "${RANGE_OF[iwlwifi-8265]:-0 0 full}"
+        assert "a revision above the 8265's own maximum would be caught (${eight_max})" \
+               "[ '${eight_max}' -gt 0 ] && [ 37 -gt '${eight_max}' ]" \
+               "either the 8265 window stopped resolving, or this kernel moved and the example needs rechoosing"
+        assert "while the one actually shipped is not" \
+               "[ 36 -le '${eight_max}' ]"
+
+        # What each variant was actually held to, because a check that covers two thirds of
+        # a set and prints one green line reads as covering all of it.
+        if [ -n "${upper_only}" ]; then
+            printf '  %-6s %s\n' "info" \
+                   "upper bound only, the MAC half of their window being in a struct rather than a define:$(printf '%s' "${upper_only}" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+        fi
+        if [ -n "${fell_back}" ]; then
+            printf '  %-6s %s\n' "info" \
+                   "checked against the whole-tree maximum only, the kernel naming these at probe time:$(printf '%s' "${fell_back}" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+        fi
     fi
 
     # The families themselves. 6E is the one that is easy to leave out and the one an
