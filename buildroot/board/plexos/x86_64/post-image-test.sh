@@ -371,6 +371,21 @@ else
     assert "and the PNVM those parts need" "ls '${GOT}'/*.pnvm >/dev/null 2>&1" \
            "not a .ucode, so a glob written for ucode alone drops it and the card associates with nothing"
 
+    # The older families, which are most of the second-hand and mini-PC hardware this gets
+    # installed on. 7265D is the entry worth asserting by name: a 3165 does not ask for a
+    # file called 3165 -- iwl3165_2ac_cfg sets .fw_name_pre = IWL7265D_FW_PRE -- so the
+    # card is covered by this symbol and by nothing else, and the mapping is invisible in
+    # both the filename and the Buildroot symbol.
+    assert "the 7000 series is covered (7260, 7265)" \
+           "ls '${GOT}'/iwlwifi-7260-*.ucode >/dev/null 2>&1 && ls '${GOT}'/iwlwifi-7265-*.ucode >/dev/null 2>&1" \
+           "set BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_7260 and _7265; a Haswell or Broadwell machine has no wlan0 without them"
+    assert "and 7265D, which is what a 3165 actually asks for" \
+           "ls '${GOT}'/iwlwifi-7265D-*.ucode >/dev/null 2>&1" \
+           "set BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_7265D; the 3165 is covered by this file and by nothing named 3165"
+    assert "the 8000 series is covered (8260, 8265)" \
+           "ls '${GOT}'/iwlwifi-8000C-*.ucode >/dev/null 2>&1 && ls '${GOT}'/iwlwifi-8265-*.ucode >/dev/null 2>&1" \
+           "set BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_8000C and _8265; the 8260 is 8000C, which is not a name anybody would guess"
+
     # Both files or neither: the signature is what the kernel checks the database by.
     assert "the regulatory database is carried whole" \
            "[ -e '${GOT}/regulatory.db' ] && [ -e '${GOT}/regulatory.db.p7s' ]" \
@@ -659,6 +674,63 @@ else
     assert "the processor die thermal driver is built in, not shipped as a module" \
            "! find '${MODULES_DIR}' -name 'x86_pkg_temp_thermal.ko' | grep -q ." \
            "CONFIG_X86_PKG_TEMP_THERMAL went back to =m: nothing loads it, the x86_pkg_temp zone never appears, and metrics falls back to acpitz -- a chassis sensor reported as the processor"
+fi
+
+# --------------------------------------------------------------------------
+stage "stage 7b — the kernel config contract"
+#
+# Read from the *effective* .config the kernel was built with, not from
+# linux.fragment. A fragment states a request; kconfig decides, and it drops an option
+# whose dependency is unmet **without erroring** -- the trap that cost this project four
+# months of an unreadable console, and again the reason three USB Ethernet drivers were
+# absent from .config without ever appearing as refused.
+#
+# Only options whose absence loses something a person would notice, each with what it
+# loses. A list of every symbol MediaLith sets would be linux.fragment written twice, and
+# the second copy is the one that goes stale.
+KCONFIG="$(ls -d "${OUTPUT}"/build/linux-*/.config 2>/dev/null | head -1)"
+if [ -z "${KCONFIG}" ] || [ ! -r "${KCONFIG}" ]; then
+    skipped "the whole stage" "no built kernel .config under ${OUTPUT}/build/linux-*"
+else
+    builtin_or_bad() {
+        local symbol="$1" loses="$2" got
+        got=$(grep -E "^(CONFIG_${symbol}=|# CONFIG_${symbol} is not set)" "${KCONFIG}" \
+              || printf '(absent from .config)')
+        if [ "${got}" = "CONFIG_${symbol}=y" ]; then
+            ok "CONFIG_${symbol}=y"
+        else
+            bad "CONFIG_${symbol}=y" "got '${got}' -- ${loses}"
+        fi
+    }
+
+    # Storage. Anything on this path that is not built in is a kernel that cannot reach
+    # its own root, and there is no initramfs module to rescue it.
+    builtin_or_bad BLK_DEV_NVME "no NVMe disk at all"
+    builtin_or_bad SATA_AHCI    "no SATA disk at all"
+    builtin_or_bad VMD          "NVMe behind Intel VMD/RST disappears entirely: no slow disk and no degraded disk, no disk, on a machine whose firmware lists the drive by model"
+
+    # Network. The appliance brings links up during boot; a driver that is not there when
+    # plexosd looks is an appliance with no address and a page nobody can reach.
+    builtin_or_bad USB_RTL8152           "no Realtek USB Ethernet -- the reference laptop's only wired link"
+    builtin_or_bad USB_USBNET            "the framework the three below sit on; without it they vanish from .config entirely rather than being refused"
+    builtin_or_bad USB_NET_AX88179_178A  "no ASIX USB Ethernet, which is most USB 3 gigabit adapters sold"
+    builtin_or_bad USB_NET_CDCETHER      "no CDC Ethernet, which is what docks and tethered phones speak"
+    builtin_or_bad USB_NET_CDC_NCM       "no CDC NCM, the successor most current CDC devices actually use"
+
+    # Virtual machines. A virtio disk that became a module is a guest that does not boot.
+    builtin_or_bad VIRTIO_PCI  "no virtio devices are discovered at all"
+    builtin_or_bad VIRTIO_BLK  "no virtio-blk disk -- the default in plain QEMU invocations"
+    builtin_or_bad SCSI_VIRTIO "no virtio-scsi disk -- the default in Proxmox"
+    builtin_or_bad VIRTIO_NET  "no network in a VM"
+
+    # Features whose absence is silent, which is what makes them worth asserting.
+    builtin_or_bad CIFS "plexosd::shares mounts smb3 and the kernel has never heard of it, so every SMB mount fails with ENODEV on an appliance whose console offers an SMB form"
+    builtin_or_bad X86_PKG_TEMP_THERMAL "no x86_pkg_temp zone, so metrics falls back to acpitz -- a chassis sensor reported as the processor die, with nothing failing and nothing logged"
+    builtin_or_bad EFIVAR_FS "PID 1 cannot read LoaderDevicePartUUID, so a machine with two MediaLith disks goes back to resolving partitions by label, which is a coin toss"
+
+    # And the wireless driver, which is why the firmware stage above has anything to do.
+    builtin_or_bad IWLWIFI "no Intel wireless"
+    builtin_or_bad IWLMVM  "no Intel wireless on anything from the 7000 series onwards, which is all of it here"
 fi
 
 printf '\npassed %d, failed %d, skipped %d\n' "${pass}" "${fail}" "${skip}"
