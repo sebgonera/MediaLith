@@ -9,8 +9,11 @@
 # added `output-corei7/` and `output-generic/` as two isolated trees, and one careless
 # `git add -A` staged 672,911 files out of the first of them. A build directory is not
 # a thing to enumerate by name every time somebody makes another one.
-/output/
-/output-*/
+#
+# Root-anchored and directory-only: `/output*/` matches output/, output-corei7/ and
+# output-generic/ at the top of the repository, and nothing nested that merely has the
+# word in its name.
+/output*/
 
 # Build artifacts
 *.img

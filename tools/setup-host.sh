@@ -12,8 +12,12 @@ echo "==> Installing Buildroot host prerequisites"
 # flex/bison are needed by the kernel build, not by Buildroot's own kconfig
 # (which ships a pre-generated parser). qemu + ovmf are for testing the boot
 # path under UEFI before touching the reference laptop.
+#
+# xfsprogs is the one that is not obvious: /var is XFS and Buildroot has no host
+# xfsprogs package, so mkfs.xfs must come from the distribution. post-image.sh refuses
+# without it -- correctly, and at the end of a full build.
 sudo apt update
-sudo apt install -y flex bison libncurses-dev qemu-system-x86 ovmf
+sudo apt install -y flex bison libncurses-dev qemu-system-x86 ovmf xfsprogs
 
 echo
 echo "==> Pointing /usr/bin/install at GNU install"
@@ -26,7 +30,7 @@ sudo update-alternatives --install /usr/bin/install install /usr/bin/gnuinstall 
 echo
 echo "==> Verifying"
 install --version | head -1
-for c in flex bison qemu-system-x86_64; do
+for c in flex bison qemu-system-x86_64 mkfs.xfs; do
     printf '%-20s %s\n' "$c" "$(command -v "$c" || echo MISSING)"
 done
 ls /usr/share/OVMF/OVMF_CODE*.fd >/dev/null 2>&1 \

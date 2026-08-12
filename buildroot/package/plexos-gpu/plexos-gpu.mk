@@ -60,10 +60,26 @@ PLEXOS_GPU_LICENSE = NOT CHOSEN
 # The whole repository is rsynced, so keep the build output and history out of it.
 # target/ alone is comfortably larger than the rest of the tree put together, and it
 # would be copied on every single build.
+#
+# The output patterns are root-anchored -- a leading / in an rsync filter means "at the
+# transfer root", which is this repository. That matters in both directions. Unanchored,
+# `output` would also exclude any nested directory that happens to be called that, which
+# is a silent way to ship a package missing a directory nobody thought about. Anchored,
+# it covers exactly the Buildroot output trees, which live at the root and only there.
+#
+# The invariant: no root-level MediaLith output tree may be copied into a package build
+# directory. It is not decoration. The destination is *inside* the source, so a missing
+# pattern is not a wasted copy, it is a recursion -- and a recursion does not fail, it
+# fills the disk. `--exclude=output` alone was correct until this repository had a second
+# output tree, at which point one sync took the disk from 20 GiB to 698 GiB with no error
+# and no symptom beyond a build that appeared to sit on "Syncing from source dir".
+#
+# post-image-test.sh stage 9 tests this by running rsync, not by grepping for the
+# patterns: the property that matters is what gets copied.
 PLEXOS_GPU_OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS = \
 	--exclude=target \
-	--exclude=output \
-	--exclude=output-* \
+	--exclude=/output/ \
+	--exclude=/output-*/ \
 	--exclude=.git
 
 # The workspace's own target triple, not Buildroot's x86_64-buildroot-linux-gnu.

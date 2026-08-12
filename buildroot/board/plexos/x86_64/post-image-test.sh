@@ -1013,5 +1013,75 @@ else
     check "busybox carries no post-baseline instructions" "${found}" ""
 fi
 
+stage "stage 9 — no package sync can recurse into an output tree"
+#
+# The three plexos-* packages are built with OVERRIDE_SRCDIR pointing at this
+# repository, so Buildroot rsyncs the whole tree into `output*/build/<pkg>/`. The
+# destination is therefore *inside* the source, and any root-level build tree the
+# exclude list forgets is copied into itself.
+#
+# That failure has no error and no bad exit status. It is a recursion: rsync keeps
+# finding more to copy, the build appears to sit on "Syncing from source dir", and the
+# disk fills. It happened here — `--exclude=output` covered the default tree and not the
+# `output-corei7` and `output-generic` trees the CPU-baseline work added, and one sync
+# took the filesystem from 20 GiB to 698 GiB before anybody looked at `df`.
+#
+# So this tests the property rather than the spelling. It pulls each package's real
+# exclusion list out of its .mk, runs an actual rsync with it over a tree containing all
+# the traps, and asks what arrived. A different but equivalent set of patterns passes; a
+# clever rewrite that stops excluding something does not.
+#
+# It also checks the other half, which is the one a blunt fix breaks: a *nested*
+# directory that merely has "output" in its name must still be copied, because excluding
+# it would silently ship a package missing a directory nobody thought to look for.
+if ! command -v rsync >/dev/null 2>&1; then
+    skipped "the whole stage" "no rsync on this host"
+else
+    SYNCSRC="${TMP}/syncsrc"
+    mkdir -p "${SYNCSRC}"/{output,output-corei7,output-generic,target,.git} \
+             "${SYNCSRC}/crates/plexos-init/src" \
+             "${SYNCSRC}/docs/output"
+    # One file in each, so an empty directory cannot be mistaken for an excluded one.
+    for d in output output-corei7 output-generic target .git crates/plexos-init/src \
+             docs/output; do
+        echo marker > "${SYNCSRC}/${d}/marker"
+    done
+    echo marker > "${SYNCSRC}/Cargo.toml"
+
+    for pkg in plexos-init plexosd plexos-gpu; do
+        mk="${BOARD_DIR}/../../../package/${pkg}/${pkg}.mk"
+        if [ ! -r "${mk}" ]; then
+            bad "${pkg}: exclusions" "no ${mk}"
+            continue
+        fi
+        # Every --exclude= token in the file. Reading the whole file rather than one
+        # variable keeps this working if the list is ever split or renamed.
+        mapfile -t excludes < <(grep -oE -- '--exclude=[^ \\]+' "${mk}")
+        if [ "${#excludes[@]}" -eq 0 ]; then
+            bad "${pkg}: exclusions" "no --exclude= patterns found in ${mk}"
+            continue
+        fi
+
+        dest="${TMP}/syncdest-${pkg}"
+        rm -rf "${dest}"; mkdir -p "${dest}"
+        rsync -a "${excludes[@]}" "${SYNCSRC}/" "${dest}" >/dev/null 2>&1
+
+        # The invariant. Each of these is a directory that must not have been copied.
+        for forbidden in output output-corei7 output-generic target .git; do
+            assert "${pkg}: does not copy /${forbidden}" \
+                   "[ ! -e '${dest}/${forbidden}' ]" \
+                   "a root-level ${forbidden} reached the package build directory; \
+with OVERRIDE_SRCDIR that is a recursion, not a wasted copy"
+        done
+        # And the two that must have been.
+        assert "${pkg}: still copies nested docs/output" \
+               "[ -e '${dest}/docs/output/marker' ]" \
+               "an unanchored exclude removed a nested directory that only shares the name"
+        assert "${pkg}: still copies the sources" \
+               "[ -e '${dest}/crates/plexos-init/src/marker' ] && [ -e '${dest}/Cargo.toml' ]" \
+               "the exclusion list removed something the package needs to build"
+    done
+fi
+
 printf '\npassed %d, failed %d, skipped %d\n' "${pass}" "${fail}" "${skip}"
 [ "${fail}" -eq 0 ]

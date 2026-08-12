@@ -65,11 +65,22 @@ Debian or Ubuntu:
 
 ```
 sudo apt install build-essential git wget cpio rsync bc unzip file \
-                 libncurses-dev flex bison python3
+                 libncurses-dev flex bison python3 xfsprogs
 ```
 
 Buildroot builds its own toolchain and most host tools, so the list is short. Add
 `qemu-system-x86 ovmf` to try the resulting image without hardware.
+
+`xfsprogs` is the one that is easy to miss and it is a genuine requirement rather than
+an oversight: `/var` is XFS, and Buildroot has no *host* xfsprogs package to build
+`mkfs.xfs` with, so it has to come from the distribution. It was absent from this list
+for the life of the project, and the failure is at the very end of a full build —
+`post-image.sh` checks its tools up front and refuses, which is the right behaviour and
+still means hours of compilation before anything says so.
+
+Disk: **around 30 GB per output tree**. That is per tree and not per machine; building
+two configurations side by side for comparison needs both, plus room for the 8 GiB
+image each produces.
 
 **Recent Ubuntu ships uutils coreutils**, whose `install(1)` is affected by
 [uutils#12166](https://github.com/uutils/coreutils/issues/12166), and Buildroot
