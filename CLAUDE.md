@@ -741,6 +741,19 @@ and its certificate — sign with the second one.
   functionally identical to the one it was running: version and slot changed, the fixes
   did not. `make <pkg>-rebuild` forces the re-sync. Check by grepping
   `output/build/<pkg>/` for something the change added, not by reading the script.
+- **That same rsync copies the whole repository, and its exclude list named exactly the
+  build directories that existed when it was written.** `--exclude=output` was every
+  Buildroot output tree there had ever been. The CPU-baseline phase needed two isolated
+  trees, `output-corei7` and `output-generic`, so that a corei7 object could not survive
+  into the generic image — and the moment `plexos-gpu` synced, rsync started copying a
+  10 GiB build tree into a directory *inside the tree it was copying*. That is a
+  recursion, so it does not fail; it fills the disk. **20 GiB used to 698 GiB**, and the
+  only outward symptom was a build that appeared to sit on `Syncing from source dir` for
+  a long while, which is exactly what a large sync looks like. `--exclude=output-*` in
+  all three `plexos-*.mk` files now, and `/output*/` in `.gitignore`, which had never
+  covered any of them either — one `git add -A` staged 672,911 files. Two lists, both
+  correct for the state they were written in, both wrong the moment a second output
+  directory existed.
 - **A control that is correct in the state it was written in can be wrong in the state it
   leads to.** Twice, in one shape. The `plex-http` probe was `|| false` and correct while
   Plex could not exist. The device-token field lived inside the Plex install card and was
