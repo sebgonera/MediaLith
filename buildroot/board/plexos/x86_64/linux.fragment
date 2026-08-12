@@ -360,10 +360,20 @@ CONFIG_NF_REJECT_IPV6=n
 #
 # It removes the concern about configuring wireless before a network exists: with a
 # wired adapter present at setup, the first-boot flow in ADR-0010 works exactly as
-# designed. MediaLith v1 therefore **requires a wired connection at setup**, over PCI or
-# USB, and does not support wireless configuration. For a media server that is a
-# reasonable requirement rather than a limitation — the wireless-before-network
-# ordering can be designed later if it is ever wanted.
+# designed.
+#
+# **MediaLith does support configuring Wi-Fi.** The sentence that stood here said it did
+# not, which was true when it was written and stopped being true when `plexosd::wifi`,
+# `/api/wifi` and the console's Network view were built: a network can be scanned for,
+# joined with a passphrase, and forgotten, from the page or from the machine's own screen.
+#
+# What has *not* changed is the ordering, and that is the part worth keeping. Wireless is
+# configured **through the console**, and the console is reached over the network — so a
+# machine with no link has no way to be told about a wireless one. **A wired connection is
+# therefore still what first-boot setup asks for**, over PCI or USB, and everything above
+# is why it is built in rather than left to a module. That is a property of where the
+# setting is entered, not of what the radio can do; the wireless-before-network ordering
+# is a first-boot question and is deliberately not answered here.
 #
 # One consequence does follow, and it is not obvious. USB devices enumerate later than
 # PCI ones, sometimes by seconds. Against the five-second boot target that is enough
