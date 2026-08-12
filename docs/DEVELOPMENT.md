@@ -201,13 +201,32 @@ kernel module: Permission denied` without it:
 sudo usermod -aG kvm "$USER"   # then log out and back in
 ```
 
-Without KVM, substitute `accel=tcg` **and name a CPU**: `-cpu Nehalem` or better.
-This is not optional. The defconfig sets `BR2_x86_corei7`, so everything Buildroot
-compiles targets that instruction set, while QEMU's default `qemu64` model does not
-implement it. The kernel and `plexos-init` boot fine — the former is built for generic
-x86-64 and the latter by the workspace's own cargo — and then the first Buildroot-built
-binary to run dies with `SIGILL`, which the console reports as
-`Attempted to kill init! exitcode=0x00000004`.
+Without KVM, substitute `accel=tcg`. Naming a CPU is no longer required: the defconfig
+selects `BR2_x86_x86_64`, so Buildroot compiles for generic x86-64 and QEMU's default
+`qemu64` model runs it.
+
+**This used to be a trap, and the shape of it is worth keeping** even though the cause
+is gone. The defconfig set `BR2_x86_corei7` for most of the project's life, so
+everything Buildroot compiled was permitted SSE4.2 and POPCNT while `qemu64` implements
+neither. What made it expensive to diagnose is that almost everything worked: the
+kernel is built for generic x86-64, `plexos-init` is built by the workspace's own cargo
+for `x86_64-unknown-linux-gnu`, and both booted perfectly — so the machine got all the
+way through firmware, kernel and PID 1 before the *first Buildroot-built binary* died
+with `SIGILL`, reported as `Attempted to kill init! exitcode=0x00000004`. A failure that
+late reads as a bug in the last thing that ran rather than as a property of the whole
+userspace.
+
+So: **a boot that reaches PID 1 has proved nothing about the userspace.** If something
+similar reappears, `tools/cpu-boot-matrix.sh` boots the real image on a named CPU model
+and reports how far it got, and `post-image-test.sh` stage 8 asserts the baseline at the
+configuration decision rather than on somebody's Core 2.
+
+One thing that matrix does **not** do is use KVM, and the reason generalises: KVM cannot
+test a CPU baseline. `-cpu Conroe` under KVM changes what CPUID reports and not what the
+silicon will execute, so an SSE4.2 instruction runs fine on a guest claiming to be a
+Core 2 and the result comes back green about a floor that is still there. Only TCG
+decodes each instruction against the model. Use `-cpu host` with KVM for speed, and TCG
+with a named model when the question is which instructions exist.
 
 `accel=tcg` is otherwise just slow: full software emulation of a boot that takes
 seconds under KVM. Fine for proving the boot path, painful for anything iterative.

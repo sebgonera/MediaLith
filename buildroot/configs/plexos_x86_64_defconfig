@@ -18,7 +18,33 @@
 #   make -C <buildroot> BR2_EXTERNAL=$(pwd) O=$(pwd)/output plexos_x86_64_defconfig
 
 BR2_x86_64=y
-BR2_x86_corei7=y
+# Generic x86-64: -march=x86-64, which permits MMX, SSE and SSE2 and nothing else.
+#
+# This was BR2_x86_corei7 from the first day of the project, and nobody chose it. What
+# it bought was a userspace the compiler could put SSE4.2, POPCNT and CMPXCHG16B
+# anywhere in, which makes Nehalem the oldest processor the image will run on — a floor
+# no component asked for. Measured rather than assumed, one component at a time:
+#
+#   kernel            arch/x86/Kconfig.cpufeatures in 6.19 requires FXSR, XMM, XMM2, LM
+#                     and the other x86-64 architectural bits, and nothing above them
+#   plexos-init,      built by host cargo for x86_64-unknown-linux-gnu with no
+#   plexosd,          -C target-cpu, whose enabled features are exactly fxsr,sse,sse2
+#   plexos-gpu
+#   Plex Media Server carries its own musl loader and 61 libraries of its own and
+#                     dispatches on CPUID; it served on an Opteron_G1 CPU model, which
+#                     has no SSSE3, no SSE4, no POPCNT and no CMPXCHG16B
+#
+# So the floor was an accident of Buildroot build policy and not a requirement of
+# anything, and it cost every pre-2009 machine for nothing. Note that corei7 is also
+# deprecated upstream: arch/Config.in.x86 says so in the symbol's own help text and
+# points at BR2_x86_nehalem. Renaming it that way would have kept the floor while
+# making it look deliberate, which is the opposite of what was wanted.
+#
+# Raising this again is a product decision, not an edit: it makes every machine below
+# the new floor die of SIGILL in the first Buildroot binary the boot executes, long
+# after the kernel and PID 1 have made the machine look healthy. post-image-test.sh
+# stage 8 and plexos_sys::cpu::REQUIRED both guard it.
+BR2_x86_x86_64=y
 
 # glibc is not a preference. Plex Media Server is a closed-source binary linked
 # against it, so musl and uClibc are not options (ADR-0002).

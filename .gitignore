@@ -5,6 +5,12 @@
 /buildroot/output/
 /buildroot/dl/
 /buildroot-upstream/
+# Buildroot builds out-of-tree here. `output/` is the default; the CPU-baseline work
+# added `output-corei7/` and `output-generic/` as two isolated trees, and one careless
+# `git add -A` staged 672,911 files out of the first of them. A build directory is not
+# a thing to enumerate by name every time somebody makes another one.
+/output/
+/output-*/
 
 # Build artifacts
 *.img

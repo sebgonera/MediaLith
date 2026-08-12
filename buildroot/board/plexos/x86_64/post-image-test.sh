@@ -941,5 +941,77 @@ else
     builtin_or_bad IWLMVM  "no Intel wireless on anything from the 7000 series onwards, which is all of it here"
 fi
 
+stage "stage 8 — the CPU baseline contract"
+#
+# MediaLith targets generic x86-64. That is a product decision, and it is one that is
+# very easy to undo by accident: `BR2_x86_corei7` sat in the defconfig for the whole
+# life of the project without anybody choosing it, and what it bought was a userspace
+# that dies of SIGILL on any processor below Nehalem — *after* the kernel has booted
+# and after PID 1 has run, so the machine looks like it got much further than it did.
+#
+# Nothing in the image needs anything above the baseline: the workspace's own binaries
+# are built for x86_64-unknown-linux-gnu with no -C target-cpu, and Plex carries its
+# own musl runtime and dispatches on CPUID. So the floor can only ever come back by
+# mistake, and this is where the mistake is caught — at the configuration decision,
+# not on somebody's Core 2.
+BRCONFIG="${OUTPUT}/.config"
+if [ ! -r "${BRCONFIG}" ]; then
+    skipped "the effective Buildroot config" "no .config at ${BRCONFIG}"
+else
+    check "BR2_GCC_TARGET_ARCH is generic x86-64" \
+          "$(grep -E '^BR2_GCC_TARGET_ARCH=' "${BRCONFIG}" || echo '(absent)')" \
+          'BR2_GCC_TARGET_ARCH="x86-64"'
+    assert "BR2_x86_x86_64=y is the selected variant" \
+           "grep -qx 'BR2_x86_x86_64=y' '${BRCONFIG}'" \
+           "the generic x86-64 architecture variant is not selected"
+
+    # Every variant above the baseline, by the feature symbols they select rather than
+    # by name. A list of CPU names would need extending every time Buildroot adds a
+    # part; these four are what the baseline is *defined* by not having, so a variant
+    # nobody has heard of yet still trips this.
+    for sym in SSE3 SSSE3 SSE4 SSE42 AVX AVX2 AVX512; do
+        assert "BR2_X86_CPU_HAS_${sym} is not set" \
+               "! grep -qx 'BR2_X86_CPU_HAS_${sym}=y' '${BRCONFIG}'" \
+               "something selected a CPU variant above the x86-64 baseline; \
+grep '^BR2_x86_.*=y' ${BRCONFIG} to see which"
+    done
+fi
+
+# And what the compiler was actually configured with, which is the half the defconfig
+# cannot promise. BR2_GCC_TARGET_ARCH reaches gcc as --with-arch=, baked in as the
+# default -march for every target compilation, so this is the artefact rather than the
+# request — the same distinction stage 7b draws for the kernel.
+CROSS_GCC="$(ls "${BR_HOST}"/bin/*-linux-gnu*-gcc 2>/dev/null | head -1)"
+if [ -z "${CROSS_GCC}" ] || [ ! -x "${CROSS_GCC}" ]; then
+    skipped "the cross compiler's own --with-arch" "no cross gcc under ${BR_HOST}/bin"
+else
+    check "the cross compiler defaults to -march=x86-64" \
+          "$("${CROSS_GCC}" -v 2>&1 | grep -o -- '--with-arch=[^ ]*' | head -1)" \
+          "--with-arch=x86-64"
+fi
+
+# One artefact, checked for instructions the baseline does not have.
+#
+# busybox and not glibc, deliberately. glibc carries SSE4.2 and AVX2 implementations
+# on purpose and picks between them with IFUNC resolvers at load time, so finding one
+# there proves nothing. busybox has no CPU dispatch of any kind, so any post-baseline
+# instruction in it can only have come from the compiler — which makes it a direct
+# reading of the CPU floor the toolchain was configured with.
+#
+# Deliberately not a proof about every instruction in the image: it is five mnemonics
+# in one binary, chosen because none of them can be reached below the generation that
+# introduced it.
+BUSYBOX="${OUTPUT}/target/bin/busybox"
+OBJDUMP="$(find_tool objdump)"
+if [ ! -r "${BUSYBOX}" ]; then
+    skipped "busybox carries no post-baseline instructions" "no ${BUSYBOX}"
+elif [ -z "${OBJDUMP}" ]; then
+    skipped "busybox carries no post-baseline instructions" "no objdump"
+else
+    found="$("${OBJDUMP}" -d --no-show-raw-insn "${BUSYBOX}" 2>/dev/null \
+             | grep -oE '\b(crc32|pshufb|popcnt|pmuldq|blendvps)\b' | sort -u | tr '\n' ' ')"
+    check "busybox carries no post-baseline instructions" "${found}" ""
+fi
+
 printf '\npassed %d, failed %d, skipped %d\n' "${pass}" "${fail}" "${skip}"
 [ "${fail}" -eq 0 ]
