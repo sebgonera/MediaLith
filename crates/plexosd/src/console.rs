@@ -2994,10 +2994,21 @@ mod tests {
             "and must say when that chain ends in a key whose private half is on a build \
              host, because 'signed' alone would tell the reader something false"
         );
+        // The reassurance moved rather than went. It was a sentence under the lifecycle
+        // pills; it is the second arm of the branch in the A/B diagram now, which is where
+        // somebody looking at the mechanism actually meets the question. What is pinned is
+        // the promise -- that the machine returns to what worked, and that nobody has to be
+        // there -- and not the wording, because pinning a sentence is what made the old one
+        // survive as a duplicate of the diagram beside it.
         assert!(
-            PAGE.contains("comes back to this one by itself"),
-            "and must say what happens when an update is bad, which is the question \
+            PAGE.contains("comes back to the system that worked"),
+            "the page must say what happens when an update is bad, which is the question \
              anybody hesitating over that button is actually asking"
+        );
+        assert!(
+            PAGE.contains("nobody has to be at the machine"),
+            "and must say that it happens unattended, which is the half that makes it a \
+             guarantee rather than a procedure"
         );
     }
 
