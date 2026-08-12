@@ -17,6 +17,8 @@
 
 # Build artifacts
 *.img
+# QMP screendumps land in QEMU's cwd, which is wherever it was launched from.
+*.ppm
 *.erofs
 *.efi
 *.verity

@@ -138,6 +138,34 @@ at reduced quality on a different laptop and reported success throughout.
 
 ---
 
+## Requirements
+
+CPU and platform are separate questions, and conflating them is how a project ends up
+claiming it runs on "any x86-64 PC".
+
+**Processor.** A 64-bit x86 processor, and nothing above the architectural baseline —
+`-march=x86-64`, which is MMX, SSE and SSE2. MediaLith requires no SSE3, no SSSE3, no
+SSE4, no POPCNT, no `CMPXCHG16B`, no AVX. That is measured rather than assumed: the
+kernel's own `X86_REQUIRED_FEATURE_*` list for `x86_64` asks for nothing more, the three
+Rust binaries are built with no `-C target-cpu`, and Plex Media Server carries its own
+musl runtime and dispatches on CPUID at run time.
+
+Verified by booting the actual image under QEMU + OVMF with software emulation (TCG, not
+KVM — KVM masks CPUID without removing the instruction, so it cannot answer this) on
+`Opteron_G1`, `Conroe`, `Nehalem` and `Haswell` CPU models. On every one of them the
+machine reached firmware, kernel, PID 1, a dm-verity `/usr`, the network, the console,
+and Plex answering on loopback. **These are emulated CPU models, not physical
+machines**; no processor older than the reference laptop's Core i5-8265U has been tried
+in silicon.
+
+**Platform.** UEFI x86-64, GPT, and a disk and network adapter this kernel has a driver
+for. That is the constraint that actually decides whether a given machine works, and it
+is unchanged by the paragraph above: there is no legacy BIOS support, and a machine
+whose storage or NIC is not in the built-in driver set has no second chance, because
+there are no loadable modules for it.
+
+**Hardware transcoding** is a third question again, answered by `plexos-gpu` per machine.
+
 ## Hardware
 
 | Machine | State |

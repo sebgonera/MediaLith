@@ -84,12 +84,12 @@ list is about the system. Check against this before committing; it is short on p
 | `crates/plexos-types` | Done. Formats and the layout emitter and the GPT writer, 65 tests. The ADR-0006 manifest schema was reconciled with the artefacts MediaLith actually builds — one UKI per slot, and a `release` string `OsVersion` cannot express — which was the last moment that was an edit rather than a migration. |
 | `crates/plexos-update` | Which slot an update goes to, writing a partition and reading it back, the ADR-0006 trust chain, the anti-rollback sequence, root-signed revocation, boot-entry/slot agreement, and `plexos-sign` as the publisher's half. 65 tests. **Has updated the reference laptop four times, alternating slots — and one of those updates was deliberately unbootable and was rolled back.** All four were unsigned, through an improvised `update.json` this crate no longer parses. **Nothing signed has yet reached a machine.** |
 | `crates/plexos-gpu` | 46 tests, and it has now answered the question it was written for — on four machines, three of which it was wrong about until they were tried. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
-| `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, `reboot(2)`, `sethostname(2)`, PTY allocation for the console terminal, reaping children for PID 1, resolving partitions on a *named disk* rather than by label alone, and `statvfs(3)` — free space is the one thing this appliance reports about itself that is not readable as a file. 100 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
+| `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, `reboot(2)`, `sethostname(2)`, PTY allocation for the console terminal, reaping children for PID 1, resolving partitions on a *named disk* rather than by label alone, and `statvfs(3)` — free space is the one thing this appliance reports about itself that is not readable as a file — and the CPU compatibility model, which needs no `unsafe` at all: vendor, family and features out of CPUID, judged against a requirement passed in as data so every test is deterministic on whatever host runs it. 117 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
 | `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. It also lets the attached screen go dark after five idle minutes — two escape sequences from `console_codes(4)` written once to `/dev/tty0`, which needs no package and no daemon, because `setterm` is `util-linux` and not in this image. The supervisor role mounts the Plex app image, then keeps the console and a shell running: it reaps orphans, restarts what dies with a widening delay, and never exits. It also asks the boot loader which disk the firmware started, so a two-disk machine mounts the right `/usr` and `/var`. 63 tests. **PID 1 stays alive on the appliance and has restarted both of its services after they were killed.** |
 | `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates, the configuration model actually applied (ADR-0008), and the terminal session (ADR-0014), the updater on the signed manifest, a supervisor that restarts Plex and swaps a newly-installed version in without a reboot, the console's own TLS identity (ADR-0014), the installer and the first-boot flow (ADR-0016), live Plex activity behind the device token (ADR-0018 — the Plex account token is read from `Preferences.xml` per request, sent to loopback in a header, and has no field in the browser's document it could land in), and the activity card — what the machine is doing *now*, which is the only view here about a moment rather than a state. 407 tests, of which two fail on any development host running Plex; see the trap list. **The activity card has never run on the appliance**: its numbers were produced by replaying the appliance's own captured `/proc` and `/sys` through the real code, which is one step short of the machine. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
 | `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 104 tests. Provisioning now runs end to end **on the appliance**, driven from a browser: download, signature, manifest, build, publish, mount, confine, start. |
-| `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. |
-| `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 91 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree — including stage 7, which asserts that **every shipped `.ko` is one `plexos_init::nvidia::MODULES` names**, and stage 7b, which asserts the kernel config contract against the `.config` the kernel was actually built with rather than against the fragment that asked for it. |
+| `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. **The CPU target is `BR2_x86_x86_64` — generic x86-64.** It was `BR2_x86_corei7` from the first day, chosen by nobody, and it made Nehalem the oldest processor the image would run on; no component ever needed it. |
+| `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 130 checks in `post-image-test.sh`, one skipped on a machine with the Buildroot tree (Secure Boot signatures, when `PLEXOS_SB_KEY` is deliberately unset) — including stage 7, which asserts that **every shipped `.ko` is one `plexos_init::nvidia::MODULES` names**, stage 7b, which asserts the kernel config contract against the `.config` the kernel was actually built with rather than against the fragment that asked for it, stage 8, which asserts the CPU baseline at the configuration decision *and* by running five target binaries on an `Opteron_G1` model, and stage 9, which proves no package's source sync can recurse into a build tree by running rsync rather than by grepping for a pattern. |
 | Installer, updater, first-boot wizard | Not started. |
 
 **MediaLith is installed on the reference laptop's internal disk and boots from it.** Its own
@@ -185,6 +185,12 @@ list that goes stale in one of them.
    `xe` debugfs layout is now read the way `xe` actually creates it, and no Arc card has
    ever been plugged in — so the claim is shipped-and-unverified rather than false, and the
    only thing that can close it is a card.
+   The same sentence now applies to the CPU baseline, and it is worth keeping honest: the
+   image is built for generic x86-64 and has booted, networked, served its console and
+   started Plex on `Opteron_G1`, `Conroe`, `Nehalem` and `Haswell` **CPU models under
+   QEMU/TCG**. No processor older than the reference laptop's Core i5-8265U has executed
+   it in silicon. Emulation is good evidence about instruction sets and no evidence at all
+   about firmware, chipsets or errata.
 
 ## Done, and proven on the machine (ADR-0016)
 
@@ -537,6 +543,34 @@ and its certificate — sign with the second one.
   what the build *produced*, not for what the configuration says.
   `plexos_sys::tty::use_font` now asks the kernel directly as well, so a font that is not
   there fails in a log line naming both symbols instead of silently.
+- **A boot that reaches PID 1 has proved nothing about the userspace, and the CPU
+  baseline is how that gets discovered.** `BR2_x86_corei7` sat in the defconfig from the
+  first day, chosen by nobody, and made Nehalem the oldest processor the image would run
+  on. Nothing asked for it: the 6.19 kernel's own `X86_REQUIRED_FEATURE_*` list wants
+  only the x86-64 architectural bits, all three Rust binaries are built with no
+  `-C target-cpu`, and Plex carries its own musl runtime and dispatches on CPUID. What
+  it produced below the floor was not a refusal but a *plausible-looking machine*: on a
+  Conroe model, firmware, kernel and `plexos-init` all succeeded, the dashboard rendered
+  a welcome screen with a recovery device code to write down, and underneath it
+  `pid 196 was killed by signal 4` — SIGILL, inside `ld-linux-x86-64.so.2`, so the
+  program never started at all. `ip` died 56 times and `sh` 6 times, forever, with no
+  panic and no `Attempted to kill init`. The image is `-march=x86-64` now; stage 8 of
+  `post-image-test.sh` and `plexos_sys::cpu::REQUIRED` are what keep it there.
+- **KVM cannot test a CPU baseline, and it will tell you everything is fine.** `-cpu
+  Conroe` under KVM changes what CPUID *reports*; the instruction is still in the
+  silicon underneath and still executes. So an SSE4.2 binary runs perfectly on a guest
+  claiming to be a Core 2 and the matrix comes back green about a floor that is still
+  there. Only TCG decodes each instruction against the model. Use `-cpu host` with KVM
+  for speed; use TCG with a named model when the question is which instructions exist.
+- **A disassembly scan cannot tell a CPU floor from a CPUID-guarded fast path.** Written
+  here as "grep busybox, because unlike glibc it has no runtime dispatch", and that is
+  simply false: busybox ships hand-written SHA-1/SHA-256 assembly in
+  `libbb/hash_sha*_hwaccel_x86-64.S` — `pshufb`, `palignr`, `sha256rnds2` — reached only
+  through `get_shaNI()`, which asks CPUID first. So the generic build still contains
+  those instructions and runs on an Opteron_G1 model perfectly. The check would have
+  **failed on a correct build**, which is the worse direction: it teaches people to
+  ignore it. The property is "does it run on a baseline CPU", and only running it
+  answers that.
 - **Rollback reverts `/usr`, never `/var`.** Any migration must leave state the
   previous release can still read. `crates/plexos-init/src/state.rs` encodes this.
 - **Tests that only compare a thing to itself will pass while it is wrong.** Every
@@ -962,14 +996,29 @@ and its certificate — sign with the second one.
   partitions are written the disk holds exactly two versions of `/usr`**, and an entry
   naming any other version is guaranteed not to boot. Prune before installing, not after,
   because the failure being prevented is running out of room during the install.
-- **There is an unreproduced flake in the suite, seen three times.** A single `cargo test
-  --workspace` failed once with `plexos-plex`'s `a_mkfs_without_the_compressor` and twice
-  with nothing captured, against **more than fifty** deliberate consecutive runs that were
-  clean — so roughly one in twenty-five, and it has never been caught with output. The
-  suspect is the shape below: that test writes a shell stub to a fixed path and then
-  executes it, which races with any other test in the same process that forks — `ETXTBSY` on
-  a file another thread holds open for writing. Recorded rather than guessed at, because a
-  speculative fix to a test that cannot be made to fail is a change nobody can check.
+- **`POST /api/provision` starts provisioning; it does not report on it.** It answers
+  `{"started":true}` either way, so polling it with POST is not polling — it re-triggers
+  the whole install. Done seven times in five minutes while a build was in progress, it
+  produced a Plex that crash-looped 163 log lines deep, which read exactly like "this
+  CPU cannot run Plex" and was nothing of the kind: one clean reboot brought it up first
+  try with a four-line log. That is the interrupted-mid-write trap below, reached by the
+  monitoring rather than by the appliance. **The status route is `GET`.**
+- **There is an unreproduced flake in the suite, seen four times.** A single `cargo test
+  --workspace` fails with `plexos-plex`'s `a_mkfs_without_the_compressor`, against
+  **more than fifty** deliberate consecutive runs that were clean — so roughly one in
+  twenty-five. Sightings one to three had nothing captured. The fourth, during the CPU
+  baseline work, was under heavy load from a TCG guest saturating the machine, which
+  fits the note below about twelve cores versus two; the panic location was captured
+  (`execute.rs:518`, the first assertion) but **not the assertion message**, and six
+  consecutive runs immediately afterwards were clean, so it still cannot be produced on
+  demand. Two details confirmed while it was fresh: the scratch path is
+  `std::env::temp_dir().join("plexos-mkfs-capability")` — fixed, with no test name in
+  it, against the rule this file already states — and the test *executes the file it has
+  just written*, which is the `ETXTBSY` shape: another thread forking while that file is
+  open for writing leaves a child holding the descriptor. Recorded rather than guessed
+  at, because a speculative fix to a test that cannot be made to fail is a change nobody
+  can check. **What would settle it** is capturing the assertion message, which needs a
+  run that fails with output kept — load appears to help.
 - **A shared scratch path makes two passing tests into one flaky pair.** Rust runs tests as
   threads in one process, so a fixed temp file is a race: one test deletes what another is
   reading and they fail in whichever order the scheduler picked. Hit twice in one day —

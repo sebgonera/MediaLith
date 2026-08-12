@@ -74,23 +74,14 @@ qemu-system-x86_64 \
     -no-reboot &
 QPID=$!
 
-# Poll the console rather than sleeping for the whole budget: a model that works
-# finishes in a fraction of it, and the ones that do not are the ones worth waiting for.
-SERVED=no
-STATUS=""
-for _ in $(seq 1 $(( BUDGET / 5 ))); do
-    sleep 5
-    kill -0 "${QPID}" 2>/dev/null || break
-    STATUS="$(curl -sk -m 4 "https://127.0.0.1:${PORT}/api/status" 2>/dev/null)"
-    if [ -n "${STATUS}" ]; then SERVED=yes; break; fi
-done
-
-# The virtual terminal, which is where userspace actually printed. Taken whether or not
-# the console answered -- on a failed boot it is the only channel that has anything.
-if kill -0 "${QPID}" 2>/dev/null && [ -S "${QMP}" ]; then
-    # python3 rather than socat, which is not installed here and is one more thing a
-    # person reproducing this would have to be told to install.
-    timeout 20 python3 - "${QMP}" "${SHOT}" <<'PY' >/dev/null 2>&1
+# The screen is the only record of what userspace printed, and it does not keep: the
+# appliance blanks its own console after five idle minutes (two escape sequences from
+# plexos-init), so a screendump taken at the end of a long budget is a black rectangle.
+# One early grab, one at the end.
+grab_screen() {
+    local to="$1"
+    [ -S "${QMP}" ] || return 0
+    timeout 20 python3 - "${QMP}" "${to}" <<'PY' >/dev/null 2>&1
 import json, socket, sys, time
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.settimeout(8)
@@ -102,14 +93,44 @@ sock.sendall(json.dumps({"execute": "screendump",
                          "arguments": {"filename": sys.argv[2]}}).encode() + b"\n")
 time.sleep(1.5); sock.recv(65536)
 PY
-fi
+}
+
+# Poll the console rather than sleeping for the whole budget: a model that works
+# finishes in a fraction of it, and a model that is dying does so within seconds and
+# then does it again forever, so there is nothing to gain by waiting out the budget.
+SERVED=no
+STATUS=""
+EARLY="${WORK}/screen-early.ppm"
+elapsed=0
+for i in $(seq 1 $(( BUDGET / 5 ))); do
+    sleep 5
+    elapsed=$(( elapsed + 5 ))
+    kill -0 "${QPID}" 2>/dev/null || break
+    STATUS="$(curl -sk -m 4 "https://127.0.0.1:${PORT}/api/status" 2>/dev/null)"
+    if [ -n "${STATUS}" ]; then SERVED=yes; break; fi
+    [ "${i}" -eq 12 ] && grab_screen "${EARLY}"
+    # A userspace that cannot execute its own binaries says so in the kernel ring
+    # buffer, which does reach the serial port. Once that has been going on for a
+    # while there is no state left to wait for: nothing restarts into a different
+    # instruction set.
+    if [ "${elapsed}" -ge 90 ] && grep -q "trap invalid opcode" "${SERIAL}" 2>/dev/null
+    then
+        break
+    fi
+done
+
+# The virtual terminal, which is where userspace actually printed. Taken whether or not
+# the console answered -- on a failed boot it is the only channel that has anything.
+if kill -0 "${QPID}" 2>/dev/null; then grab_screen "${SHOT}"; fi
 
 # QMP writes PPM. Convert, because a PNG is what anything else here can open, and the
 # screen is the only record of what userspace printed on a boot that failed.
-if [ -s "${SHOT}" ]; then
-    python3 -c "from PIL import Image; Image.open('${SHOT}').save('${SHOT%.ppm}.png')" \
-        2>/dev/null && SHOT="${SHOT%.ppm}.png"
-fi
+for ppm in "${SHOT}" "${EARLY}"; do
+    [ -s "${ppm}" ] || continue
+    python3 -c "from PIL import Image; Image.open('${ppm}').save('${ppm%.ppm}.png')" \
+        2>/dev/null
+done
+[ -s "${SHOT%.ppm}.png" ] && SHOT="${SHOT%.ppm}.png"
 
 ALIVE=no; kill -0 "${QPID}" 2>/dev/null && ALIVE=yes
 kill -9 "${QPID}" 2>/dev/null
@@ -118,12 +139,30 @@ wait "${QPID}" 2>/dev/null
 # What the firmware and the kernel managed, off the serial log.
 grep -qiE "BdsDxe|UEFI|EDK II" "${SERIAL}" 2>/dev/null && OVMF=yes || OVMF=no
 grep -qE "Linux version" "${SERIAL}" 2>/dev/null && KERNEL=yes || KERNEL=no
-PANIC=no; grep -qiE "Kernel panic|Attempted to kill init" "${SERIAL}" 2>/dev/null && PANIC=yes
 
-printf 'cpu=%s mode=tcg ovmf=%s kernel=%s console_served=%s qemu_alive=%s panic=%s\n' \
-       "${CPU}" "${OVMF}" "${KERNEL}" "${SERVED}" "${ALIVE}" "${PANIC}"
-printf 'workdir=%s serial=%s screendump=%s\n' "${WORK}" "${SERIAL}" \
-       "$( [ -s "${SHOT}" ] && echo "${SHOT}" || echo none )"
+# "Kernel panic" alone matches `panic=20` on the command line, which every MediaLith
+# image carries and which the kernel echoes twice before doing anything at all. That
+# made the first run of this script report a panic on a machine that never panicked --
+# and the distinction is the whole point here, because the failure this is looking for
+# is precisely the one that does *not* panic.
+PANIC=no
+grep -qE "Kernel panic - not syncing|Attempted to kill init" "${SERIAL}" 2>/dev/null \
+    && PANIC=yes
+
+# The signal a wrong CPU baseline actually produces. Userspace output goes to tty0, but
+# the kernel's report of a fatal SIGILL is a printk and reaches the serial port, which
+# makes this the one channel that names the failure without a screenshot.
+SIGILL=$(grep -c "trap invalid opcode" "${SERIAL}" 2>/dev/null || echo 0)
+SIGILL_PROGRAMS=$(grep -oE "traps: [a-zA-Z0-9_.-]+\[[0-9]+\] trap invalid opcode" \
+                  "${SERIAL}" 2>/dev/null | sed -E 's/traps: ([^[]+)\[.*/\1/' \
+                  | sort -u | tr '\n' ',' | sed 's/,$//')
+
+printf 'cpu=%s mode=tcg ovmf=%s kernel=%s console_served=%s qemu_alive=%s panic=%s sigill=%s sigill_in=%s\n' \
+       "${CPU}" "${OVMF}" "${KERNEL}" "${SERVED}" "${ALIVE}" "${PANIC}" \
+       "${SIGILL}" "${SIGILL_PROGRAMS:-none}"
+printf 'workdir=%s serial=%s screendump=%s early=%s\n' "${WORK}" "${SERIAL}" \
+       "$( [ -s "${SHOT}" ] && echo "${SHOT}" || echo none )" \
+       "$( [ -s "${EARLY%.ppm}.png" ] && echo "${EARLY%.ppm}.png" || echo none )"
 [ -n "${STATUS}" ] && printf 'status=%s\n' "${STATUS}"
 trap - EXIT
 exit 0
