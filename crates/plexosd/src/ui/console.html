@@ -1817,7 +1817,21 @@
     /* One column, and the arrow turns a quarter. */
     .slots { grid-template-columns: minmax(0, 1fr); }
     .slots .arrow { justify-self: center; }
-    #token-card { right: .4rem; left: .4rem; width: auto; }
+    /* On a phone this stops being a popover under a button and becomes a sheet. It is the
+       tallest thing on the page -- two ways in, a field, four buttons and their
+       explanations -- and as a popover pinned under the header it ran off the bottom with
+       its own scrollbar inside the page's, which is what "unmanageable" meant.
+       Bottom-anchored, because the thumb is at the bottom of a phone and the buttons
+       should be too. */
+    #token-card {
+      right: .4rem; left: .4rem; width: auto;
+      top: auto; bottom: .4rem;
+      max-height: min(80vh, calc(100vh - var(--header-h) - 1rem));
+      overscroll-behavior: contain;
+    }
+    /* Full width, so nothing is a half-row target next to something else. */
+    #token-card .row { flex-direction: column; align-items: stretch; }
+    #token-card .row > button, #token-card input { width: 100%; }
     /* The update lifecycle. `nowrap` keeps a pill from breaking mid-phrase on a screen with
        room, and on a 390 px one the longest of them -- "4b. Three bad boots -> back to the
        other slot, with nobody present" -- pushed the whole page 54 px sideways. Measured
@@ -2925,6 +2939,7 @@ async function checkTypedToken() {
       if (response.ok) {
         if (out) out.innerHTML = `<div class="progress"><span class="now">Unlocked</span>
           <div>This browser can now change the appliance.</div></div>`;
+        closeAdminWhenDone();
       } else {
         if (out) out.innerHTML = `<div class="progress failed"><div>That is not this
           machine\u2019s recovery device code.</div><div class="hint">Sixteen characters,
@@ -3770,7 +3785,32 @@ appliance until you sign out, close the tab, or leave it idle."
 enter the recovery device code.";
 }
 
+/**
+ * Leaves a confirmation up long enough to read, then closes the panel.
+ *
+ * Asked for after the panel stayed open over a page somebody wanted to use, and it has to
+ * be a pause rather than an immediate close: closing the instant a pairing succeeded is
+ * what made a working pairing look like nothing happening.
+ */
+let adminClosing = null;
+
+function closeAdminWhenDone() {
+  /// Long enough to read four words and see the header change.
+  const LINGER_MS = 2500;
+  if (adminClosing) clearTimeout(adminClosing);
+  adminClosing = setTimeout(() => {
+    adminClosing = null;
+    openAdmin(false);
+  }, LINGER_MS);
+}
+
 function openAdmin(open) {
+  // Opening by hand cancels a close that was already on its way, or the panel shuts under
+  // the finger of somebody who has just reopened it.
+  if (open && adminClosing) {
+    clearTimeout(adminClosing);
+    adminClosing = null;
+  }
   const card = document.getElementById("token-card");
   card.hidden = !open;
   document.getElementById("admin-lock").setAttribute("aria-expanded", open ? "true" : "false");
@@ -3930,7 +3970,7 @@ async function bpPoll() {
     updateLock();
     bpSay(`<div class="progress"><span class="now">Approved</span>
       <div>This browser is now administering the appliance.</div></div>`);
-    openAdmin(false);
+    closeAdminWhenDone();
     return;
   }
 
@@ -4158,10 +4198,11 @@ async function bootstrapPairing() {
     say(`<span class="now">Paired</span><div>This browser is administering the appliance.
       It stays signed in until you sign out, close the tab, or leave it alone for an
       hour.</div>`);
-    // Opened, so there is something to see. The only other sign of success is a small badge
-    // in the header, which on a phone is easy to miss entirely -- reported as "it opens and
-    // nothing happens" about a pairing that had in fact worked.
+    // Shown, then closed. Both halves were asked for and they are not in conflict: closing
+    // straight away made a successful pairing look like nothing happening, and staying open
+    // leaves a panel over the page somebody now wants to use.
     openAdmin(true);
+    closeAdminWhenDone();
   } catch (e) {
     say(`<div>Could not contact MediaLith. Check that this device is on the same
       network as the appliance.</div><div>${esc(String(e))}</div>`, true);
@@ -4206,6 +4247,24 @@ async function pollWaiting() {
       headers: { "Authorization": "Bearer " + held, "Content-Type": "application/json" },
       body: "{}",
     });
+    // This poll doubles as the answer to "am I still an administrator", and that is worth
+    // more than what it was written for. The lock used to say Administrator whenever a
+    // credential was *stored*, which is not the same question: a session dies when the
+    // appliance restarts, and the browser goes on holding a string that authenticates
+    // nothing. Reported from a machine that had rebooted -- the dashboard knew, the
+    // header did not.
+    //
+    // Here rather than in a check of its own, because this request already runs on the
+    // interval and already carries the credential. A second poll asking the same thing
+    // would be a second thing to keep in step.
+    if (response.status === 401 || response.status === 403) {
+      forgetSession();
+      sessionStorage.removeItem(TOKEN_KEY);
+      const field = document.getElementById("token");
+      if (field) field.value = "";
+      updateLock();
+      return;
+    }
     if (!response.ok) return;
     waiting = (await response.json()).waiting || [];
   } catch (e) { return; }
