@@ -647,13 +647,21 @@ mod tests {
 
     #[test]
     fn a_missing_label_reports_what_was_found_instead() {
-        // On a developer machine there are no MediaLith labels, so this exercises the
-        // real failure text. "No such file or directory" alone gives nothing to act
-        // on; the list distinguishes "wrong disk" from "labels were dropped".
-        let error = by_partlabel("usr_a").unwrap_err();
+        // A label no disk can carry, rather than a real one that happens to be absent.
+        //
+        // This asked about `usr_a` and said "on a developer machine there are no MediaLith
+        // labels", which was true of the machine it was written on and stopped being true
+        // the moment somebody wrote an image to a USB stick and left it plugged in: the
+        // build host then has `sda1..sda6` labelled `esp`, `usr_a`, `usr_a_hash`, and the
+        // test fails on a machine where nothing is wrong. Third time this repository has
+        // produced a test that describes the machine it was written on.
+        //
+        // What is being tested is the failure *text*, and an impossible label exercises it
+        // on every host and on any day.
+        let error = by_partlabel("medialith-no-such-label").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         let text = error.to_string();
-        assert!(text.contains("usr_a"), "{text}");
+        assert!(text.contains("medialith-no-such-label"), "{text}");
         assert!(text.contains("kernel reports"), "{text}");
         assert!(text.contains("installer"), "no remedy given: {text}");
     }

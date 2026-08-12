@@ -185,13 +185,17 @@ pub enum Key {
     Char(u8),
     /// Escape on its own, which is the only one that cancels.
     Escape,
-    /// The four arrows, for anything on this screen that is a list.
+    /// Arrow up, for anything on this screen that is a list.
     Up,
+    /// Arrow down.
     Down,
+    /// Arrow left.
     Left,
+    /// Arrow right.
     Right,
-    /// Home and End, which arrive the same way and would otherwise cancel too.
+    /// Home, which arrives the same way and would otherwise cancel too.
     Home,
+    /// End, likewise.
     End,
 }
 
@@ -270,16 +274,12 @@ pub fn keys_from(buffer: &mut Vec<u8>, settled: bool) -> Vec<Key> {
                     if let Some(key) = key {
                         out.push(key);
                     }
-                    continue;
                 }
             },
             // `ESC` followed by something that is not an introducer: Alt+key on most
             // terminals. Neither byte is acted on, and neither is left to be read as a key
             // of its own.
-            Some(_) => {
-                buffer.drain(..2);
-                continue;
-            }
+            Some(_) => buffer.drain(..2).for_each(drop),
         }
     }
 }
@@ -356,8 +356,8 @@ fn draw(
         first_boot_offered: false,
     };
 
-    /// Bytes that have arrived and are not yet a whole key. Never more than a few, because
-    /// an escape sequence is three bytes and anything longer is consumed as one.
+    // Bytes that have arrived and are not yet a whole key. Never more than a few, because
+    // an escape sequence is three bytes and anything longer is consumed as one.
     let mut pending: Vec<u8> = Vec::new();
     let mut painted: Option<String> = None;
     let mut last_painted: Option<Instant> = None;
