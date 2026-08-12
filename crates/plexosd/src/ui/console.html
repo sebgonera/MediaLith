@@ -659,29 +659,52 @@
 
   /* The Plex section: the one part of this page that does something. */
   .plex { margin: 1.5rem 0; }
-  .plex .row { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-top: .8rem; }
-  .plex select {
-    padding: .55rem .7rem;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--bg);
-    color: var(--ink);
-    font: inherit;
+  /* THE ROW, on the class and not on a container.
+
+     Written as `.plex .row` and `.form .row`, twice, with the same declarations -- so a
+     `.row` anywhere else got no flex and no gap at all. It is used 35 times and only two
+     containers carried the rule, which is why the buttons under "Update from an address"
+     were touching each other: that card is a `<details class="card">` and is neither. The
+     diagnostics buttons on Network were the same fault in a different card.
+
+     This is the third time this page has learnt it. The button base was `.plex button`,
+     then `.card button`, and both shipped a control with no styling the moment one was
+     added outside the named container; the rule is on the element now and a test holds it
+     there. A rule about how a row looks should not know where rows are. */
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--gap-control);
+    margin-top: var(--s-3);
   }
-  .plex input[type=password], .plex input[type=text] {
-    flex: 1 1 22rem;
+  /* A field in a row shares the row's spacing rather than adding its own. */
+  .row > .field { margin-top: 0; }
+  /* A text field in a row takes the room the row has. Without this it fell back to the
+     browser's default size -- about twenty characters -- so "paste the address
+     publish-update.sh prints" was cut off at "paste the address publish-u", which is a
+     placeholder that has stopped being an instruction. It grows and it wraps: the basis is
+     what it wants, the grow is what it takes, and `min-width: 0` is what lets it shrink
+     below its content on a narrow screen instead of pushing the row sideways. */
+  .row > input[type=text], .row > input[type=password] {
+    flex: 1 1 20rem;
     min-width: 0;
-    padding: .55rem .7rem;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--bg);
-    color: var(--ink);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: .9rem;
   }
+  /* Buttons keep their size in a row; only fields stretch. */
+  .row > button { flex: 0 0 auto; }
+  /* Controls are styled once, on the element, further up -- height, border, radius,
+     surface. Two rules here used to restyle `select` and `input` inside `.plex` alone, with
+     their own radius and their own background, so a field looked one way in a Plex card and
+     another way three cards down. They are gone rather than promoted: the general rules
+     already say all of it.
+
+     THE HINT, on the class. It is written 69 times on this page and was styled in exactly
+     one container, so most of the explanatory text on the console was rendering as body
+     copy at body size -- which is why the prose looked like it was competing with the
+     operational data. It was competing: it was the same size. */
+  .hint { color: var(--muted); font-size: var(--t-meta); margin: var(--s-1) 0 0; }
   /* Buttons are styled once, further down, on the element itself. See the comment on that
      rule for what naming a container cost, twice. */
-  .plex .hint { color: var(--muted); font-size: .9rem; margin: .4rem 0 0; }
 
   /* What a release says it changed. A list rather than a paragraph because a publisher
      writes it as one, and because three short lines are read and one long sentence is not. */
@@ -706,7 +729,7 @@
     color: var(--text);
   }
   details.card[open] > summary { margin-bottom: .6rem; }
-  .plex .visit {
+  .visit {
     display: inline-block;
     margin-top: .8rem;
     padding: .55rem 1.1rem;
@@ -722,13 +745,6 @@
      later got browser defaults and looked like a different page. .form is that styling,
      named for what it is rather than for one card, so the next one inherits it.
      ------------------------------------------------------------------ */
-  .form .row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: .6rem;
-    align-items: center;
-    margin-top: .7rem;
-  }
   /* The wireless card is not a `.form` -- it is a list with two fields under it -- but a
      label beside a shrunken input is how the name and the passphrase came out, with both
      placeholders cut off mid-word. Scoped to this card rather than broadened to every
@@ -3304,6 +3320,12 @@ function chooseSelect(box, index) {
 function enhanceSelects() {
   for (const select of document.querySelectorAll("select:not([data-enhanced])")) {
     select.dataset.enhanced = "1";
+    // Out of the accessibility tree and out of the tab order. The button carries the name,
+    // the role and the state now, and a native select left announceable beside it would be
+    // the same control offered twice -- once with the label and once without. It stays in
+    // the DOM because it is still the value; it stops being something to meet.
+    select.setAttribute("aria-hidden", "true");
+    select.tabIndex = -1;
     const box = document.createElement("div");
     box.className = "selectbox";
     select.parentNode.insertBefore(box, select);
