@@ -173,6 +173,117 @@ pub fn run(first_boot_code: Option<String>, log: &mut dyn FnMut(&str)) {
     draw(&screen, size, first_boot_code, &keys, log);
 }
 
+/// What a keystroke means, once the escape sequences have been put back together.
+///
+/// The terminal sends an arrow as three bytes -- `ESC [ A` -- and this screen read them one
+/// at a time, so the first byte hit the branch that cancels. Pressing an arrow key cancelled
+/// an active pairing offer; so did Home, End, and every function key, because all of them
+/// begin with `ESC`. Nothing on the screen said why the code had gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    /// An ordinary printable byte.
+    Char(u8),
+    /// Escape on its own, which is the only one that cancels.
+    Escape,
+    /// The four arrows, for anything on this screen that is a list.
+    Up,
+    Down,
+    Left,
+    Right,
+    /// Home and End, which arrive the same way and would otherwise cancel too.
+    Home,
+    End,
+}
+
+/// Turns the bytes that have arrived into keys, leaving an unfinished sequence behind.
+///
+/// `settled` is the whole of how a lone Escape is told from the start of an arrow: they are
+/// the same first byte and only time separates them. The draw loop passes `true` when a tick
+/// went by with nothing more arriving, so a bare Escape costs one tick and a sequence costs
+/// nothing -- its remaining bytes are already in the buffer by the time it is asked.
+///
+/// Pure, and separate from the channel it is fed from, so every one of these can be a test
+/// rather than somebody standing at a machine pressing keys.
+pub fn keys_from(buffer: &mut Vec<u8>, settled: bool) -> Vec<Key> {
+    let mut out = Vec::new();
+    loop {
+        let Some(&first) = buffer.first() else {
+            return out;
+        };
+        if first != 0x1b {
+            out.push(Key::Char(first));
+            buffer.remove(0);
+            continue;
+        }
+        // An escape, and what follows decides what it was.
+        match buffer.get(1) {
+            // Nothing yet. If the tick settled, nothing more is coming and this was the key
+            // itself; otherwise leave it and look again next time.
+            None => {
+                if settled {
+                    buffer.remove(0);
+                    out.push(Key::Escape);
+                    continue;
+                }
+                return out;
+            }
+            // CSI. `ESC O` is the other introducer -- some terminals send arrows in
+            // application mode -- and it carries the same final bytes.
+            Some(b'[' | b'O') => match buffer.get(2) {
+                None => {
+                    if settled {
+                        // A two-byte sequence that stopped. Nothing to act on, and holding
+                        // it would make the next keystroke part of a sequence that ended.
+                        buffer.drain(..2);
+                        continue;
+                    }
+                    return out;
+                }
+                Some(&final_byte) => {
+                    let key = match final_byte {
+                        b'A' => Some(Key::Up),
+                        b'B' => Some(Key::Down),
+                        b'C' => Some(Key::Right),
+                        b'D' => Some(Key::Left),
+                        b'H' => Some(Key::Home),
+                        b'F' => Some(Key::End),
+                        _ => None,
+                    };
+                    // `ESC [ 1 ~` and friends: a numeric parameter runs to a letter or `~`.
+                    // Consumed and ignored rather than guessed at -- an unrecognised
+                    // sequence must not fall through to the byte after it, which is how a
+                    // function key would have cancelled.
+                    if key.is_none() && final_byte.is_ascii_digit() {
+                        let end = buffer
+                            .iter()
+                            .skip(2)
+                            .position(|b| *b == b'~' || b.is_ascii_alphabetic());
+                        match end {
+                            Some(offset) => {
+                                buffer.drain(..3 + offset);
+                                continue;
+                            }
+                            None => return out,
+                        }
+                    }
+                    buffer.drain(..3);
+                    if let Some(key) = key {
+                        out.push(key);
+                    }
+                    continue;
+                }
+            },
+            // `ESC` followed by something that is not an introducer: Alt+key on most
+            // terminals. Neither byte is acted on, and neither is left to be read as a key
+            // of its own.
+            Some(_) => {
+                buffer.drain(..2);
+                continue;
+            }
+        }
+    }
+}
+
 /// A thread that turns the keyboard into a channel.
 ///
 /// A thread because the read blocks: `VMIN` is 1, so it waits for a key and costs nothing
@@ -245,14 +356,25 @@ fn draw(
         first_boot_offered: false,
     };
 
+    /// Bytes that have arrived and are not yet a whole key. Never more than a few, because
+    /// an escape sequence is three bytes and anything longer is consumed as one.
+    let mut pending: Vec<u8> = Vec::new();
     let mut painted: Option<String> = None;
     let mut last_painted: Option<Instant> = None;
     let mut last_key = Instant::now();
 
     loop {
-        let mut pressed = false;
-        while let Ok(key) = keys.try_recv() {
-            pressed = true;
+        // Bytes in, keys out. `settled` is true when a whole tick went by with nothing
+        // more arriving, which is what lets a lone Escape resolve without swallowing the
+        // start of an arrow that is still on its way.
+        let mut arrived = false;
+        while let Ok(byte) = keys.try_recv() {
+            arrived = true;
+            pending.push(byte);
+        }
+        let struck = keys_from(&mut pending, !arrived);
+        let pressed = !struck.is_empty();
+        for key in struck {
             handle(key, &mut state, &facts, log);
         }
         if pressed {
@@ -298,10 +420,7 @@ fn draw(
 /// that opens a shell: one already exists on the second virtual terminal, reached the way
 /// it always has been, and adding a second door to it here would be widening an existing
 /// decision rather than implementing this one.
-fn handle(key: u8, state: &mut State, facts: &Facts, log: &mut dyn FnMut(&str)) {
-    /// What the terminal sends for Escape.
-    const ESC: u8 = 0x1b;
-
+fn handle(key: Key, state: &mut State, facts: &Facts, log: &mut dyn FnMut(&str)) {
     // Any key at all dismisses the first-boot screen, and dismissing it is what drops the
     // recovery code out of memory. Deliberately any key rather than a named one: the
     // instruction on screen is "press any key when you have written it down", and a screen
@@ -315,7 +434,7 @@ fn handle(key: u8, state: &mut State, facts: &Facts, log: &mut dyn FnMut(&str)) 
     }
 
     match key {
-        b'p' | b'P' => {
+        Key::Char(b'p' | b'P') => {
             // Only where there is an address to put in it. A QR code pointing at nothing
             // is worse than no QR code: somebody scans it, gets an error from their
             // browser, and concludes the appliance is broken.
@@ -329,9 +448,12 @@ fn handle(key: u8, state: &mut State, facts: &Facts, log: &mut dyn FnMut(&str)) 
                 state.notice_until = None;
             }
         }
-        b'd' | b'D' => state.screen = Screen::Details,
-        b'?' | b'/' | b'h' | b'H' => state.screen = Screen::Help,
-        ESC | b'q' | b'Q' => {
+        Key::Char(b'd' | b'D') => state.screen = Screen::Details,
+        Key::Char(b'?' | b'/' | b'h' | b'H') => state.screen = Screen::Help,
+        // Escape on its own, and never the first byte of an arrow: pressing Up used to
+        // cancel a pairing offer, because the three bytes of the arrow arrived one at a
+        // time and the first of them is this.
+        Key::Escape | Key::Char(b'q' | b'Q') => {
             if matches!(state.screen, Screen::Pairing { .. }) {
                 crate::pairing::cancel();
                 log("pairing cancelled at the machine's own screen");
@@ -677,12 +799,87 @@ mod tests {
             first_boot_offered: true,
         };
 
-        handle(b'P', &mut state, &facts_at(None), &mut silent());
+        handle(Key::Char(b'P'), &mut state, &facts_at(None), &mut silent());
 
         assert_eq!(state.screen, Screen::Dashboard);
         assert!(
             crate::pairing::secret().is_none(),
             "nothing was put on offer"
+        );
+    }
+
+    #[test]
+    fn an_arrow_key_is_an_arrow_and_not_an_escape() {
+        // The defect this exists to stop, and it was found by reading the handler rather
+        // than by pressing anything: the terminal sends Up as `ESC [ A`, this screen read
+        // one byte at a time, and the first byte is the key that cancels. So an arrow --
+        // and Home, and End, and every function key -- cancelled an active pairing offer,
+        // with nothing on screen saying why the code had gone.
+        let mut buffer = b"\x1b[A".to_vec();
+        assert_eq!(keys_from(&mut buffer, true), vec![Key::Up]);
+        assert!(buffer.is_empty(), "the whole sequence is consumed");
+
+        for (bytes, key) in [
+            (&b"\x1b[B"[..], Key::Down),
+            (&b"\x1b[C"[..], Key::Right),
+            (&b"\x1b[D"[..], Key::Left),
+            (&b"\x1b[H"[..], Key::Home),
+            (&b"\x1b[F"[..], Key::End),
+            // Application mode, which some terminals use for the same keys.
+            (&b"\x1bOA"[..], Key::Up),
+        ] {
+            let mut buffer = bytes.to_vec();
+            assert_eq!(keys_from(&mut buffer, true), vec![key], "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn a_lone_escape_is_still_escape_once_nothing_follows_it() {
+        // The one genuinely hard case: a bare Escape and the start of an arrow are the same
+        // first byte, and only time tells them apart. Unsettled, it is held; settled, it is
+        // the key. One tick of delay for Escape, none for a sequence.
+        let mut buffer = vec![0x1b];
+        assert_eq!(
+            keys_from(&mut buffer, false),
+            vec![],
+            "held while more may arrive"
+        );
+        assert_eq!(buffer, vec![0x1b], "and kept, not dropped");
+        assert_eq!(keys_from(&mut buffer, true), vec![Key::Escape]);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn a_sequence_split_across_ticks_is_still_one_key() {
+        // Three bytes do not have to arrive together, and on a slow console they do not.
+        let mut buffer = vec![0x1b];
+        assert_eq!(keys_from(&mut buffer, false), vec![]);
+        buffer.push(b'[');
+        assert_eq!(keys_from(&mut buffer, false), vec![]);
+        buffer.push(b'B');
+        assert_eq!(keys_from(&mut buffer, false), vec![Key::Down]);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn a_function_key_is_swallowed_whole_rather_than_acted_on_in_pieces() {
+        // `ESC [ 1 5 ~` is F5. Unrecognised, and consumed *entirely*: leaving the tail in
+        // the buffer would make `~` the next keystroke, and leaving the `ESC` would cancel.
+        let mut buffer = b"\x1b[15~p".to_vec();
+        assert_eq!(
+            keys_from(&mut buffer, true),
+            vec![Key::Char(b'p')],
+            "the function key does nothing and the key after it is untouched"
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn ordinary_keys_are_unaffected_and_arrive_in_order() {
+        let mut buffer = b"pdq".to_vec();
+        assert_eq!(
+            keys_from(&mut buffer, true),
+            vec![Key::Char(b'p'), Key::Char(b'd'), Key::Char(b'q')]
         );
     }
 
@@ -697,7 +894,7 @@ mod tests {
             first_boot_offered: true,
         };
 
-        handle(b'p', &mut state, &facts, &mut silent());
+        handle(Key::Char(b'p'), &mut state, &facts, &mut silent());
         assert!(crate::pairing::secret().is_some(), "a code is on offer");
 
         advance(&mut state, &facts);
@@ -706,7 +903,7 @@ mod tests {
         };
         assert!(url.contains("#pair="), "{url}");
 
-        handle(0x1b, &mut state, &facts, &mut silent());
+        handle(Key::Escape, &mut state, &facts, &mut silent());
         assert_eq!(state.screen, Screen::Dashboard);
         assert!(
             crate::pairing::secret().is_none(),
@@ -762,7 +959,7 @@ mod tests {
             first_boot_offered: false,
         };
 
-        handle(b'x', &mut state, &facts, &mut silent());
+        handle(Key::Char(b'x'), &mut state, &facts, &mut silent());
 
         assert!(state.first_boot_code.is_none(), "the plaintext is gone");
         assert_eq!(state.screen, Screen::Dashboard);
@@ -850,14 +1047,14 @@ mod tests {
             first_boot_offered: true,
         };
 
-        handle(b'd', &mut state, &facts, &mut silent());
+        handle(Key::Char(b'd'), &mut state, &facts, &mut silent());
         assert_eq!(state.screen, Screen::Details);
-        handle(0x1b, &mut state, &facts, &mut silent());
+        handle(Key::Escape, &mut state, &facts, &mut silent());
         assert_eq!(state.screen, Screen::Dashboard);
 
-        handle(b'?', &mut state, &facts, &mut silent());
+        handle(Key::Char(b'?'), &mut state, &facts, &mut silent());
         assert_eq!(state.screen, Screen::Help);
-        handle(0x1b, &mut state, &facts, &mut silent());
+        handle(Key::Escape, &mut state, &facts, &mut silent());
         assert_eq!(state.screen, Screen::Dashboard);
     }
 
@@ -876,7 +1073,7 @@ mod tests {
         };
 
         for key in b"sSfF0123456789\t\r\n" {
-            handle(*key, &mut state, &facts, &mut silent());
+            handle(Key::Char(*key), &mut state, &facts, &mut silent());
             assert_eq!(
                 state.screen,
                 Screen::Dashboard,
