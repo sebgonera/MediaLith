@@ -2136,6 +2136,126 @@
     display: grid;
     gap: var(--s-1);
   }
+  /* ------------------------------------------------------------------------------------
+     PLEX TELEMETRY STRIP.
+     A row of figures, not four dashboard cards. The numbers are tabular so a value changing
+     twice a second does not shift the label beside it. */
+  .telestrip {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: var(--gap-card);
+    margin-bottom: var(--gap-section);
+    padding: var(--pad-card-sm) var(--pad-card);
+    background: var(--surface-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  @media (max-width: 60rem) { .telestrip { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .tele { min-width: 0; }
+  .tele-k {
+    font-size: var(--t-micro);
+    text-transform: uppercase;
+    letter-spacing: var(--track-eyebrow);
+    color: var(--muted);
+  }
+  .tele-v {
+    margin-top: .1rem;
+    font-size: var(--t-num);
+    font-weight: 650;
+    line-height: 1.15;
+    font-variant-numeric: tabular-nums;
+  }
+  .tele-n { font-size: var(--t-micro); color: var(--muted); }
+  .tele-pair { display: inline-flex; align-items: baseline; gap: .18rem; }
+  .tele-num { font-variant-numeric: tabular-nums; }
+  .tele-unit { font-size: var(--t-meta); font-weight: 600; color: var(--muted); }
+  .tele-dot { margin: 0 .35rem; color: var(--muted); font-weight: 400; }
+
+  .pa-chart { height: 3.5rem; }
+  .pa-chart svg { width: 100%; height: 100%; }
+  .pa-facts {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--gap-inline);
+    font-size: var(--t-meta);
+    color: var(--muted);
+  }
+  .pa-num { font-weight: 650; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .pa-sep { opacity: .5; }
+
+  /* ------------------------------------------------------------------------------------
+     THE TRANSCODE PATH.
+     A data path, not an infographic: small nodes joined by rules. Three states and no more
+     -- on the GPU, on the processor, and not established -- because those are the three
+     things Plex actually says. Red is absent deliberately: a software transcode is a client
+     asking for something the hardware cannot do, not a fault. */
+  .pipe { margin-top: var(--s-3); }
+  .pipe-flow {
+    display: flex;
+    align-items: stretch;
+    flex-wrap: wrap;
+    gap: var(--s-1);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .pipe-node {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: var(--s-2) var(--s-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    background: var(--surface-inset);
+  }
+  .pipe-k {
+    display: block;
+    font-size: var(--t-micro);
+    text-transform: uppercase;
+    letter-spacing: var(--track-eyebrow);
+    color: var(--muted);
+  }
+  .pipe-v { display: block; font-size: var(--t-meta); font-weight: 600; white-space: nowrap; }
+  .pipe-n { display: block; font-size: var(--t-micro); color: var(--muted); font-variant-numeric: tabular-nums; }
+  /* The rule between two nodes. A line rather than an arrow glyph: an arrow is a character
+     that a screen reader reads aloud and a font may not have. */
+  .pipe-link {
+    flex: 0 0 .9rem;
+    align-self: center;
+    height: 2px;
+    background: var(--border);
+  }
+  .pipe-node.is-hw { border-color: var(--ready); }
+  .pipe-node.is-hw .pipe-v { color: var(--ready); }
+  .pipe-node.is-cpu { border-color: var(--border-active); }
+  .pipe-node.is-cpu .pipe-v { color: var(--accent); }
+  .pipe-node.is-unknown .pipe-v { color: var(--muted); font-weight: 500; }
+
+  .pipe-verdict {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--gap-inline);
+    margin-top: var(--s-2);
+  }
+  .pipe-badge {
+    font-size: var(--t-micro);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: var(--track-eyebrow);
+  }
+  .pipe.is-hw .pipe-badge { color: var(--ready); }
+  .pipe.is-cpu .pipe-badge { color: var(--accent); }
+  .pipe.is-unknown .pipe-badge { color: var(--muted); }
+  .pipe-why { font-size: var(--t-micro); color: var(--muted); }
+  .pipe-vendor {
+    margin-left: auto;
+    font-size: var(--t-micro);
+    color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
   /* Dashed, because this card describes something that is not there. The one place on the
      page where a border says "absent" rather than "grouped". */
   .lim { border-style: dashed; }
@@ -2912,6 +3032,49 @@
           <h3>Plex Media Server</h3>
           <p class="empty">Loading…</p>
         </section>
+        <!-- LIVE TELEMETRY.
+             Written once in the markup and only its values updated, because a strip that is
+             rebuilt on every poll is a strip nothing can be selected in. Every figure here
+             comes from something the appliance already reports: the session count and the
+             hardware/software split from /api/plex/sessions, the processor and memory from
+             the Plex cgroup in /api/metrics. Nothing is derived from anything else. -->
+        <div class="telestrip" id="plex-telemetry" hidden>
+          <div class="tele">
+            <div class="tele-k">Active streams</div>
+            <div class="tele-v" id="tele-streams">—</div>
+            <div class="tele-n" id="tele-streams-note"></div>
+          </div>
+          <div class="tele">
+            <div class="tele-k">Transcoding</div>
+            <div class="tele-v" id="tele-transcode">—</div>
+            <div class="tele-n" id="tele-transcode-note"></div>
+          </div>
+          <div class="tele">
+            <div class="tele-k">Plex processor</div>
+            <div class="tele-v" id="tele-cpu">—</div>
+            <div class="tele-n" id="tele-cpu-note"></div>
+          </div>
+          <div class="tele">
+            <div class="tele-k">Plex memory</div>
+            <div class="tele-v" id="tele-mem">—</div>
+            <div class="tele-n" id="tele-mem-note"></div>
+          </div>
+        </div>
+
+        <!-- PLAYBACK ACTIVITY.
+             Hidden until there is enough history to be worth drawing, and its label says how
+             much history that is rather than claiming a window it does not have: the ring is
+             filled by this page while it is open and starts empty on every reload. An
+             appliance-side ring would survive a reload and is the named upgrade if this is
+             ever wanted across restarts. -->
+        <section class="card" id="plex-activity" hidden>
+          <div class="bar">
+            <h3>Playback activity</h3>
+            <span class="state" id="plex-activity-window"></span>
+          </div>
+          <div id="plex-activity-body"></div>
+        </section>
+
         <!-- Every stream, in full. The rail on the Overview shows the first few compactly and
              points here; this is where all of them belong, with the whole video and audio
              path for each. Same poll, same data, two densities. -->
@@ -8190,6 +8353,205 @@ function npTitle(session) {
  * fill a gap — a field Plex did not report is a row that is not drawn, so a sparse session
  * produces a shorter card rather than a column of "unknown".
  */
+// ------------------------------------------------------------------------------------
+// PLEX TELEMETRY.
+//
+// Everything here is a figure the appliance already reports. Nothing is derived from
+// anything else, and in particular nothing about hardware transcoding is inferred from GPU
+// clocks, from a process being present, or from the vendor of the card: the session's own
+// `video.hardware` is the only thing that answers that, and it is three-valued.
+//
+// The history is a ring this page fills while it is open. It is not thirty minutes and it
+// does not claim to be -- the label says how much there actually is, and it starts empty on
+// every reload. A ring in `plexosd` would survive that and is the named upgrade if history
+// across restarts is ever wanted; it is a new field on the API and a rebuild, which is why
+// it is not this.
+// ------------------------------------------------------------------------------------
+const PLEX_HISTORY_POINTS = 120;
+const plexHistory = [];
+/// Plex's own memory, which the metrics card samples but never kept.
+const plexMemHistory = [];
+
+/// One sample per answered session poll. `at` is what makes the window honest: the poll rate
+/// changes with what is happening, so counting samples would misreport the span.
+function pushPlexSample(sessions) {
+  const hw = sessions.filter(s => s.decision === "transcode" && (s.video || {}).hardware === true).length;
+  const sw = sessions.filter(s => s.decision === "transcode" && (s.video || {}).hardware === false).length;
+  plexHistory.push({ at: Date.now(), n: sessions.length, hw, sw });
+  if (plexHistory.length > PLEX_HISTORY_POINTS) plexHistory.shift();
+}
+
+/// "4 min" -- the span the ring actually covers, so nothing on the page claims a window it
+/// has not got.
+function plexHistorySpan() {
+  if (plexHistory.length < 2) return "";
+  const ms = plexHistory[plexHistory.length - 1].at - plexHistory[0].at;
+  const minutes = Math.round(ms / 60000);
+  if (minutes >= 1) return `${minutes} min`;
+  return `${Math.max(1, Math.round(ms / 1000))} s`;
+}
+
+/// The strip under the service header. Values only: the markup is written once, so nothing
+/// a person has selected is destroyed by a poll.
+function renderPlexTelemetry(report, locked) {
+  const strip = document.getElementById("plex-telemetry");
+  if (!strip) return;
+  const sessions = (report && report.sessions) || [];
+  // Locked, or Plex not answering, means there is nothing honest to put here.
+  if (locked || !report || report.available === false) {
+    strip.hidden = true;
+    return;
+  }
+  strip.hidden = false;
+
+  const hw = sessions.filter(s => s.decision === "transcode" && (s.video || {}).hardware === true).length;
+  const sw = sessions.filter(s => s.decision === "transcode" && (s.video || {}).hardware === false).length;
+  // A transcode whose hardware answer has not been established yet is neither, and saying so
+  // is the whole reason `video.hardware` is three-valued: every hardware transcode looks
+  // like this for its first second or two, and counting it as software would put a warning
+  // on the appliance's best case every time somebody pressed play.
+  const settling = sessions.filter(s => s.decision === "transcode"
+    && (s.video || {}).hardware !== true && (s.video || {}).hardware !== false).length;
+
+  const set = (id, text) => { const e = document.getElementById(id); if (e) e.textContent = text; };
+  const setHtml = (id, html) => { const e = document.getElementById(id); if (e) e.innerHTML = html; };
+
+  set("tele-streams", String(sessions.length));
+  set("tele-streams-note", sessions.length ? (sessions.length === 1 ? "now playing" : "now playing") : "nothing playing");
+
+  setHtml("tele-transcode",
+    `<span class="tele-pair"><span class="tele-num">${hw}</span><span class="tele-unit">hw</span></span>`
+    + `<span class="tele-dot">·</span>`
+    + `<span class="tele-pair"><span class="tele-num">${sw}</span><span class="tele-unit">sw</span></span>`);
+  set("tele-transcode-note", settling
+    ? `${settling} still being established`
+    : (hw + sw) ? "of the streams above" : "nothing being re-encoded");
+
+  const metrics = latestMetrics || {};
+  const plex = metrics.plex || {};
+  const cores = (metrics.cpu || {}).cores_online;
+  if (plex.present && plex.cpu_percent !== null && plex.cpu_percent !== undefined) {
+    set("tele-cpu", metricNum(plex.cpu_percent, 1) + "%");
+    set("tele-cpu-note", cores ? `of one core · ${cores} available` : "of one core");
+  } else {
+    set("tele-cpu", "—");
+    set("tele-cpu-note", "not reported");
+  }
+  if (plex.present && plex.memory) {
+    pushSample(plexMemHistory, plex.memory);
+    set("tele-mem", metricBytes(plex.memory));
+    set("tele-mem-note", plex.memory_max ? `limit ${metricBytes(plex.memory_max)}` : "resident");
+  } else {
+    set("tele-mem", "—");
+    set("tele-mem-note", "not reported");
+  }
+}
+
+/// The activity chart, drawn only when the ring has something to say.
+///
+/// Two samples is a line between two points and says nothing; the card stays hidden until
+/// there are enough, which on a quiet appliance means it appears after a minute or so of the
+/// page being open and not before.
+function renderPlexActivity(locked) {
+  const card = document.getElementById("plex-activity");
+  const body = document.getElementById("plex-activity-body");
+  const window_ = document.getElementById("plex-activity-window");
+  if (!card || !body) return;
+  if (locked || plexHistory.length < 8) { card.hidden = true; return; }
+  card.hidden = false;
+
+  const counts = plexHistory.map(p => p.n);
+  const now = counts[counts.length - 1];
+  const peak = Math.max(...counts);
+  if (window_) window_.textContent = `the last ${plexHistorySpan()}, since this page opened`;
+
+  // The same sparkline the activity card draws, against a ceiling of the peak rather than a
+  // fixed one: a chart of "0 or 1" against a scale of ten is a flat line that says nothing.
+  const spark = metricSpark(counts, Math.max(1, peak));
+  body.innerHTML = `
+    <div class="pa-chart">${spark}</div>
+    <div class="pa-facts">
+      <span><span class="pa-num">${now}</span> playing now</span>
+      <span class="pa-sep" aria-hidden="true">·</span>
+      <span>peak <span class="pa-num">${peak}</span> in this window</span>
+    </div>`;
+}
+
+/// The transcode path, from what Plex actually said about it.
+///
+/// **Every stage state comes from `video.hardware` and `video.full_pipeline` and from
+/// nothing else.** Not from the GPU report, not from a clock, not from the vendor of the
+/// card, not from a process being present -- those answer "can this machine" and this
+/// answers "is this stream", and the interesting cases are exactly the ones where they
+/// disagree.
+///
+/// What the appliance can and cannot say, stated rather than smoothed:
+///
+///   full_pipeline === true    decode, process and encode are all on the GPU. Plex says so.
+///   hardware === true         *something* is on the GPU and Plex has not said which stages.
+///                             Both ends are drawn UNKNOWN, because naming one would be a
+///                             guess, and a guess here is the one thing this page must not do.
+///   hardware === false        a transcoder demonstrably running without one: CPU throughout.
+///   otherwise                 not established yet, which is what every hardware transcode
+///                             looks like for its first second or two.
+function npPipeline(session) {
+  if (session.decision !== "transcode") return "";
+  const video = session.video || {};
+  const full = video.full_pipeline === true;
+  const hw = video.hardware;
+
+  const stage = full ? "hw" : hw === false ? "cpu" : "unknown";
+  const label = full ? "Full GPU pipeline"
+    : hw === true ? "On the GPU"
+    : hw === false ? "On the processor"
+    : "Being established";
+  const tone = full || hw === true ? "is-hw" : hw === false ? "is-cpu" : "is-unknown";
+  const detail = full
+    ? "Plex reports decode and encode on the GPU."
+    : hw === true
+      ? "Plex reports the GPU in use and does not say which stages, so neither does this."
+      : hw === false
+        ? "Plex reports a transcoder running without a hardware decoder or encoder."
+        : "Plex has not established a hardware decoder or encoder yet.";
+
+  const node = (key, name, value, state) => `
+    <li class="pipe-node is-${state}">
+      <span class="pipe-k">${esc(key)}</span>
+      <span class="pipe-v">${name}</span>
+      ${value ? `<span class="pipe-n">${value}</span>` : ""}
+    </li>`;
+
+  const codec = (c, r) => [r, c ? c.toUpperCase() : null].filter(Boolean).join(" ") || "—";
+  const source = codec(video.source_codec, video.source_resolution);
+  const target = codec(video.target_codec, video.target_resolution);
+  const inRate = session.source_bitrate_kbps ? esc(npBitrate(session.source_bitrate_kbps)) : "";
+  const outRate = session.stream_bitrate_kbps ? esc(npBitrate(session.stream_bitrate_kbps)) : "";
+
+  // The middle three carry the state; the ends are facts about the file and the stream and
+  // are neither hardware nor software.
+  const middle = full
+    ? [["Decode", "GPU", "hw"], ["Process", "GPU", "hw"], ["Encode", "GPU", "hw"]]
+    : hw === false
+      ? [["Decode", "CPU", "cpu"], ["Process", "CPU", "cpu"], ["Encode", "CPU", "cpu"]]
+      : [["Decode", "Unknown", "unknown"], ["Process", "Unknown", "unknown"], ["Encode", "Unknown", "unknown"]];
+
+  const nodes = [
+    node("Source", esc(source), inRate, "plain"),
+    ...middle.map(([k, v, st]) => node(k, esc(v), "", st)),
+    node("Output", esc(target), outRate, "plain"),
+  ].join(`<li class="pipe-link" aria-hidden="true"></li>`);
+
+  return `
+    <div class="pipe ${tone}">
+      <ol class="pipe-flow">${nodes}</ol>
+      <div class="pipe-verdict">
+        <span class="pipe-badge">${esc(label)}</span>
+        <span class="pipe-why">${esc(detail)}</span>
+        ${video.hardware_detail ? `<span class="pipe-vendor">${esc(video.hardware_detail)}</span>` : ""}
+      </div>
+    </div>`;
+}
+
 function npItem(session, detailed, index) {
   const verdict = npVerdict(session);
   const video = session.video || {};
@@ -8233,6 +8595,7 @@ function npItem(session, detailed, index) {
       <div class="np-verdict ${verdict.tone}"><span class="statedot"></span>${esc(verdict.label)}${note}</div>
       ${software ? `<p class="hint">${software}</p>` : ""}
       ${npProgress(session, index)}
+      ${detailed ? npPipeline(session) : ""}
       ${detailed ? npDetail(session) : ""}
     </div>`;
 }
@@ -8411,6 +8774,8 @@ async function plexActivityTick() {
     npState = { sessions: [], at: performance.now() };
     renderNowPlaying(null, true);
     renderStreams(null, true);
+    renderPlexTelemetry(null, true);
+    renderPlexActivity(true);
     next = NP_LOCKED_MS;
   } else if (document.hidden) {
     next = NP_HIDDEN_MS;
@@ -8428,6 +8793,8 @@ async function plexActivityTick() {
         npState = { sessions: [], at: performance.now() };
         renderNowPlaying(null, true);
         renderStreams(null, true);
+        renderPlexTelemetry(null, true);
+        renderPlexActivity(true);
         next = NP_LOCKED_MS;
       } else if (!response.ok) {
         throw new Error("HTTP " + response.status);
@@ -8439,6 +8806,12 @@ async function plexActivityTick() {
         npState = { sessions: report.sessions || [], at: performance.now() };
         renderNowPlaying(report, false);
         renderStreams(report, false);
+        // Sampled here rather than in the renderer: the renderers are signature-cached and
+        // skip when nothing changed, and a history that only records change is not a
+        // history -- a stream playing steadily for ten minutes would leave two samples.
+        pushPlexSample((report && report.sessions) || []);
+        renderPlexTelemetry(report, false);
+        renderPlexActivity(false);
         npTick();
         next = report.active > 0 ? NP_ACTIVE_MS : NP_IDLE_MS;
       }
@@ -8456,6 +8829,8 @@ async function plexActivityTick() {
       npState = { sessions: [], at: performance.now() };
       renderNowPlaying(unreachable, false);
       renderStreams(unreachable, false);
+      renderPlexTelemetry(unreachable, false);
+      renderPlexActivity(false);
     }
   }
 
