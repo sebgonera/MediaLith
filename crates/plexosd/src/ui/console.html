@@ -476,9 +476,72 @@
   .sev.warning  { color: var(--degraded); }
   .sev.info     { color: var(--accent); }
 
+  /* THE SYSTEM VIEW'S FIRST ROW.
+     Two columns of chosen widths, not three of whatever `auto-fit` produced. What the
+     machine *is* on the left; the two things that are true *about* it, stacked, on the
+     right. Measured before: 343, 131 and 228 px tall with a third of the row empty. */
+  .sysgrid {
+    display: grid;
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+    gap: var(--gap-card);
+    /* Stretch, so the row ends on one line rather than on a step -- 421 against 543 when
+       this was `start`. */
+    align-items: stretch;
+    margin-bottom: var(--gap-section);
+  }
+  /* Except when it is shut. `.grid` uses `align-items: start` for exactly this reason: a
+     folded card stretched to its neighbour's height is a heading with three hundred pixels
+     of nothing under it, which reads as a card that failed to load rather than one somebody
+     closed. Stating it on the folded case alone keeps both properties instead of trading
+     one for the other. */
+  .sysgrid > .card.folded { align-self: start; }
+  .sysrail { display: grid; gap: var(--gap-card); align-content: start; min-width: 0; }
+  /* Margins off on every card in this row, on both sides of it. `.view .card` gives each one
+     a 1rem bottom margin, and a margin sits outside the border -- so the stretched card
+     filled the row and then drew its edge 16 px above the bottom of it, which is a step of
+     exactly the margin and looks like the stretch not working. The grid's `gap` is the only
+     spacing here; anything else is added to it. `.ovgrid` learnt this first. */
+  .sysgrid > .card, .sysrail > .card { margin: 0; }
+  /* One column below the width where two of these stop being readable, and the same
+     breakpoint the summary row uses -- a page with two different ideas of "narrow" steps
+     twice on the way down. */
+  @media (max-width: 78rem) {
+    .sysgrid { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  /* The certificate fingerprint: complete, and no longer the loudest thing on the card. */
+  .fingerprint {
+    margin-top: var(--s-4);
+    padding-top: var(--s-3);
+    border-top: 1px solid var(--border);
+  }
+  .fp-label {
+    font-size: var(--t-micro);
+    text-transform: uppercase;
+    letter-spacing: var(--track-eyebrow);
+    color: var(--muted);
+  }
+  .fp-value {
+    margin-top: var(--s-1);
+    padding: var(--s-2) var(--s-3);
+    background: var(--surface-inset);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    font-size: var(--t-micro);
+    line-height: 1.6;
+    word-break: break-all;
+  }
+  .fp-why { margin-top: var(--s-2); }
+  .fp-why > summary {
+    cursor: pointer;
+    font-size: var(--t-meta);
+    color: var(--muted);
+  }
+  .fp-why > summary:hover { color: var(--ink); }
+
   .grid {
     display: grid;
-    gap: 1rem;
+    gap: var(--gap-card);
     grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
     /* Or a folded card is stretched to the height of the tallest thing beside it, and a
        heading with three hundred pixels of nothing under it reads as a card that failed to
@@ -3944,17 +4007,29 @@ function systemCard(status) {
         <dt>Slot</dt><dd class="mono">${esc(p.slot) || "unknown"}</dd>
         <dt>Version</dt><dd class="mono">${esc(p.version) || "unknown"}</dd>
         <dt>Root hash</dt><dd class="mono">${esc(p.root_hash) || "unknown"}</dd>
-        ${p.tls_fingerprint
-          // The `mono` and the `break-all` are on the fingerprint alone, not on the cell.
-          // They were on the cell, which put the sentence underneath into monospace and let
-          // it break mid-word -- "what your brow / ser shows". Harmless while this card
-          // started folded and the first thing anybody saw when the System view began
-          // opening it, which is the shape this repository keeps recording: a thing that was
-          // correct in the state it was written in.
-          ? `<dt>Certificate</dt><dd><span class="mono" style="word-break:break-all">${esc(p.tls_fingerprint)}</span>
-             <span class="hint">SHA-256 of this console's key. Compare it with what your browser shows for the certificate — they must match. It does not change when the machine's address does.</span></dd>`
-          : ""}
       </dl>
+      ${p.tls_fingerprint
+        // Out of the definition list and into a block of its own. Inside it, the fingerprint
+        // was four wrapped lines of hex followed by four lines of prose, against three
+        // one-line facts -- so the thing this card exists to say, which is what the machine
+        // is, was outweighed four to one by one field. It is still here and still complete;
+        // it is no longer the first thing the eye lands on, and the reason to care about it
+        // is behind a disclosure, because that is a thing to read once.
+        //
+        // The `mono` and the `break-all` are on the value alone. They were on the cell,
+        // which put the sentence underneath into monospace and let it break mid-word --
+        // "what your brow / ser shows".
+        ? `<div class="fingerprint">
+             <div class="fp-label">Console certificate</div>
+             <div class="fp-value mono">${esc(p.tls_fingerprint)}</div>
+             <details class="fp-why">
+               <summary>What this is for</summary>
+               <p class="hint">SHA-256 of this console's key. Compare it with what your
+                  browser shows for the certificate — they must match. It does not change
+                  when the machine's address does.</p>
+             </details>
+           </div>`
+        : ""}
     </div>`;
 }
 
@@ -4990,11 +5065,24 @@ function renderSnapshot() {
 }
 
 /// System: what this image is, and what it is running on.
+/// The System view's first row, composed rather than left to `auto-fit`.
+///
+/// It was three cards in the generic `.grid`, which fits as many equal columns as will go —
+/// and the three had nothing equal about them. On a 1920 screen they came out 343, 131 and
+/// 228 pixels tall, with a third of the row empty to the right of the shortest, because
+/// what is in them is not comparable: an identity, a table with one row in it, and three
+/// checks.
+///
+/// So it is a composition now: what this machine *is* on the left, and the two things that
+/// are true *about* it stacked in a rail on the right. Two columns of deliberate widths
+/// rather than three of accidental ones.
 function systemSection(status) {
-  return `<div class="grid">
+  return `<div class="sysgrid">
       ${systemCard(status)}
-      ${devicesCard(status.gpu || {})}
-      ${healthCard(status)}
+      <div class="sysrail">
+        ${devicesCard(status.gpu || {})}
+        ${healthCard(status)}
+      </div>
     </div>`;
 }
 
