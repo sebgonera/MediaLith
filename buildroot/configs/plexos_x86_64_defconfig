@@ -146,6 +146,45 @@ BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_9XXX=y
 BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_22000=y
 BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_22260=y
 BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_6E=y
+# And everything older than the reference laptop, which is most of the second-hand and
+# mini-PC hardware an appliance like this actually gets installed on. The list above starts
+# at Wireless-AC 9560 because that is what was in the room; a Haswell or Skylake machine
+# with a 7260 or an 8265 in it came up with no wlan0 and nothing to say why.
+#
+#   7260   iwlwifi-7260-*                       Wireless-AC 7260
+#   3160   iwlwifi-3160-*                       Wireless-N 3160
+#   7265   iwlwifi-7265-*                       Wireless-AC 7265
+#   7265D  iwlwifi-7265D-*                      7265D **and 3165** -- see below
+#   3168   iwlwifi-3168-*                       Wireless-AC 3168
+#   8000C  iwlwifi-8000C-*                      Wireless-AC 8260
+#   8265   iwlwifi-8265-*                       Wireless-AC 8265
+#
+# 7265D is the entry that is not guessable and the reason this table exists twice now. A
+# 3165 does not ask for a file named after itself: `iwl3165_2ac_cfg` in the kernel's
+# cfg/7000.c sets `.fw_name_pre = IWL7265D_FW_PRE`, so the card is covered by the 7265D
+# symbol and by nothing else. Read out of the kernel source, not inferred from the number.
+#
+# Cost, measured rather than estimated: 9.6 MiB after install_wifi_firmware prunes to the
+# newest revision of each variant, taking the wireless set from 16.7 MiB to 26.3 MiB
+# against the 32 MiB bound post-image-test.sh asserts. That bound is unchanged and still
+# has room; it is charged four times over (initrd, both UKIs, every bundle), which is why
+# it is worth writing the number down rather than adding families until something fails.
+#
+# One property of these families is new here and the pruning rule now leans on it. For
+# every family previously carried, the kernel's IWL_*_UCODE_API_MIN equals its _MAX, so
+# "keep the newest" and "keep the only one it will ask for" were the same sentence. These
+# are not: 8000C and 8265 accept 22 through 36, 7265D and 3168 accept 22 through 29. Keeping
+# the newest is still right -- the driver requests _MAX and counts *down* to _MIN -- and
+# what has to hold is that the newest file shipped is not above _MAX. Checked against this
+# kernel and this linux-firmware: 7260 and 7265 and 3160 ship revision 17 only, 7265D and
+# 3168 ship 29, 8000C and 8265 ship 34 and 36 and the newest of each is exactly _MAX.
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_7260=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_3160=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_7265=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_7265D=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_3168=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_8000C=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_8265=y
 # Realtek USB Gigabit adapters (r8152). The reference laptop has no built-in Ethernet,
 # and a media server on wireless is not a serious configuration — see the note below.
 BR2_PACKAGE_LINUX_FIRMWARE_RTL_815X=y

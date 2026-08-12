@@ -509,14 +509,21 @@ install_xe_firmware() {
 # the size have to follow them: `install` does by default and `stat` does not.
 #
 # Only the newest API revision of each variant is carried, and that is what makes covering
-# more than one machine affordable. iwlwifi asks for one revision and counts down to its
-# minimum -- and for every family this image enables the kernel's IWL_*_UCODE_API_MIN is
-# equal to its _MAX (6.19.14: 46 for the 9000s, 77 for Qu, QuZ and cc-a0, 89 for the AX210
-# family), so exactly one file per variant is ever opened and every other revision is a
-# megabyte and a half riding in both UKIs and in every update bundle. linux-firmware ships
-# seven revisions of each Qu part and thirteen of ty-a0-gf-a0. Shipping all of them came to
-# 70 MiB and covered neither AX210 nor AX211; shipping the newest comes to 22 MiB and
-# covers both.
+# more than one machine affordable. iwlwifi asks for its IWL_*_UCODE_API_MAX first and
+# counts *down* to its _MIN, taking the first file it finds -- so one file per variant is
+# all any card ever opens, and every other revision is a megabyte and a half riding in both
+# UKIs and in every update bundle. linux-firmware ships seven revisions of each Qu part and
+# thirteen of ty-a0-gf-a0. Shipping all of them came to 70 MiB and covered neither AX210
+# nor AX211; shipping the newest comes to 22 MiB and covers both.
+#
+# The counting-down is the load-bearing half, and it stopped being obvious when the 7000
+# and 8000 families were added. For every family carried before them, _MIN equalled _MAX
+# (6.19.14: 46 for the 9000s, 77 for Qu, QuZ and cc-a0, 89 for the AX210 family), so
+# "newest" and "the only one it will ask for" were the same file and the rule could not be
+# read wrongly. They are not equal for the older parts -- 8000C and 8265 accept 22 to 36,
+# 7265D and 3168 accept 22 to 29 -- and the rule survives that unchanged, because a file
+# below _MAX is still reached on the way down. What it cannot survive is a file *above*
+# _MAX, which is what the assertion below checks.
 #
 # "Newest available" is the right file only for as long as linux-firmware does not run
 # ahead of the kernel. If it ever does -- a revision shipped that this kernel will not ask
