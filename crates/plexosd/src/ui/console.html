@@ -1399,8 +1399,16 @@
        every row and is much the tallest thing here, so without a `1fr` the browser shares
        its height between the rows and opens gaps in the rail that look like missing cards. */
     grid-template-rows: auto auto 1fr;
-    gap: 1rem;
-    align-items: start;
+    gap: var(--gap-card);
+    /* Stretch, not `start`. With `start` neither column knew how tall the other was, so the
+       two ended at whatever height their own content reached and the page finished on a
+       step -- 31 px on the machine this was reported from, and the step changes sides with
+       the viewport, because which column is taller depends on how many columns the activity
+       card's own grid has folded into. Two columns that end on different lines read as a
+       layout accident whichever one is longer.
+       Stretching costs the shorter column some empty space at the foot of its last card,
+       which reads as padding; the step read as something missing. */
+    align-items: stretch;
   }
   /* Margins off, on every grid item and on the card inside the one that is a wrapper. The
      grid's own `gap` is the only spacing here, and anything else is added to it.
@@ -1457,8 +1465,13 @@
   .summary {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: .9rem;
-    margin-bottom: 1.25rem;
+    /* The four bands every card subgrids onto. `grid-auto-rows` repeats the same pattern
+       for the second row of cards at narrower widths, so a two-by-two arrangement shares
+       tracks within each of its rows exactly as the four-across one does. */
+    grid-template-rows: auto auto auto auto;
+    grid-auto-rows: auto auto auto auto;
+    gap: var(--gap-card);
+    margin-bottom: var(--gap-section);
   }
   /* Immediately after the rule it overrides, and that placement is the whole of it: a media
      query adds no specificity, so the first version of this sat further up the sheet and lost
@@ -1469,17 +1482,34 @@
   @media (max-width: 78rem) {
     .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
+  /* FOUR CARDS, ONE ROW, SHARED BANDS.
+     Each card is a subgrid of the row above it, so the four of them share four row tracks:
+     the eyebrow, the verdict, the facts, and the actions. Every card's verdict starts on
+     the same line as its neighbours', and so does every card's button.
+
+     It was a flex column with `margin-top: auto` on the actions, which lines the buttons up
+     and does nothing else -- each card sized its own bands, so Plex (one fact) put all its
+     slack in one gap in the middle while Transcoding (a sentence and two facts) had none.
+     Four boxes that happen to be the same height are not a row; sharing the tracks is what
+     makes it one.
+
+     A browser without `subgrid` ignores the declaration and gets auto rows, which is the
+     behaviour this replaced -- so the floor is the old layout rather than a broken one. */
   .sum {
-    display: flex;
-    flex-direction: column;
-    padding: .95rem 1.05rem 1rem;
-    background: var(--card);
-    border: 1px solid var(--line);
+    display: grid;
+    grid-template-rows: subgrid;
+    grid-row: span 4;
+    padding: var(--pad-card-sm) 1.05rem 1rem;
+    background: var(--surface-card);
+    border: 1px solid var(--border);
     border-left: 4px solid var(--muted);
     border-radius: var(--radius);
     box-shadow: var(--shadow);
     min-width: 0;
   }
+  /* The facts band. Holds the sentence and the list together so the card has one middle
+     rather than two children whose presence varies with what the machine reported. */
+  .sum-meta { min-width: 0; }
   .sum.ready       { border-left-color: var(--ready); }
   .sum.degraded    { border-left-color: var(--degraded); }
   .sum.unavailable { border-left-color: var(--unavailable); }
@@ -1514,8 +1544,17 @@
   .sum dt { color: var(--muted); }
   .sum dd { margin: 0; overflow-wrap: anywhere; }
   .sum .note { margin: .25rem 0 0; font-size: .82rem; line-height: 1.4; color: var(--muted); }
-  /* Pushed to the bottom, so four cards of different heights still line their buttons up. */
-  .sum .act { margin-top: auto; padding-top: .8rem; display: flex; gap: .45rem; flex-wrap: wrap; }
+  /* The actions band. No `margin-top: auto` any more: the shared row track is what lines
+     the buttons up now, and the auto-margin was what let each card decide where its own
+     slack went. `align-self: end` keeps them on the band's floor when one card's actions
+     wrap to two lines and another's do not. */
+  .sum .act {
+    align-self: end;
+    padding-top: var(--s-3);
+    display: flex;
+    gap: var(--s-2);
+    flex-wrap: wrap;
+  }
   .sum .act button, .sum .act a {
     padding: .38rem .7rem;
     font-size: .82rem;
@@ -4656,12 +4695,21 @@ function primaryInterface(net) {
 function summaryCard(id, icon, title, level, state, note, facts, actions) {
   const rows = facts.filter(Boolean)
     .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("");
+  // Always four bands, in this order, whether or not there is anything to put in them.
+  // The row shares its row tracks (see `.sum` in the sheet), and sharing only works if
+  // every card has the same number of them: with three to five children depending on what
+  // the machine happened to report, each card distributed its own slack and Plex -- which
+  // has one fact where Transcoding has three -- opened a hole in its middle while its
+  // neighbours had none. An empty band is a band of zero height, so this costs nothing on
+  // a card that has nothing to say.
   return `<div class="sum ${esc(level)}" id="${esc(id)}">
       <div class="head">${icon}${esc(title)}</div>
       <div class="state">${esc(state)}</div>
-      ${note ? `<p class="note">${esc(note)}</p>` : ""}
-      ${rows ? `<dl>${rows}</dl>` : ""}
-      ${actions ? `<div class="act">${actions}</div>` : ""}
+      <div class="sum-meta">
+        ${note ? `<p class="note">${esc(note)}</p>` : ""}
+        ${rows ? `<dl>${rows}</dl>` : ""}
+      </div>
+      <div class="act">${actions || ""}</div>
     </div>`;
 }
 
