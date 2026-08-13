@@ -454,7 +454,28 @@ pub fn booted_disk(log: &mut dyn FnMut(&str)) -> Option<String> {
     let found = booted_partuuid(EFIVARS_MOUNT);
     let _ = crate::mount::unmount(EFIVARS_MOUNT);
 
-    let partuuid = found?;
+    // The one branch that used to be silent, and it is the branch that changes how every
+    // partition after it gets chosen. `found?` returned `None` here without a word, so a
+    // machine that fell back to resolving by label looked exactly like one that had asked
+    // and been answered — the boot log went straight from the banner to step 1. That is
+    // fine on a machine with one disk, which is what it was written for, and it is how an
+    // hour went into a two-disk boot that mounted another installation's `/usr`.
+    //
+    // `systemd-boot` sets this variable. Nothing else does, so its absence is a statement
+    // about what the firmware loaded rather than a fault: picking a UKI straight out of a
+    // firmware boot menu skips the boot loader entirely, and skips this with it.
+    let Some(partuuid) = found else {
+        log(
+            "systemd-boot left no LoaderDevicePartUUID, so which disk the firmware booted \
+             is unknown and partitions are resolved by label alone. That is correct on a \
+             machine with one MediaLith disk and ambiguous on a machine with two. Remedy: if \
+             this machine has a second one attached, boot the USB *device* from the \
+             firmware menu rather than a UKI on it — choosing the file directly skips the \
+             boot loader, and the boot loader is what answers this question.",
+        );
+        return None;
+    };
+
     match disk_with_partuuid(&partuuid) {
         Ok(disk) => {
             log(&format!(
@@ -710,5 +731,94 @@ mod tests {
         assert_eq!(on("sda").as_deref(), Some("sda2"));
         assert_eq!(on("nvme0n1").as_deref(), Some("nvme0n1p2"));
         assert_eq!(on("vdb"), None, "and a disk that has none says so");
+    }
+
+    /// An `efivarfs` of this test's own. Rust runs tests as threads in one process, so a
+    /// fixed path is one test deleting what another is reading.
+    fn efivars(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("plexos-efivars-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    /// An EFI variable as `efivarfs` presents one: four bytes of attributes, then UTF-16.
+    ///
+    /// `0x06` is `BOOTSERVICE_ACCESS | RUNTIME_ACCESS` and no `NON_VOLATILE`, which is what
+    /// `systemd-boot` sets — the variable is written afresh on every boot and is meant not
+    /// to survive one.
+    fn efi_variable(value: &str) -> Vec<u8> {
+        let mut raw = vec![0x06, 0x00, 0x00, 0x00];
+        for unit in value.encode_utf16() {
+            raw.extend_from_slice(&unit.to_le_bytes());
+        }
+        // The trailing NUL a firmware string carries, which the reader has to survive.
+        raw.extend_from_slice(&[0x00, 0x00]);
+        raw
+    }
+
+    #[test]
+    fn the_booted_partition_is_read_out_of_the_bytes_efivarfs_presents() {
+        let dir = efivars("reads-the-guid");
+        fs::write(
+            dir.join(LOADER_DEVICE_PART_UUID),
+            efi_variable("1467b470-3fdf-4ad3-a2a1-d50d278d33fc"),
+        )
+        .expect("a variable to read");
+
+        assert_eq!(
+            booted_partuuid(&dir.to_string_lossy()).as_deref(),
+            Some("1467b470-3fdf-4ad3-a2a1-d50d278d33fc"),
+            "the attribute prefix is skipped and the UTF-16 padding dropped"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_firmware_that_shouts_the_guid_is_understood_anyway() {
+        let dir = efivars("case-insensitive");
+        fs::write(
+            dir.join(LOADER_DEVICE_PART_UUID),
+            efi_variable("1467B470-3FDF-4AD3-A2A1-D50D278D33FC"),
+        )
+        .expect("a variable to read");
+
+        // Compared against sysfs `PARTUUID`, which is lower case. A GUID that differs only
+        // in case is the same partition, and matching them as written would mean falling
+        // back to labels on a machine that answered the question perfectly.
+        assert_eq!(
+            booted_partuuid(&dir.to_string_lossy()).as_deref(),
+            Some("1467b470-3fdf-4ad3-a2a1-d50d278d33fc")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_variable_is_no_answer_rather_than_a_wrong_one() {
+        let dir = efivars("absent");
+        assert_eq!(
+            booted_partuuid(&dir.to_string_lossy()),
+            None,
+            "booted by something that is not systemd-boot, which is not a failure"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_truncated_variable_is_refused_rather_than_half_read() {
+        let dir = efivars("truncated");
+        fs::write(
+            dir.join(LOADER_DEVICE_PART_UUID),
+            efi_variable("1467b470-3fdf-4ad3"),
+        )
+        .expect("a variable to read");
+
+        // The length check is the whole of this. A half-read GUID matches no partition, so
+        // the honest outcome is "I could not ask" -- and the caller falls back to labels,
+        // which at least has a defined meaning. Returning the fragment would send
+        // `disk_with_partuuid` looking for a disk that cannot exist and turn a fallback
+        // into an error about hardware.
+        assert_eq!(booted_partuuid(&dir.to_string_lossy()), None);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
