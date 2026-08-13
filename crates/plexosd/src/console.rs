@@ -3066,6 +3066,32 @@ mod tests {
     }
 
     #[test]
+    fn no_refusal_sends_somebody_to_a_control_this_page_does_not_have() {
+        // Seven refusals told the reader to "Enter it in the Device token box at the top of
+        // this page". That was true until the console became an application shell, at which
+        // point the token moved behind the lock in the header -- and the sentence survived
+        // in seven places while being corrected in one. Reported from a machine by somebody
+        // who had just reinstalled, so `/var` was empty, the token was new, and every
+        // mutating route refused: the one moment the remedy is read is the one moment it
+        // pointed at nothing.
+        //
+        // A wrong remedy is worse than none. It is already in the trap list about `EACCES`
+        // and `EADDRINUSE`; this is the same rule applied to a control rather than an error.
+        assert!(
+            !PAGE.contains("Device token box"),
+            "the page has no box called that. The token is entered behind #admin-lock in \
+             the header, and a refusal naming somewhere else sends a reader looking for a \
+             control that was removed."
+        );
+        // Pinned to the control rather than to the sentence, because pinning wording is
+        // what let the old sentence survive a redesign that was about exactly it.
+        assert!(
+            PAGE.contains("id=\"admin-lock\""),
+            "and the control the refusals name has to be the one the page actually has"
+        );
+    }
+
+    #[test]
     fn every_element_the_script_reaches_for_exists_in_the_markup() {
         // Written after shipping a section whose markup was never added. The script called
         // getElementById for it, got null, threw, and the throw was swallowed by the poll's
