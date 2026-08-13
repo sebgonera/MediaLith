@@ -79,6 +79,28 @@ list is about the system. Check against this before committing; it is short on p
 
 ## Where things stand
 
+**The reference laptop, as of 2026-08-13 15:30.** Running `0.1.0.202608131254` on **slot b**,
+healthy, all three gate checks passing, reached at `192.168.2.190` over **wireless on WPA3**
+(`GTFO`, 6 GHz). It boots from the USB-enclosed Kingston; **the internal disk was removed**
+after a two-disk boot mounted the other installation's `/usr` and failed dm-verity — see the
+label-ambiguity traps. Plex is provisioned, signed in, and has transcoded two streams.
+
+`0.1.0.202608131316` is built and signed (`plexos-signing-dev-2`, channel `stable`) and was
+being served from the build host at `http://192.168.2.123:8080/medialith-update`. **That
+server does not survive the build host rebooting**, so re-serve it with
+`tools/publish-update.sh output-generic 8080` before pointing the appliance at it again.
+
+Two things are written, tested and **not yet run on hardware**: switching wireless networks
+from the console page, and the return to the previous network after a join fails. Both need
+somebody at the machine to try a network switch. Everything else from that day's work has
+been seen working on the appliance.
+
+The outstanding console design work is Storage, Terminal, the responsive audit at
+1920/1440/1280 and narrow, and a written report — the Network and Plex views are done.
+`tools/preview-console.py` renders the page against the live appliance, with canned replies
+for states it is not in; a change to `console.html` is not finished until that render has
+been looked at.
+
 | Component | State |
 | --- | --- |
 | `crates/plexos-types` | Done. Formats and the layout emitter and the GPT writer, 65 tests. The ADR-0006 manifest schema was reconciled with the artefacts MediaLith actually builds — one UKI per slot, and a `release` string `OsVersion` cannot express — which was the last moment that was an edit rather than a migration. |
@@ -329,6 +351,21 @@ afterwards.
 
 The trap that came out of the last one is in the list below and is the one worth knowing: a
 failed update raises the anti-rollback floor before anyone knows it failed.
+
+**And the appliance is on WPA3 (2026-08-13).** `/api/wifi` reports `ssid: GTFO`,
+`frequency_mhz: 6175`, `band: 6 GHz` — a successful **SAE** association, on a Wi-Fi 7
+network the router publishes across 2.4, 5 and 6 GHz with MLO and `MFP-required`. Every
+previous attempt in this project had ended at `key mgmt mismatch`, so this is the first
+one. The reading comes from `iw dev wlan0 link`, parsed against a capture in
+`tools/captures/iw-link-wlan0.txt`, and the console shows the name, band and signal in the
+Network view and the Overview tile.
+
+Four wireless defects were fixed getting there, all found on the machine and all in the
+trap list. The one worth carrying: **asking a supplicant to stop is not the same as it
+having stopped**, so the second network of a boot could never be joined. What is still
+**unproven**: that switching networks *from the console page* now works end to end, and
+that a failed join puts the machine back on the network it was on — the repair exists and
+has tests, and nothing has yet made it run on hardware.
 
 **And nothing runs unattended any more.** `0.1.0.202607301247` — the first release
 installed through the signed path end to end — boots with `plexos-init` still alive as
@@ -794,6 +831,15 @@ and its certificate — sign with the second one.
   functionally identical to the one it was running: version and slot changed, the fixes
   did not. `make <pkg>-rebuild` forces the re-sync. Check by grepping
   `output/build/<pkg>/` for something the change added, not by reading the script.
+  **And `-rebuild` is per package, so a change in a *shared* crate needs one per consumer.**
+  Walked into on 2026-08-13: `plexos-sys/src/device.rs` changed, `plexosd-rebuild` ran, the
+  image built — and `plexos-init` still carried the previous `device.rs`, so the image would
+  have shipped **PID 1 without the fix** under a new stamp. The obvious consumer is not the
+  only one. Compare the changed file against *every* package tree before signing anything:
+  `for d in output-*/build/plexos*-0.1.0; do sha256sum <file> "$d/<file>"; done`. A package
+  whose own crate is unchanged and which does not depend on the changed one is fine even
+  when its copy differs — the rsync gives every package a copy of the whole repository and
+  `plexos-gpu` compiles almost none of it. Check `Cargo.toml` before rebuilding for nothing.
 - **That same rsync copies the whole repository, and its exclude list named exactly the
   build directories that existed when it was written.** `--exclude=output` was every
   Buildroot output tree there had ever been. The CPU-baseline phase needed two isolated
