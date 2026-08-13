@@ -1,0 +1,30 @@
+# `iw dev wlan0 link` from the appliance, associated with a WPA3 network on 5 GHz.
+#
+# Captured 2026-08-13 on the reference laptop's AX211, running MediaLith
+# 0.1.0.202608131044. The network name and both addresses are changed; every field, its
+# spelling and its order are exactly as `iw` printed them.
+#
+# Two details here that an invented fixture would have got wrong, and both are the reason
+# this file exists rather than a guess:
+#
+#   * `freq` carries a decimal point -- `5540.0`, not `5540`. The scan parser already
+#     splits on the point for this reason; the link parser has to as well.
+#   * `signal` is `-57 dBm`, with the unit in the value. Parsing the whole rest of the
+#     line as a number yields nothing.
+#
+# The indentation `iw` emits is a tab. It survived neither the terminal nor the paste this
+# was captured through, so it is spaces here -- which is precisely why `parse_link` trims
+# each line and matches a prefix rather than depending on the leading whitespace. A parser
+# that anchored on "\t" would pass against this file and fail against the program.
+
+Connected to 32:70:4e:c9:b6:7c (on wlan0)
+    SSID: HomeNetwork
+    freq: 5540.0
+    RX: 844853730 bytes (585641 packets)
+    TX: 799617865 bytes (57570 packets)
+    signal: -57 dBm
+    rx bitrate: 720.6 MBit/s 80MHz HE-MCS 7 HE-NSS 2 HE-GI 0 HE-DCM 0
+    tx bitrate: 720.6 MBit/s 80MHz HE-MCS 7 HE-NSS 2 HE-GI 0 HE-DCM 0
+    bss flags: short-slot-time
+    dtim period: 3
+    beacon int: 100

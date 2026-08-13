@@ -616,6 +616,25 @@ and its certificate — sign with the second one.
   for both, and they take opposite remedies. Only `IFF_UP` in sysfs `flags` separates
   them. A diagnostic that reports `operstate` alone will send someone to check a cable
   that was never the problem.
+- **Asking a program to stop is not the same as it having stopped, and the second wireless
+  network of a boot is where that gets discovered.** `wpa_cli terminate` returns when the
+  running supplicant *accepts* the command; the exit and the unlinking of
+  `/run/wpa_supplicant/wlan0` follow it. `connect` sent the terminate and started the next
+  supplicant on the line after, which loses the race every time: the new one finds the
+  socket bound, prints `ctrl_iface exists and seems to be in use - cannot override it`, and
+  exits 255. Found on the appliance the first time somebody moved between two networks —
+  joining one worked perfectly, and every join after it failed. **The capture contained its
+  own diagnosis and it is worth knowing the shape**: the *last* line was the old
+  supplicant's `nl80211: deinit ifname=wlan0`, printed after the new one had already given
+  up, so the ordering in the log is the whole answer. Wait for the thing to be gone rather
+  than for the request to be delivered.
+  The half hiding behind it was worse. The association timeout ended in `child.kill()`, and
+  a supplicant killed with SIGKILL never unlinks its socket — so one wrong passphrase left
+  a file that nothing on the machine would ever remove, and wireless was unjoinable until a
+  reboot. A stale socket and a live one look identical on disk; only asking whether anything
+  answers on it tells them apart, and the two take opposite remedies. `release_supplicant`
+  is one place that guarantees a clean start, which beats every failure path remembering to
+  tidy up after itself.
 - **The running root contains only what `plan.rs` puts there.** It is a tmpfs assembled
   from nothing, so directories present in the Buildroot rootfs — `/tmp` among them —
   never reach the booted system. `/tmp` was missing for the whole life of the project
@@ -974,6 +993,21 @@ and its certificate — sign with the second one.
 - **"I do not know" and "nothing is excluded" are the same value and opposite meanings.**
   `running_disk` returning `None` had to become a refusal of every disk rather than an
   install with nothing ruled out.
+- **A fallback that changes how everything downstream is chosen has to say that it
+  happened.** `booted_disk` logs when `efivarfs` will not mount and logs when the GUID
+  matches no partition — but the branch where `systemd-boot` left no `LoaderDevicePartUUID`
+  at all was `found?`, which returns `None` without a word. So a machine that had fallen
+  back to resolving partitions by label looked exactly like one that had asked and been
+  answered: the boot log went from the banner straight to step 1. That silence cost an hour
+  on a two-disk boot that mounted the *other* installation's `/usr` and died with
+  `metadata block 1 is corrupted` — which is what verifying one installation's `/usr`
+  against another's hash tree looks like, and says nothing about disks.
+  The variable is absent for a reason worth knowing: **`systemd-boot` is what sets it**, so
+  picking a UKI directly out of a firmware boot menu skips the boot loader and skips the
+  answer with it. Booting the *device* rather than the file is what keeps the question
+  answerable. `booted_partuuid` also had no test at all, which is how a parser of firmware
+  bytes — a four-byte attribute prefix, UTF-16, a length check — came to decide which disk
+  the whole system is assembled from on nothing but inspection.
 - **The bootloader spends a try *to* boot an entry, so the entry running can already be
   exhausted.** The gate inferred which entry had booted from the shape of the set — none
   counting plus a permanent one present meant the permanent one was running — and that is
