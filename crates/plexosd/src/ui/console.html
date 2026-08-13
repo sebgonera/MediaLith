@@ -7237,11 +7237,20 @@ function renderUpdate(report) {
     <dl>
       <dt>Current</dt><dd class="mono">${esc(report.running || "unknown")} <span class="hint">on slot ${esc(report.slot || "?")}</span></dd>
       <dt>Channel</dt><dd>${esc(found.channel || "stable")}</dd>
-      <dt>Last checked</dt><dd>${esc(lastCheckedWords(found))}</dd>
+      ${/* Only when a service has actually checked something. It read "Last checked an hour
+            ago" on an appliance with no update service configured, one line above a
+            sentence saying it never looks for one -- and directly after somebody had
+            checked an address by hand, which this row is not about either. "last checked
+            never" is the same row failing in the other direction: a fact about a thing
+            that has never run, in the place a reader looks for the answer. */
+        found.checked_seconds_ago === null || found.checked_seconds_ago === undefined
+          ? ""
+          : `<dt>Update service</dt><dd>last checked ${esc(lastCheckedWords(found))}</dd>`}
       ${report.gate ? `<dt>This boot</dt><dd>${esc(report.gate)}</dd>` : ""}
       ${signedBy}
     </dl>
-    ${availabilityMarkup(found, report)}
+    ${addressVerdict(report)}
+    ${availabilityMarkup(found, report, Boolean(addressVerdict(report)))}
     ${rolledBack}
     ${developmentKey ? `<p class="hint">${developmentKey}</p>` : ""}
     ${slotsMarkup(report)}
@@ -7299,13 +7308,76 @@ function lastCheckedWords(found) {
  * accident is "up to date" for a check that failed: an appliance being handed manifests it
  * cannot authenticate would then look exactly like an appliance with nothing to do.
  */
-function availabilityMarkup(found, report) {
+/* What checking an *address* found, which is a different question from what the update
+   service offers and used to have no answer on this page at all.
+
+   The two paths do not meet: the service fills `report.availability`, which
+   `availabilityMarkup` draws; checking an address runs the update job, which sets
+   `report.available` and `report.detail` and leaves `phase` at `idle`. The progress block
+   below renders only while busy, failed or ready — so a successful check wrote its answer
+   into a field nothing drew, and the card carried on saying "System updates are not
+   configured, so this appliance never looks for one" directly underneath. Every word of
+   that is true and none of it answers "is there an update".
+
+   Reported from a machine, by somebody who had pressed the button and could not tell
+   whether there was an update or not. */
+function addressVerdict(report) {
+  const phase = report.phase || "idle";
+  if (["checking", "downloading", "writing", "activating", "failed"].includes(phase)) return "";
+  // Written and waiting for a restart: the lifecycle below is the thing that says so, and a
+  // second box repeating it would be two answers to one question.
+  if (report.staged) return "";
+  const offered = report.available;
+  if (!offered) return "";
+
+  // The case that is not a failure and not an update, and the one this project has already
+  // been caught giving the same words as "up to date": an address that answers perfectly
+  // with the release the machine is already on.
+  if (offered === (report.running || "")) {
+    return `<div class="progress">
+        <span class="now">No newer release at that address</span>
+        <div>It offers <span class="mono">${esc(offered)}</span>, which is what this
+             machine is already running. Nothing to install.</div>
+      </div>`;
+  }
+  return `<div class="progress">
+      <span class="now">Update available at that address</span>
+      <div class="mono">${esc(offered)}</div>
+      <div>Nothing has been written yet. <strong>Install from this address</strong> in
+           the section below writes it to the inactive slot and restarts into it on
+           trial.</div>
+    </div>`;
+}
+
+function availabilityMarkup(found, report, answered) {
   const busy = ["checking", "downloading", "writing", "activating"].includes(report.phase || "idle");
   const status = found.status || "never_checked";
   const notes = (found.notes || []).length
     ? `<ul class="notes">${(found.notes || []).map(n => `<li>${esc(n)}</li>`).join("")}</ul>`
     : "";
   const checkButton = `<button id="update-check" class="ghost" ${busy ? "disabled" : ""}>Check now</button>`;
+
+  // Demoted to one line whenever an address has just answered, for every state that is
+  // *about the absence of a service* rather than news from one. As headings they sit
+  // exactly where the answer belongs and read as the answer: "this appliance never looks
+  // for one" under a check that had just looked, and "No check has been made yet" with a
+  // Check now button directly under a verdict saying one had. Both were found by looking
+  // at a rendered page, and the second one only after the first was fixed.
+  // Whether a service exists is `source`, not `status`. The appliance reports
+  // `never_checked` with an empty source on a machine that has no update service at all --
+  // so a message keyed on the status calls it "the configured update service" when nothing
+  // is configured, and the default branch below says "no check has been made yet" as though
+  // there were something to check. Both are the same mistake as the one this card was
+  // reported for: a true sentence in the place the answer belongs.
+  const configured = Boolean(found.source);
+
+  if (answered && (status === "not_configured" || status === "never_checked")) {
+    return `<p class="hint">That was a check of the address below, by hand. ${
+      configured
+        ? "The update service this appliance is set to has not been asked yet."
+        : "No update service is configured, so this appliance never looks on its own — set one in Settings if you want it to."}
+      ${configured ? checkButton : ""}</p>`;
+  }
 
   if (status === "not_configured") {
     return `
@@ -7351,8 +7423,17 @@ function availabilityMarkup(found, report) {
     return `<p>MediaLith is up to date.</p><div class="row">${checkButton}</div>`;
   }
 
+  // Nothing has been checked. Which of the two reasons it is decides what a person can do
+  // about it, and the old wording gave neither: "No check has been made yet" beside a
+  // Check now button, on a machine with nothing to check.
+  if (!configured) {
+    return `
+      <p>No update service is configured, so this appliance never looks for one.</p>
+      <p class="hint">Set one in Settings, or use the address below to update from a build
+         host by hand.</p>`;
+  }
   return `
-    <p>No check for a MediaLith release has been made yet.</p>
+    <p>The update service has not been asked yet.</p>
     <div class="row">${checkButton}</div>`;
 }
 
