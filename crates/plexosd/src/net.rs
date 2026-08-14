@@ -103,7 +103,7 @@ const PROGRAM_DIRS: [&str; 4] = ["/sbin", "/usr/sbin", "/bin", "/usr/bin"];
 
 /// Finds `program` as an absolute path, ignoring `PATH` entirely.
 ///
-/// See [`PROGRAM_DIRS`] for why. Returns `None` when it is in none of them, which is an
+/// See `PROGRAM_DIRS` for why. Returns `None` when it is in none of them, which is an
 /// image problem rather than a runtime one — busybox is supposed to provide both.
 pub fn resolve(env: &impl Environment, program: &str) -> Option<String> {
     PROGRAM_DIRS.iter().find_map(|dir| {
@@ -500,7 +500,7 @@ pub fn wait_for_link(
 pub const LOOPBACK: &str = "lo";
 /// Runs `ip` with the given arguments against the real machine.
 ///
-/// Resolved through [`PROGRAM_DIRS`] like everything else here, because busybox installs
+/// Resolved through `PROGRAM_DIRS` like everything else here, because busybox installs
 /// `ip` into `/sbin` and this process has no `PATH`. `ip` is silent when it succeeds, so
 /// any output at all is it objecting and is returned as the error — a caller that only
 /// checked the exit status would report success for a refused address.

@@ -34,5 +34,14 @@ jobs:
 
       # plexos-types encodes formats that ship to devices and can never be changed.
       # A compile warning here is a format bug in waiting.
+      #
+      # RUSTDOCFLAGS is set here and not in the job's `env`, because the `RUSTFLAGS` there
+      # is read by rustc and never by rustdoc — so for the life of this file the step was
+      # called "Documentation builds clean" and tolerated whatever rustdoc had to say. It
+      # had accumulated nineteen warnings, all of them broken intra-doc links, and the name
+      # of the step is the reason nobody looked. A check that cannot fail is worse than no
+      # check, because it is counted.
       - name: Documentation builds clean
         run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings

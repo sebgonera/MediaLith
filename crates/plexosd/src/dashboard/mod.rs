@@ -35,7 +35,7 @@
 //! # It stops writing so the panel can go dark
 //!
 //! A frame identical to the one before it is not written at all, and after
-//! [`QUIET_AFTER`] with nobody touching the keyboard nothing is written even if it changed.
+//! `QUIET_AFTER` with nobody touching the keyboard nothing is written even if it changed.
 //! Both are for one reason: the kernel's blank timer is reset by *any* output, so a screen
 //! that repaints once a second is a laptop panel lit all night — which `plexos-init`'s
 //! screen module exists to prevent and which this would silently have undone.
@@ -104,7 +104,7 @@ const NOTICE: Duration = Duration::from_secs(8);
 /// this they would sit in the middle of the drawing until something else happened to change
 /// a frame, which on a healthy machine can be a minute.
 ///
-/// It does not undo the silence: nothing is painted at all once [`QUIET_AFTER`] has passed,
+/// It does not undo the silence: nothing is painted at all once `QUIET_AFTER` has passed,
 /// so the kernel's blank timer still runs out and the panel still powers down. This only
 /// bounds how long a stray line can sit on a screen somebody is standing at.
 const REPAINT_EVERY: Duration = Duration::from_secs(30);

@@ -56,7 +56,7 @@
 //! credential. Joining one is what would close it.
 //!
 //! Moving *between* two networks is what the first session found, and it is the reason
-//! [`release_supplicant`] exists — the second join failed outright, because asking the
+//! `release_supplicant` exists — the second join failed outright, because asking the
 //! first supplicant to stop is not the same as it having stopped.
 
 use std::io;
@@ -888,7 +888,7 @@ const ASSOCIATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25
 ///
 /// # Errors
 /// Fails if the programs are missing, if the supplicant will not start, or if it has not
-/// associated within [`ASSOCIATE_TIMEOUT`].
+/// associated within `ASSOCIATE_TIMEOUT`.
 pub fn connect(
     env: &impl Environment,
     name: &str,
@@ -1760,7 +1760,7 @@ mod tests {
     ///
     /// [`Fixture`] cannot express this. Its `run` discards the arguments and answers with
     /// one canned string per program, so `terminate` and `ping` are indistinguishable to
-    /// it — and telling those two apart is the entire decision [`release_supplicant`]
+    /// it — and telling those two apart is the entire decision `release_supplicant`
     /// makes.
     struct Radio {
         /// Whether anything answers on the control socket.
