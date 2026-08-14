@@ -1645,6 +1645,25 @@
     font: inherit;
     font-size: var(--t-body);
   }
+  /* Sixteen pixels on a touch screen, and it is not a taste decision.
+     iOS Safari zooms the viewport in whenever a focused input has a computed font size
+     below 16 px, and does not zoom back out afterwards. Every field here was --t-body,
+     which is .9rem — 14.4 px — so the QR pairing flow magnified itself the moment it
+     landed: scan the code, the page opens, `openAdmin` focuses the token field, Safari
+     zooms, and the console is suddenly unreadable until somebody pinches out. Reported
+     from a phone as "I have to shrink the whole thing".
+     A literal 16px rather than a rem, because the threshold Safari applies is absolute
+     and a smaller root font would put a rem back under it. `pointer: coarse` so the
+     desktop keeps the smaller control type it was designed with.
+     The other way to stop the zoom is `maximum-scale=1` on the viewport, which works by
+     taking pinch-zoom away from everybody. That is not a fix, it is the same bug aimed at
+     people who need to magnify. */
+  @media (pointer: coarse) {
+    input[type="text"], input[type="password"], input[type="number"], select, textarea {
+      font-size: 16px;
+    }
+  }
+
   textarea { padding: .5rem .7rem; line-height: 1.5; }
   input:hover, select:hover { border-color: var(--muted); }
   input[disabled], select[disabled] { opacity: .55; cursor: default; }
@@ -2802,6 +2821,17 @@
     /* Full width, so nothing is a half-row target next to something else. */
     #token-card .row { flex-direction: column; align-items: stretch; }
     #token-card .row > button, #token-card input { width: 100%; }
+    /* And the flex basis has to be reset with the direction, which is the part that was
+       missed. `.row > input` is `flex: 1 1 20rem`, written for a row: 20rem is a width the
+       field may grow past. Turn the container to `column` and the same basis is a
+       *height*, so the recovery-code field rendered 320 px tall — 20rem exactly, measured
+       — with the placeholder floating in the middle of an empty box. It is the only field
+       in a card whose rows flip direction, which is why this is the only place it showed.
+       A flex basis means a different axis in each direction; a rule that changes the
+       direction owns the basis too. */
+    #token-card .row > input[type=text], #token-card .row > input[type=password] {
+      flex: 0 0 auto;
+    }
     /* The update lifecycle. `nowrap` keeps a pill from breaking mid-phrase on a screen with
        room, and on a 390 px one the longest of them -- "4b. Three bad boots -> back to the
        other slot, with nobody present" -- pushed the whole page 54 px sideways. Measured
@@ -5254,7 +5284,11 @@ function openAdmin(open) {
   const card = document.getElementById("token-card");
   card.hidden = !open;
   document.getElementById("admin-lock").setAttribute("aria-expanded", open ? "true" : "false");
-  if (open) document.getElementById("token").focus();
+  // `preventScroll`, because the panel is `position: fixed` and is already fully on
+  // screen. Without it the browser scrolls the *document* to bring a fixed element into a
+  // view it never left, which on a phone slides the page out from under the sheet and
+  // reads as the panel having jumped.
+  if (open) document.getElementById("token").focus({ preventScroll: true });
 }
 
 /**

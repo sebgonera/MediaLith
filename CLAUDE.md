@@ -728,6 +728,22 @@ and its certificate — sign with the second one.
   and there is no `ntfsprogs`; `mke2fs`, `mkfs.xfs` and `mkfs.erofs` are the whole set. So
   ADR-0021 reads a Windows disk and cannot make one, which is the correct division and is
   not what somebody asking for "an NTFS partition" expects to hear.
+- **A flex basis means a different axis in each direction, so a rule that flips the
+  direction owns the basis too.** `.row > input` is `flex: 1 1 20rem`, written for a row
+  where 20 rem is a width the field may grow past. The admin panel's narrow-screen override
+  turns its rows to `flex-direction: column`, and the same basis is then a **height**: the
+  recovery-code field rendered exactly 320 px tall — 20 rem, measured to the pixel — with
+  the placeholder floating in the middle of an empty box. It is the only field in a card
+  whose rows flip direction, which is why it was the only place it showed, and it was
+  reported from a phone as the panel being unreadable rather than as a tall input.
+- **A focused input under 16 px makes iOS Safari zoom the page in, and it does not zoom
+  back out.** Every field here was `--t-body`, which is 14.4 px, and the QR pairing flow
+  focuses the token field the moment it lands — so scanning the code magnified the console
+  and left it that way. The remedy is 16 px on `pointer: coarse`, as a literal rather than
+  a rem because the threshold Safari applies is absolute. **Not** `maximum-scale=1`, which
+  stops the zoom by taking pinch-zoom away from the people who need it most. Neither half
+  is checkable from this repository: headless Firefox reports `pointer: fine`, so the rule
+  does not even apply in a preview, and the zoom needs an actual iPhone.
 - **A screenshot cannot tell you a table is too wide, and "it overflows" is not actionable.**
   At 390 px the Storage view's page overflow measured **zero** — every table scrolls inside
   its own container, correctly — while the primary button on each row sat off screen until
