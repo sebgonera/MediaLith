@@ -41,6 +41,7 @@ kind of decision that is embarrassing to get wrong quietly.
 | [0018](0018-live-plex-activity.md) | Live Plex activity, and the credential that makes it possible | Accepted |
 | [0019](0019-physical-pairing.md) | Pairing a browser from the machine's own screen | Accepted |
 | [0020](0020-update-channels-and-discovery.md) | Update channels, discovery, and a static update service | Accepted |
+| [0021](0021-library-on-a-local-disk.md) | A media library on a disk in the machine | Accepted |
 
 ## Template
 

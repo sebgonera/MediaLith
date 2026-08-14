@@ -74,8 +74,14 @@ pub struct Facts {
     pub reachable: bool,
     /// Whether a configuration file has ever been written (ADR-0008).
     pub configured: bool,
-    /// Whether any media share is configured.
-    pub has_shares: bool,
+    /// Whether the library has been pointed at anything at all.
+    ///
+    /// Either kind counts. It was `has_shares` and asked only about a NAS, which was the
+    /// arrangement of the machine this was written on and is not the common one: somebody
+    /// booting this from a stick has their films on the computer's own Windows disk or on
+    /// a drive they plug in, and telling them they still have no library because they
+    /// have no server would be a step that cannot be completed by the thing they did.
+    pub has_library: bool,
     /// What Plex is doing.
     pub plex: Plex,
 }
@@ -115,7 +121,7 @@ impl Facts {
             // address and reboots.
             reachable: true,
             configured: Path::new(paths::CONFIG_FILE).exists(),
-            has_shares: !crate::shares::states().is_empty(),
+            has_library: !crate::shares::states().is_empty() || !crate::disks::load().is_empty(),
             plex: Plex {
                 installed: crate::plex::is_provisioned(Path::new(paths::PLEX_MOUNT)),
                 answering,
@@ -164,11 +170,15 @@ pub fn steps(facts: Facts) -> Vec<Step> {
         Step {
             id: "shares",
             title: "Add the media",
-            detail: if facts.has_shares {
-                "A share is configured.".to_owned()
+            detail: if facts.has_library {
+                "The library is pointed at somewhere.".to_owned()
             } else {
-                "Add the network share your films and programmes are on, under Media \
-                 shares. Skip this if the library is on a disk inside the machine."
+                // The old wording ended "skip this if the library is on a disk inside the
+                // machine", which was honest while there was no way to use one and became
+                // advice to skip the step that now does the thing.
+                "Point Plex at your films and programmes, in Storage. They can be on a \
+                 drive in this machine — including the Windows partition of its own \
+                 disk, or a USB drive you plug in — or on a network share."
                     .to_owned()
             },
             state: State::Later,
@@ -222,7 +232,7 @@ fn mark(steps: &mut [Step], facts: Facts) {
     let done = |id: &str| match id {
         "network" => facts.reachable,
         "identity" => facts.configured,
-        "shares" => facts.has_shares,
+        "shares" => facts.has_library,
         "plex" => facts.plex.installed,
         // Not `answering`. That made this step complete itself the moment Plex opened its
         // port, which is a step that cannot fail and therefore checks nothing -- and it
@@ -288,7 +298,7 @@ mod tests {
         Facts {
             reachable: true,
             configured: false,
-            has_shares: false,
+            has_library: false,
             plex: Plex {
                 installed: false,
                 answering: false,
@@ -301,7 +311,7 @@ mod tests {
         Facts {
             reachable: true,
             configured: true,
-            has_shares: true,
+            has_library: true,
             plex: Plex {
                 installed: true,
                 answering: true,
@@ -371,7 +381,7 @@ mod tests {
             let facts = Facts {
                 reachable: true,
                 configured: true,
-                has_shares: true,
+                has_library: true,
                 plex: Plex {
                     installed,
                     answering: true,
@@ -391,7 +401,7 @@ mod tests {
         // A library can be on a disk inside the machine, and a machine can keep the name it
         // was given. Neither absence means the appliance is unfinished.
         let mut facts = finished();
-        facts.has_shares = false;
+        facts.has_library = false;
         facts.configured = false;
 
         let steps = steps(facts);

@@ -936,6 +936,16 @@ else
     builtin_or_bad X86_PKG_TEMP_THERMAL "no x86_pkg_temp zone, so metrics falls back to acpitz -- a chassis sensor reported as the processor die, with nothing failing and nothing logged"
     builtin_or_bad EFIVAR_FS "PID 1 cannot read LoaderDevicePartUUID, so a machine with two MediaLith disks goes back to resolving partitions by label, which is a coin toss"
 
+    # The filesystems a library actually arrives on. Each of these is a tristate, and
+    # CONFIG_MODULES is on -- so kconfig has a third answer available for every one of
+    # them, and =m here is a filesystem that is silently gone in an image with no
+    # modprobe. That is the eleven-options-became-=m trap, pointed at the feature a
+    # person notices immediately.
+    builtin_or_bad NTFS3_FS "the Windows partition on the internal disk cannot be opened at all, which is where the library is on any machine MediaLith is booted from a stick beside"
+    builtin_or_bad EXFAT_FS "no exFAT, which is how Windows formats every USB drive above 32 GB"
+    builtin_or_bad EXT4_FS  "no ext4, so a drive formatted on a Linux machine cannot be read"
+    builtin_or_bad MSDOS_PARTITION "a USB drive with an MBR partition table enumerates as a whole disk with no partitions on it -- so the library is invisible on a disk the machine can see. It is default y and nothing in linux.fragment asks for it, which is exactly why it is asserted here rather than assumed"
+
     # And the wireless driver, which is why the firmware stage above has anything to do.
     builtin_or_bad IWLWIFI "no Intel wireless"
     builtin_or_bad IWLMVM  "no Intel wireless on anything from the 7000 series onwards, which is all of it here"

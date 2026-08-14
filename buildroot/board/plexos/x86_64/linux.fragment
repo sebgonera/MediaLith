@@ -116,6 +116,31 @@ CONFIG_ISO9660_FS=y
 # ext4 for a stick formatted on a Linux machine, which is the case for anybody who would
 # be reading a Debian package in the first place.
 CONFIG_EXT4_FS=y
+# NTFS, and the case for it is the ordinary one rather than the removable-media path.
+#
+# This appliance is booted from a USB stick on a computer that already has Windows on its
+# internal disk, and that is where the films are. Without this, that partition is an
+# unreadable block: the whole library is inches away on a disk the machine can see, spin
+# up and enumerate, and cannot open. The same applies to any USB drive somebody has been
+# filling from Windows, which is NTFS above the exFAT sizes.
+#
+# ntfs3 rather than the old ntfs driver: CONFIG_NTFS_FS is now nothing but a backward
+# compatibility shim that `select`s this one (fs/ntfs3/Kconfig, read in the 6.19.14 tree
+# rather than recalled), so naming the old symbol gets this driver anyway and hides which
+# one is doing the work.
+#
+# The detail that makes this usable, and the one that would otherwise have been guessed
+# wrong: a Windows left by Fast Startup or hibernation has VOLUME_FLAG_DIRTY set and an
+# unreplayed log, and both refusals in fs/ntfs3/super.c:1367,1373 are guarded by `!ro`.
+# So a read-only mount of a hibernated Windows partition **succeeds** — and MediaLith
+# mounts media read-only unconditionally, so the common case needs no `force` and no
+# advice to go and shut Windows down properly. Anything that ever wants to write here
+# gets a different answer, which is the correct one.
+#
+# LZX_XPRESS is what reads a file somebody compressed with `compact`. Without it those
+# files are present, listed, and unreadable, which is the worst of the three states.
+CONFIG_NTFS3_FS=y
+CONFIG_NTFS3_LZX_XPRESS=y
 # Partition labels are how plexos-init finds a slot (ADR-0003).
 CONFIG_EFI_PARTITION=y
 

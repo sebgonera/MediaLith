@@ -48,6 +48,7 @@ pub mod browserpair;
 pub mod console;
 pub mod dashboard;
 pub mod discover;
+pub mod disks;
 pub mod esp;
 pub mod gate;
 pub mod health;

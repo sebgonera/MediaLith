@@ -612,6 +612,31 @@
     color: var(--muted);
   }
 
+  /* A heading *inside* a card, for a card with two or three parts to it. Written when the
+     drives card grew a second and third region and both rendered at the browser's default
+     h4 — bold, oversized and with margins belonging to a document rather than to this.
+     Styled on the element and not on where it sits, for the same reason the button rule is:
+     a rule that enumerates the places a heading can appear will miss the next one. */
+  h4 {
+    margin: var(--s-4) 0 var(--s-3);
+    font-size: .95rem;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  h4:first-child { margin-top: 0; }
+
+  /* A column a narrow window may do without.
+     Every table on this page already scrolls inside its own container, so the *page* never
+     scrolls sideways -- measured at 390 px, and the probe reported an overflow of zero. What
+     it also reported was an mtable 552 px wide inside a 390 px window, which is correct
+     behaviour and still means the button at the end of each row is off screen on a phone
+     until somebody discovers they can drag the table. The primary action being the part that
+     is hidden is the wrong way round, so the least recognisable columns give way instead:
+     the kernel device name, the partition GUID, and a count of subfolders. Nothing that is
+     the only copy of a fact goes here -- the drive is still named, the state is still shown,
+     and the button is now reachable. */
+  @media (max-width: 760px) { .col-drop { display: none; } }
+
   dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: .4rem .9rem; }
   dt { color: var(--muted); font-size: .9rem; }
   dd { margin: 0; overflow-wrap: anywhere; }
@@ -3183,6 +3208,27 @@
         <div id="storage-body">
           <section class="card"><p class="empty">Loading…</p></section>
         </div>
+        <!-- A library on a drive in this machine, which is the common case and was the one
+             this console could not do anything about. It sits above Media shares because
+             somebody booting MediaLith from a stick has their films on the computer's own
+             disk far more often than on a NAS.
+
+             Three regions and they are siblings on purpose. The inventory redraws whenever
+             a scan or an add changes it; the browser holds the folder somebody is looking
+             at, and the name field holds what they have typed. A card that redrew all three
+             together would shut the browser and empty the field under their cursor, which
+             is the trap the activity card's process table already paid for. This card also
+             has no timer at all -- nothing here changes unless somebody does something --
+             so the only redraws are the ones their own action asked for. -->
+        <section class="card plex" id="drives" data-fold="drives" aria-live="polite">
+          <h3>Library on a drive</h3>
+          <p class="hint">Films on a drive in this machine: the Windows partition of its own
+             disk, or a USB drive plugged into it. Everything here is mounted
+             <strong>read-only</strong> — MediaLith never writes to a drive it did not make —
+             so a disk that is somebody's only copy cannot be damaged by being read.</p>
+          <div id="drives-inventory"><p class="empty">Loading…</p></div>
+          <div id="drives-browser"></div>
+        </section>
         <section class="card plex" id="shares" data-fold="shares" aria-live="polite">
           <h3>Media shares</h3>
           <p class="empty">Loading…</p>
@@ -5794,20 +5840,26 @@ function renderSummary() {
 
   // Storage. /var is the one that fills, and it is the one a rollback cannot help with.
   const varFs = (metrics.storage || []).find(f => f.path === "/var");
-  const mounted = (latestShares || []).filter(s => s.mounted).length;
-  const shareCount = (latestShares || []).length;
+  // A library is a library wherever it is. This counted network shares alone and would
+  // therefore have told somebody with their films on the machine's own Windows disk that
+  // Plex has nothing to play -- which is the tile flatly contradicting the Storage view
+  // one click away.
+  const driveLibs = ((latestDisks || {}).libraries) || [];
+  const sources = (latestShares || []).concat(driveLibs);
+  const mounted = sources.filter(s => s.mounted).length;
+  const sourceCount = sources.length;
   const storageLevel = !varFs ? ""
     : varFs.percent_used >= 92 ? "unavailable"
     : varFs.percent_used >= 80 ? "degraded"
-    : shareCount && mounted < shareCount ? "degraded"
+    : sourceCount && mounted < sourceCount ? "degraded"
     : "ready";
   const storageState = varFs
     ? `${metricBytes(varFs.available)} free`
     : "Not measured yet";
   const storageFacts = [
     varFs && ["/var", `${metricNum(varFs.percent_used, 0)}% of ${metricBytes(varFs.total)} used`],
-    ["Shares", shareCount
-      ? `${mounted} of ${shareCount} mounted`
+    ["Library", sourceCount
+      ? `${mounted} of ${sourceCount} mounted`
       : `<span class="empty">none — Plex has nothing to play</span>`],
   ];
 
@@ -6088,13 +6140,20 @@ function renderStorage() {
       </div>`;
   }).join("");
 
-  // Said plainly, because an appliance with no share is an appliance with nothing to play,
-  // and /var is far too small to be anybody's library.
-  const library = shares.length
+  // Said plainly, because an appliance with nowhere to read films from is an appliance
+  // with nothing to play, and /var is far too small to be anybody's library.
+  //
+  // Both kinds count. The note used to say "add the NAS the library lives on", which was
+  // the only thing this console could do about it and stopped being true the day drives
+  // arrived -- and pointing somebody at a server they do not own is worse than saying
+  // nothing.
+  const driveLibraries = ((latestDisks || {}).libraries) || [];
+  const library = shares.length || driveLibraries.length
     ? ""
-    : `<div class="absent"><strong>No media share is configured.</strong> Plex has nothing
-         to play: this machine's own <span class="mono">/var</span> is sized for a database
-         and app images, not for films. Add the NAS or server the library lives on below.</div>`;
+    : `<div class="absent"><strong>Plex has nowhere to read films from.</strong> This
+         machine's own <span class="mono">/var</span> is sized for a database and app
+         images, not for a library. Point it at a drive in this machine — including the
+         Windows partition of its own disk, or a USB drive — or at a network share, below.</div>`;
 
   const markup = filesystems.length
     ? `<div class="grid">${cards}</div>${library}`
@@ -7049,6 +7108,364 @@ async function sharesTick() {
   clearTimeout(sharesTimer);
   sharesTimer = setTimeout(sharesTick, PLEX_IDLE_MS);
 }
+
+// ------------------------------------------------------------------------------------
+// Library on a drive.
+//
+// The other half of "where do the films live", and the half this console had no answer
+// for. Everything below is deliberately **not on a timer**: nothing about a drive changes
+// unless somebody plugs one in or presses something, and a card that redrew twice a second
+// would shut the folder they had opened and empty the name they were typing. That is the
+// activity card's process-table defect, and the cheapest way not to have it again is not
+// to poll at all.
+//
+// The two regions redraw independently for the same reason. `renderDrives` owns the
+// inventory, `renderDriveBrowser` owns the folder somebody is looking through, and neither
+// writes into the other's element.
+// ------------------------------------------------------------------------------------
+const DISKS_ENDPOINT = "/api/disks";
+let latestDisks = null;
+/// The folder being looked through: `{ path, listing }`, or null when nobody is browsing.
+let driveBrowse = null;
+
+/// A size a person recognises, or nothing when there is no figure.
+function driveSize(bytes) { return typeof bytes === "number" ? human(bytes) : ""; }
+
+/// What to call a volume, in the words somebody would recognise their own drive by.
+///
+/// The GPT partition name first, because "Basic data partition" on a 931 GB drive is how a
+/// person knows it is their Windows disk; then the model, which is what is printed on a USB
+/// stick. The device name is last and in the corner: it is the least recognisable thing
+/// about a drive and the one this project keeps having to remind itself not to lead with.
+function driveTitle(v) {
+  if (v.label) return v.label;
+  if (v.model && v.model !== "unnamed") return v.model;
+  return v.name;
+}
+
+/// The remembered libraries, and the drives a scan found.
+function renderDrives() {
+  const host = document.getElementById("drives-inventory");
+  if (!host) return;
+  const report = latestDisks || {};
+  const libraries = report.libraries || [];
+  const volumes = report.volumes || [];
+
+  // Two absences that read the same and take opposite words. A drive that is not attached
+  // wants plugging in; one that is attached and not mounted is a fault with a reason in
+  // the log, and telling somebody to plug in a drive that is already in front of them is
+  // the wrong-remedy trap.
+  const rows = libraries.map(l => {
+    // Short, because a badge is a label and not a sentence: "drive is here, not mounted"
+    // was 353 px of table in a 342 px card, so the Remove button beside it was clipped by
+    // eleven pixels on a phone. What the two states mean and what to do about them is a
+    // note under the table, which is where there is room to say it properly.
+    const state = l.mounted
+      ? `<span class="badge ready">in use</span>`
+      : l.present
+        ? `<span class="badge degraded">not mounted</span>`
+        : `<span class="badge unavailable">not attached</span>`;
+    // The PARTUUID is the identity and is not what anybody recognises their drive by. When
+    // the drive is attached there is a much better answer to hand, so this shows that and
+    // keeps the GUID only for the case where it is the sole thing left to say -- which is
+    // exactly the case where somebody needs it, to work out which drive is missing.
+    const on = volumes.find(v => v.partuuid === l.partuuid);
+    const where = on
+      ? `${esc(driveTitle(on))} <span class="mono dim">${esc(on.name)}</span>`
+      : `<span class="mono dim">${esc(l.partuuid)}</span>`;
+    return `
+      <tr>
+        <td class="mono">${esc(l.name)}</td>
+        <td>${esc(l.subpath || "the whole drive")}</td>
+        <td class="col-drop">${where}</td>
+        <td>${state}</td>
+        <td><button class="drive-drop ghost" data-name="${esc(l.name)}">Remove</button></td>
+      </tr>`;
+  }).join("");
+
+  const offered = volumes.filter(v => !v.refusal);
+  const refused = volumes.filter(v => v.refusal);
+
+  const volumeRows = offered.map(v => {
+    const where = v.mounted_at;
+    const action = where
+      ? `<button class="drive-pick" data-path="${esc(where)}">Look inside</button>`
+      : `<span class="dim">not scanned yet</span>`;
+    // Reported rather than assumed, and only once something has mounted it. ext4 and XFS
+    // carry ownership from the machine that wrote them, which this cannot change -- and a
+    // library Plex scans as empty with nothing anywhere saying why is the outcome the
+    // whole feature is arranged to avoid.
+    //
+    // A row of its own spanning every column, not a box inside the first cell. Written
+    // that way first, and the render showed why it is wrong: the box widened the name
+    // column and sat under Size, Format and Device, so it read as a warning about the
+    // whole table while its own drive's button floated away from it.
+    const unreadable = v.readable_by_plex === false
+      ? `<tr><td colspan="5"><div class="warn">Mounted, and the account Plex runs as cannot
+           read it — it would scan as an empty library. This drive carries Unix ownership
+           from the machine that wrote it. Make it world-readable there, or copy the films
+           to a drive formatted exFAT or NTFS.</div></td></tr>`
+      : "";
+    return `
+      <tr>
+        <td>${esc(driveTitle(v))}</td>
+        <td class="num rate">${esc(driveSize(v.bytes))}</td>
+        <td>${v.filesystem ? esc(v.filesystem) : `<span class="dim">unknown</span>`}</td>
+        <td class="mono dim col-drop">${esc(v.name)}</td>
+        <td>${action}</td>
+      </tr>${unreadable}`;
+  }).join("");
+
+  // Shown rather than hidden. A person looking for a drive that is not in the list needs
+  // to know it was seen and passed over, and why -- an absence with no explanation reads
+  // as the appliance not noticing the drive at all.
+  const refusedRows = refused.length
+    ? `<details><summary>${refused.length} ${refused.length === 1 ? "volume is" : "volumes are"} not offered</summary>
+         <ul class="hint">${refused.map(v =>
+           `<li><span class="mono">${esc(v.name)}</span> — ${esc(v.refusal)}</li>`).join("")}</ul>
+       </details>`
+    : "";
+
+  // Two absences, spelled out where there is room for a sentence. They read the same on the
+  // page and take opposite remedies, which is the distinction the badges alone cannot carry.
+  const absent = libraries.filter(l => !l.present);
+  const idle = libraries.filter(l => l.present && !l.mounted);
+  const trouble = absent.length || idle.length
+    ? `<p class="warn">${[
+        absent.length ? `<strong>${absent.map(l => esc(l.name)).join(", ")}</strong>
+          ${absent.length === 1 ? "is on a drive that is not attached" : "are on drives that are not attached"}.
+          Plex sees an empty folder. Plug the drive back in and restart, or remove the library.` : "",
+        idle.length ? `<strong>${idle.map(l => esc(l.name)).join(", ")}</strong>
+          ${idle.length === 1 ? "is on a drive that is here" : "are on drives that are here"} and did not
+          mount. That is a fault rather than a missing drive; the console log says which
+          filesystem refused and why.` : "",
+      ].filter(Boolean).join(" ")}</p>`
+    : "";
+
+  host.innerHTML = `
+    ${rows
+      ? `<div class="scroll"><table class="mtable">
+           <thead><tr><th>Library</th><th>Folder</th><th class="col-drop">On partition</th><th>State</th><th></th></tr></thead>
+           <tbody>${rows}</tbody></table></div>${trouble}`
+      : `<p class="empty">No library is set up from a drive yet.</p>`}
+    <div class="row">
+      <button id="drive-scan">${report.scanned ? "Scan again" : "Scan for drives"}</button>
+      ${report.scanned ? `<button id="drive-release" class="ghost">Release the ones I did not choose</button>` : ""}
+    </div>
+    ${volumeRows
+      ? `<h4>Drives found</h4>
+         <div class="scroll"><table class="mtable">
+           <thead><tr><th>Drive</th><th class="num">Size</th><th>Format</th><th class="col-drop">Device</th><th></th></tr></thead>
+           <tbody>${volumeRows}</tbody></table></div>`
+      : report.scanned
+        ? `<p class="empty">Nothing was found that could be mounted.</p>`
+        : `<p class="hint">Scanning mounts every drive it finds read-only so its folders can
+             be looked through. Nothing is changed on any of them.</p>`}
+    ${refusedRows}`;
+
+  const scan = document.getElementById("drive-scan");
+  if (scan) scan.addEventListener("click", driveScan);
+  const release = document.getElementById("drive-release");
+  if (release) release.addEventListener("click", () => drivesRequest({ action: "release" }));
+  document.querySelectorAll(".drive-pick").forEach(b =>
+    b.addEventListener("click", () => driveOpen(b.dataset.path)));
+  document.querySelectorAll(".drive-drop").forEach(b =>
+    b.addEventListener("click", () => {
+      if (confirm("Remove the library " + b.dataset.name + "? The drive is not touched.")) {
+        drivesRequest({ action: "remove", name: b.dataset.name });
+      }
+    }));
+}
+
+/// A name that could be a directory under /var/media, suggested from the folder's own.
+///
+/// The same rule the daemon enforces, applied here so somebody is offered something that
+/// will be accepted rather than told off after pressing the button. It is a suggestion and
+/// the field stays editable: this cannot be the only check, and it is not — plexosd refuses
+/// the shape again, because a page is not a place to enforce anything.
+function driveSuggestName(path) {
+  const last = String(path || "").split("/").filter(Boolean).pop() || "library";
+  return last.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "library";
+}
+
+/// The folder somebody is looking through, and the button that chooses it.
+function renderDriveBrowser() {
+  const host = document.getElementById("drives-browser");
+  if (!host) return;
+  if (!driveBrowse) { host.innerHTML = ""; return; }
+
+  const listing = driveBrowse.listing || {};
+  const entries = listing.entries || [];
+
+  const rows = entries.map(e => `
+    <tr>
+      <td><button class="linkish drive-into" data-path="${esc(e.path)}">${esc(e.name)}</button></td>
+      <td class="num rate">${e.media_here ? esc(String(e.media_here)) : `<span class="dim">—</span>`}</td>
+      <td class="num rate col-drop">${e.folders ? esc(String(e.folders)) : `<span class="dim">—</span>`}</td>
+      <td><button class="drive-choose ghost" data-path="${esc(e.path)}">Choose this</button></td>
+    </tr>`).join("");
+
+  // The path is shown with the mount point cut off. `/run/plexos/disks/<a-guid>/Films` is
+  // the truth and is not what anybody typed or recognises; the part after the volume is.
+  const inside = String(listing.path || "").replace(/^.*?\/disks\/[^/]+/, "") || "/";
+
+  host.innerHTML = `
+    <h4>Looking inside</h4>
+    <p class="hint">In <span class="mono">${esc(inside)}</span>. The counts are files
+       directly in each folder that Plex would play, and the folders inside it — enough to
+       tell a library from a folder Windows made.</p>
+    <div class="row">
+      ${listing.parent ? `<button id="drive-up" class="ghost">Up one folder</button>` : ""}
+      <button id="drive-close" class="ghost">Stop looking</button>
+    </div>
+    ${rows
+      ? `<div class="scroll"><table class="mtable">
+           <thead><tr><th>Folder</th><th class="num">Media</th><th class="num col-drop">Folders</th><th></th></tr></thead>
+           <tbody>${rows}</tbody></table></div>`
+      : `<p class="empty">No folders in here${listing.media_here ? `, and ${esc(String(listing.media_here))} media files` : ""}.</p>`}
+    ${listing.truncated ? `<p class="warn">Only the first folders are shown; there are more
+       than this page will list. Choose a folder nearer the films.</p>` : ""}
+    <div class="row">
+      <input type="text" id="drive-name" value="${esc(driveSuggestName(listing.path))}"
+             placeholder="a name for this library" autocomplete="off">
+      <button id="drive-add">Use this folder${listing.media_here ? ` (${esc(String(listing.media_here))} media files here)` : ""}</button>
+    </div>
+    <p class="hint">Plex is confined by a policy built at the moment it starts, so it has to
+       be restarted before it can see a folder added now.</p>`;
+
+  const up = document.getElementById("drive-up");
+  if (up) up.addEventListener("click", () => driveOpen(listing.parent));
+  document.getElementById("drive-close").addEventListener("click", () => {
+    driveBrowse = null;
+    renderDriveBrowser();
+  });
+  document.getElementById("drive-add").addEventListener("click", () => driveAdd(listing.path));
+  document.querySelectorAll(".drive-into").forEach(b =>
+    b.addEventListener("click", () => driveOpen(b.dataset.path)));
+  document.querySelectorAll(".drive-choose").forEach(b =>
+    b.addEventListener("click", () => driveAdd(b.dataset.path)));
+}
+
+/// Clears a failure box this card put on itself.
+///
+/// The shares card gets this for nothing because every redraw replaces the whole section.
+/// This one deliberately does not replace the whole section, so the box would outlive the
+/// problem and report a failure that has since been fixed.
+function driveClearError() {
+  const box = document.querySelector("#drives .progress");
+  if (box) box.remove();
+}
+
+async function drivesRequest(body) {
+  const value = credential();
+  if (!value) {
+    sectionError("drives", "The device token is needed to scan or mount a drive. Unlock with the control in the header, at the top right of this page.");
+    return null;
+  }
+  try {
+    const response = await fetch(DISKS_ENDPOINT, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const text = await response.text();
+    if (!response.ok) { sectionError("drives", text); return null; }
+    driveClearError();
+    return text;
+  } catch (error) {
+    sectionError("drives", error.message || String(error));
+    return null;
+  }
+}
+
+async function driveScan() {
+  const button = document.getElementById("drive-scan");
+  if (button) { button.disabled = true; button.textContent = "Scanning…"; }
+  // Mounting several drives takes a moment and the button says so, because a scan that
+  // looks like nothing happened is a scan somebody presses again.
+  const text = await drivesRequest({ action: "scan" });
+  if (text === null) {
+    if (button) { button.disabled = false; button.textContent = "Scan for drives"; }
+    return;
+  }
+  // The scan's own answer, drawn directly. This used to be discarded in favour of asking
+  // again with a GET, and the first real scan on hardware showed what that costs: a drive
+  // that refused all six filesystems came back from the GET indistinguishable from one
+  // nobody had tried, so the page said "not scanned yet" about a mount that had just
+  // failed for a reason the daemon had written down and thrown away. The daemon remembers
+  // it now as well, which is the fix that survives a reload; this is the one that means
+  // the freshest answer is never the one the page throws away.
+  try {
+    const volumes = JSON.parse(text);
+    latestDisks = Object.assign({}, latestDisks || {}, { volumes, scanned: true });
+    renderDrives();
+  } catch (error) { /* fall through to the GET below, which is no worse than before */ }
+  await drivesTick();
+}
+
+async function driveOpen(path) {
+  if (!path) return;
+  const text = await drivesRequest({ action: "browse", path });
+  if (text === null) return;
+  try { driveBrowse = { path, listing: JSON.parse(text) }; }
+  catch (error) { sectionError("drives", "the folder listing was not JSON"); return; }
+  renderDriveBrowser();
+}
+
+async function driveAdd(path) {
+  const field = document.getElementById("drive-name");
+  const name = ((field && field.value) || driveSuggestName(path)).trim();
+  const text = await drivesRequest({ action: "add", name, path });
+  if (text === null) return;
+  driveBrowse = null;
+  renderDriveBrowser();
+  await drivesTick();
+  // Offered, not done. Restarting Plex stops whatever somebody in the house is watching,
+  // so it is their decision -- and the card says why it is needed rather than leaving a
+  // library that is mounted and invisible.
+  if (confirm("Added. Plex has to be restarted before it can see it. Restart Plex now? Anything playing will stop.")) {
+    restartPlex();
+  }
+}
+
+/// Restarts Plex and nothing else.
+///
+/// Its own request rather than part of the add, because the two are different decisions:
+/// the folder is mounted either way, and whether now is a good moment to stop whatever is
+/// playing belongs to whoever is at the page. Reported as "restarting" rather than
+/// "restarted" -- Plex takes about twenty seconds to answer, and a page that announced it
+/// was up and then found a dead port would be lying about the thing it just did.
+async function restartPlex() {
+  const value = credential();
+  if (!value) {
+    sectionError("drives", "The device token is needed to restart Plex. Unlock with the control in the header, at the top right of this page.");
+    return;
+  }
+  try {
+    const response = await fetch("/api/plex/restart", {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (!response.ok) { sectionError("drives", await response.text()); return; }
+    driveClearError();
+  } catch (error) {
+    sectionError("drives", error.message || String(error));
+  }
+}
+
+async function drivesTick() {
+  try {
+    const response = await fetch(DISKS_ENDPOINT, { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    latestDisks = await response.json();
+    renderDrives();
+    renderStorage();
+  } catch (error) { /* the status card already says the daemon is unreachable */ }
+}
+
 let updateTimer = null;
 let lastUpdateRendered = null;
 
@@ -9641,6 +10058,9 @@ if (!SOLO) {
   plexTick();
   updateTick();
   sharesTick();
+  // Once, and never again unless somebody presses something. Nothing about a drive changes
+  // on its own, and the folder somebody is looking through is state a poll would destroy.
+  drivesTick();
   wifiTick();
   metricsTick();
   // Self-scheduling rather than on an interval, because its rate depends on what it finds:

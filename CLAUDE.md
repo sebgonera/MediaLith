@@ -79,24 +79,56 @@ list is about the system. Check against this before committing; it is short on p
 
 ## Where things stand
 
-**The reference laptop, as of 2026-08-13 15:30.** Running `0.1.0.202608131254` on **slot b**,
-healthy, all three gate checks passing, reached at `192.168.2.190` over **wireless on WPA3**
-(`GTFO`, 6 GHz). It boots from the USB-enclosed Kingston; **the internal disk was removed**
-after a two-disk boot mounted the other installation's `/usr` and failed dm-verity — see the
-label-ambiguity traps. Plex is provisioned, signed in, and has transcoded two streams.
+**The reference laptop, as of 2026-08-14 15:05.** Running `0.1.0.202608141231` on **slot b**,
+healthy, reached at `192.168.2.190` over **wireless on WPA3** (`GTFO`, 6 GHz). It boots from
+the USB-enclosed Kingston; **the internal disk was removed** after a two-disk boot mounted
+the other installation's `/usr` and failed dm-verity — see the label-ambiguity traps. Plex is
+provisioned, signed in, and has transcoded two streams.
 
-`0.1.0.202608131316` is built and signed (`plexos-signing-dev-2`, channel `stable`) and was
-being served from the build host at `http://192.168.2.123:8080/medialith-update`. **That
-server does not survive the build host rebooting**, so re-serve it with
+`0.1.0.202608141256` is built, signed (`plexos-signing-dev-2`, channel `stable`) and being
+served from the build host at `http://192.168.2.123:8080/medialith-update`. It is the first
+image whose kernel can read NTFS, and it carries all of ADR-0021. **That server does not
+survive the build host rebooting**, so re-serve it with
 `tools/publish-update.sh output-generic 8080` before pointing the appliance at it again.
+Root hash `0a65e5b9290617d80a2867ce41442952040dc4cae62e365660a2bed82a3cd1dc`; verified
+against the built artefacts rather than the build log — `ntfs_fs_type` and `init_ntfs_fs`
+are symbols in `vmlinux` and there is no `.ko`, and the shipped `/usr` erofs was extracted
+and its `plexosd` grepped for strings the code actually uses.
 
-Two things are written, tested and **not yet run on hardware**: switching wireless networks
-from the console page, and the return to the previous network after a join fails. Both need
-somebody at the machine to try a network switch. Everything else from that day's work has
-been seen working on the appliance.
+**What ADR-0021 has and has not done on hardware.** The scan runs: the appliance enumerated
+every partition on both attached disks, refused the six belonging to MediaLith itself, and
+offered the one that did not. **No NTFS volume has been opened** — the only non-MediaLith
+drive to hand is a blank 1 TB WD SN560 whose single MBR partition holds no filesystem, and
+all six filesystems correctly refused it. Browsing a drive and binding a folder under
+`/var/media` are still unrun.
 
-The outstanding console design work is Storage, Terminal, the responsive audit at
-1920/1440/1280 and narrow, and a written report — the Network and Plex views are done.
+That first scan earned its keep anyway: it found that the refusal was being computed,
+logged, and then thrown away by a page that asked again with a `GET` — see the trap about
+deriving an event from a state. `...141256` is the fix.
+
+Also from the wireless work of 2026-08-13, still unrun: switching networks from the console
+page, and the return to the previous network after a join fails.
+
+**There is no way to put films on the appliance's own disk**, and somebody asked on the
+first day the drives card existed. No SSH, no Samba, no `nfs-utils`; `curl` and `wget` are
+clients; every library mount is read-only by design. ADR-0021 assumes a drive is filled by
+the computer that owns it and then attached. Whatever changes that needs its own decision —
+a writable library is the rule ADR-0021 is built on.
+
+**A library can now live on a disk in the machine (ADR-0021), and none of it has run on
+hardware.** `CONFIG_NTFS3_FS` was never set, so until this the Windows partition of the
+machine MediaLith is booted on was an unreadable block — which is where the library is for
+anybody who is not the person who built this. `plexosd::disks` scans, mounts read-only,
+lets somebody look through the folders from the console and binds the chosen one under
+`/var/media` before Plex starts; `POST /api/plex/restart` means adding one no longer costs
+a reboot. 30 tests, and **no built image has yet carried a kernel that can open an NTFS
+volume** — the first thing to try is a scan on a machine with Windows on its internal disk.
+
+The outstanding console design work is Terminal, the responsive audit at 1920/1440/1280 and
+narrow, and a written report — Network, Plex and Storage are done. The narrow measurement
+that came out of the Storage work is worth carrying into the audit: at 390 px the page
+itself does not scroll, and the Media shares table (392 px) and the Disks table (552 px)
+are both wider than the card holding them.
 `tools/preview-console.py` renders the page against the live appliance, with canned replies
 for states it is not in; a change to `console.html` is not finished until that render has
 been looked at.
@@ -495,6 +527,8 @@ decides, and `http::refusal` is the only thing that calls it.
 | `/api/provision` | Install Plex from Plex's own packages (ADR-0010) |
 | `/api/config`, `/api/network` | Hostname, timezone, static addressing (ADR-0008) |
 | `/api/shares` | Network shares the library lives on |
+| `/api/disks` | A library on a disk in this machine (ADR-0021). `GET` is the inventory and discloses no more than `/api/install`; **scan, browse, add, remove and release are `POST`s** — the folder names on somebody's Windows disk are the same class of thing as the process list |
+| `/api/plex/restart` | Restart Plex and nothing else, so a library added now can be seen without restarting the appliance |
 | `/api/terminal` | Root shell, long-polled (ADR-0014) |
 | `/api/power` | Shut down, restart |
 | `/api/pair` | Spend a pairing code for an administrator session (ADR-0019). **The one mutating route with no credential**, because it issues one — and it has nothing to spend unless somebody pressed P at the machine |
@@ -524,6 +558,8 @@ these is here and not in `/usr`:
 | `update/rollback.json` | Why a boot was handed back to the other slot (ADR-0005) |
 | `tls/` | The console's key and certificate; the key outlives the certificate |
 | `apps/plex/` | Plex app images and the `current` link (ADR-0007) |
+| `disks.json` | Libraries on local drives, by `PARTUUID` (ADR-0021) |
+| `shares.json` | Libraries on network servers |
 | `etc/` | The writable half of the `/etc` overlay |
 | `STATE_VERSION` | The `/var` layout version (ADR-0009) |
 
@@ -608,6 +644,78 @@ and its certificate — sign with the second one.
   **failed on a correct build**, which is the worse direction: it teaches people to
   ignore it. The property is "does it run on a baseline CPU", and only running it
   answers that.
+- **A whole feature can be missing because the product was only ever described from the
+  machine it was built on.** Every path to a media library assumed a NAS — `shares.rs`, the
+  first-boot step that said "add the network share your films are on", the Storage view's
+  empty state saying "add the NAS the library lives on below". That is true of the reference
+  laptop and is not the common case: somebody who writes the image to a stick and boots it
+  on the computer they own has their films on **that computer's Windows partition**, inches
+  away, on a disk the installer already enumerates by name. The kernel could not read NTFS
+  at all, and `media.rs` carried the sentence "If it is NTFS, this kernel cannot read it" as
+  advice. Nothing failed, nothing was logged, and no test could see it, because the gap was
+  between what the product does and who it is for. ADR-0021 is the fix. The check worth
+  keeping is the one that found it: ask what the *first* thing a stranger does with this is,
+  and whether the machine they do it on looks anything like the one it was written on.
+- **A read-only mount is the thing that makes a hibernated Windows partition readable, and
+  it took reading the driver to know.** `ntfs3` refuses a volume with `VOLUME_FLAG_DIRTY`
+  set or an unreplayed journal — which Fast Startup, the Windows default, leaves behind
+  every time — and **both refusals are guarded by `!ro`** (`fs/ntfs3/super.c:1367,1373`).
+  So the common case needs no `force` and no advice to go and shut Windows down properly.
+  Guessed the other way, this would have shipped a feature that fails on most of the
+  machines it exists for, with a message blaming the user's computer.
+- **A filesystem with no Unix owner takes its permissions from whoever mounted it.**
+  `ntfs3`, exFAT and FAT fill in `fs_uid = current_uid()` and `fs_fmask_inv =
+  ~current_umask()` (`fs/ntfs3/super.c:1804`). `plexosd` is root and Plex runs as uid 900,
+  so a mount that does not say otherwise is a library every layer above reports as fine and
+  only Plex finds empty. Fourth appearance of the render-node shape. Pass `uid`, `gid`,
+  `fmask` and `dmask` explicitly. ext4 and XFS are the opposite case and cannot be fixed by
+  any option, so `disks::readable_by` *asks* — from the mode bits, not by attempting the
+  read, because this process is root and root's attempt always succeeds.
+- **`mount(2)` discards every flag but `MS_REC` on a bind.** `fs/namespace.c:4025` hands
+  straight to `do_loopback`, and the new mount copies the source's `mnt_flags` verbatim
+  (`fs/namespace.c:1256`). So `ro,noexec` in a bind's option string is a string that reads
+  as though it were enforcing something. It is safe here only because the mount underneath
+  is already read-only; write the bind as `bind` alone so the next reader learns that from
+  the code.
+- **A report derived entirely from present state cannot say "this was tried and it failed",
+  and that reads as "this has not been tried".** The first real drive scan on hardware:
+  `mount_probe` tried six filesystems on an empty partition, every one refused, and it built
+  a message naming each. The console threw the `POST` response away and asked again with a
+  `GET` — and `report` rebuilds everything from the machine as it is now, where a drive that
+  would not mount is attached, enumerable and unmounted, which is *identical* to a drive
+  nobody has touched. So the page said "not scanned yet" about a mount that had just failed,
+  and `scanned` was inferred from "is anything mounted", which is false for a scan where
+  nothing mounted — so it also offered to run the scan that had just failed, as though for
+  the first time. Two derivations, both correct about the present, both blind to what
+  happened. The diagnosis existed, was right, and reached nobody: the same shape as a
+  rollback destroying its own explanation, one floor down. `plexosd::disks::LAST_SCAN` keeps
+  the outcome, because it is the only thing that knows. **Ask whether the fact you are
+  deriving is a fact about a state or about an event.**
+- **A zero MBR disk signature makes `PARTUUID` non-unique.** The kernel synthesises
+  `%08x-%02x` from the disk signature and the partition number, so a drive that was never
+  given a signature enumerates as `00000000-01` — and so does the next one. That is exactly
+  the collision `PARTUUID` was chosen over device names to avoid, arriving by another door.
+  Seen on the reference laptop's blank internal WD SN560. Not yet handled: refusing it
+  outright would block the drive entirely, and the honest fix is a GPT, which busybox's
+  `fdisk` cannot write.
+- **The appliance cannot be written to over the network, and this surprises people.** The
+  image ships `curl` and `wget`, which are *clients*; there is no SSH, no Samba, no
+  `nfs-utils`, and ADR-0021 mounts every library read-only on purpose. So "put some films on
+  the appliance's own disk" has no answer today — the assumed route is that the drive is
+  filled by the computer that owns it and then attached. Worth knowing before promising
+  anything: it is a missing feature rather than a broken one.
+- **The image cannot create an NTFS filesystem, only read one.** `ntfs3` is a kernel driver
+  and there is no `ntfsprogs`; `mke2fs`, `mkfs.xfs` and `mkfs.erofs` are the whole set. So
+  ADR-0021 reads a Windows disk and cannot make one, which is the correct division and is
+  not what somebody asking for "an NTFS partition" expects to hear.
+- **A screenshot cannot tell you a table is too wide, and "it overflows" is not actionable.**
+  At 390 px the Storage view's page overflow measured **zero** — every table scrolls inside
+  its own container, correctly — while the primary button on each row sat off screen until
+  somebody discovered they could drag sideways. The useful measurement is per element:
+  `getBoundingClientRect().right` against `documentElement.clientWidth`, printing the widest
+  offender. It also corrected a guess: the two widest tables in that view (392 px and 552 px)
+  were the pre-existing Media shares and Disks tables, not the new ones, which came in at
+  334. Measure before attributing.
 - **Rollback reverts `/usr`, never `/var`.** Any migration must leave state the
   previous release can still read. `crates/plexos-init/src/state.rs` encodes this.
 - **Tests that only compare a thing to itself will pass while it is wrong.** Every

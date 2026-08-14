@@ -46,11 +46,22 @@ pub const MOUNT_ROOT: &str = "/run/plexos/media";
 /// Filesystems tried, in order, and the reason the order is this one.
 ///
 /// vfat and exfat first because a removable stick is one of the two far more often than
-/// anything else; ext4 next for a stick formatted on a Linux machine, which is likely for
-/// anybody handling a Debian package; then iso9660 for a disc or a copied image. Each is
-/// a `CONFIG_*` symbol in the kernel fragment, and a name here that the kernel cannot
-/// mount produces a failure blamed on the medium rather than on the image.
-pub const FILESYSTEMS: [&str; 5] = ["vfat", "exfat", "ext4", "iso9660", "xfs"];
+/// anything else; `ntfs3` next, which arrived with [`crate::disks`] and covers a stick
+/// somebody has been using with Windows; ext4 for one formatted on a Linux machine, which
+/// is likely for anybody handling a Debian package; then iso9660 for a disc or a copied
+/// image. Each is a `CONFIG_*` symbol in the kernel fragment, and a name here that the
+/// kernel cannot mount produces a failure blamed on the medium rather than on the image.
+///
+/// The order differs from [`crate::disks::FILESYSTEMS`] deliberately — there the case is
+/// an internal Windows disk and `ntfs3` leads — and the difference is safe rather than
+/// merely tolerable. `vfat` cannot claim an NTFS volume even though NTFS deliberately
+/// gives its boot sector a FAT-shaped BPB: NTFS writes zero for both the reserved-sector
+/// count and the number of FATs, and `fat_read_bpb` rejects each
+/// (`fs/fat/inode.c:1417,1423`). The archaic no-BPB fallback below that needs the whole
+/// BPB region to be zero *and* the device to be a recognised floppy size, which no
+/// Windows drive is. So probing order here is about how fast the right answer is found,
+/// not about which answer is found.
+pub const FILESYSTEMS: [&str; 6] = ["vfat", "exfat", "ntfs3", "ext4", "iso9660", "xfs"];
 
 /// How deep the search goes.
 ///
@@ -280,10 +291,12 @@ pub fn mount_ro(device: &str, target: &Path) -> io::Result<&'static str> {
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
-            "{device} could not be mounted as any of {}: {last}. A stick formatted by \
-             Windows above 32 GB is exFAT; one formatted below that is FAT32. If it is \
-             NTFS, this kernel cannot read it — copy the package to a FAT32 or exFAT \
-             stick, or send it from a browser instead.",
+            "{device} could not be mounted as any of {}: {last}. FAT32, exFAT and NTFS \
+             are all read here, so a stick formatted by Windows should have worked \
+             whatever size it is. Remedy: if this is a drive BitLocker is encrypting, \
+             nothing in MediaLith can open it — unlock it in Windows and turn BitLocker \
+             off for that drive. Otherwise copy the package to another stick, or send it \
+             from a browser instead.",
             FILESYSTEMS.join(", ")
         ),
     ))
@@ -469,16 +482,14 @@ mod tests {
         // The list here and the CONFIG_* symbols there are two halves of one decision,
         // and nothing else connects them. A name added here without the symbol produces
         // a mount that fails with EINVAL, which reads as a broken stick.
+        //
+        // The mapping lives in `disks` and not here, because that module offers an
+        // overlapping list for a different purpose and two copies of one table is one
+        // copy that goes stale.
         let fragment = include_str!("../../../buildroot/board/plexos/x86_64/linux.fragment");
         for fstype in FILESYSTEMS {
-            let symbol = match fstype {
-                "vfat" => "CONFIG_VFAT_FS=y",
-                "exfat" => "CONFIG_EXFAT_FS=y",
-                "ext4" => "CONFIG_EXT4_FS=y",
-                "iso9660" => "CONFIG_ISO9660_FS=y",
-                "xfs" => "CONFIG_XFS_FS=y",
-                other => panic!("no kernel symbol recorded for {other}"),
-            };
+            let symbol = crate::disks::kernel_symbol(fstype)
+                .unwrap_or_else(|| panic!("no kernel symbol recorded for {fstype}"));
             assert!(
                 fragment.contains(symbol),
                 "{fstype} is offered but {symbol} is not in the kernel fragment"

@@ -164,6 +164,35 @@ pub fn respond(request: &Request, env: &impl Environment, services: &Services) -
                 ),
             }
         }
+        // Restart Plex, and only Plex.
+        //
+        // Plex is confined by a Landlock policy built at the moment it starts, from the
+        // paths that exist then — so a library mounted afterwards may be invisible to it,
+        // and both the shares card and the drives card have to say so. Until this route
+        // existed the only thing either of them could offer was restarting the whole
+        // appliance, which stops the console, the terminal and every other stream in the
+        // house to pick up a folder.
+        //
+        // It is `stop` then `ensure_started`, which is what `plex::swap` does either side
+        // of replacing the app image. Nothing is unmounted, because nothing about the app
+        // image has changed.
+        ("POST", "/api/plex/restart") => {
+            let mut log = |line: &str| println!("plexosd: plex: {line}");
+            log(
+                "restarting Plex at the console's request, so it can see a library added \
+                 since it started",
+            );
+            plex.stop(crate::plex::SWAP_GRACE, &mut log);
+            plex.ensure_started(
+                std::path::Path::new(plexos_types::paths::PLEX_MOUNT),
+                &mut log,
+            );
+            // Answering takes about twenty seconds, so this reports what was *asked for*
+            // rather than claiming Plex is up. A page told "restarted" that then finds a
+            // dead port reads as a machine that lied to it.
+            Response::json("{\"restarting\":true}")
+        }
+
         // A poster, and nothing else.
         //
         // A POST for the same reason the sessions route is one: a poster says what somebody
@@ -361,6 +390,24 @@ pub fn respond(request: &Request, env: &impl Environment, services: &Services) -
         },
 
         ("POST", "/api/shares") => crate::shares::handle(&request.body),
+
+        // The other place a library lives: a disk in this machine. A GET is the
+        // inventory and discloses no more than /api/install already does; every POST
+        // mounts something, looks inside somebody's Windows disk, or changes what Plex
+        // is shown, and the method gate has already demanded the credential for all of
+        // them by the time this runs.
+        ("GET" | "HEAD", "/api/disks") => match crate::disks::report(env) {
+            Ok(report) => match serde_json::to_string(&report) {
+                Ok(json) => Response::json(json),
+                Err(error) => Response::text(500, format!("could not serialise disks: {error}\n")),
+            },
+            Err(error) => Response::text(500, format!("the drives could not be read: {error}\n")),
+        },
+
+        ("POST", "/api/disks") => {
+            let mut log = |line: &str| println!("plexosd: disks: {line}");
+            crate::disks::handle(&request.body, &mut log)
+        }
 
         // The configuration, what the machine is doing about it, and confirming an
         // address change. Grouped into one helper because `respond` is a route table and
@@ -1440,7 +1487,13 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     // Before Plex, not after. The Landlock policy is built when Plex starts, from the
     // paths that exist then; mounting a library afterwards may leave it unreachable, and
     // that is a question this project has already been caught guessing at.
+    //
+    // Both kinds, and both for the same reason. A library on a server and a library on
+    // the Windows partition of this machine's own internal disk are the same thing to
+    // everything downstream -- a directory under /var/media that existed before Plex was
+    // confined -- and they differ only in what has to happen to put it there.
     crate::shares::mount_all(log);
+    crate::disks::mount_all(&System, log);
 
     // Before serving, so a machine that was provisioned on an earlier boot is running
     // Plex by the time anyone loads the page. On an unprovisioned one this says so and
