@@ -230,10 +230,14 @@ not. Internal namespaces can migrate later, as a change designed for that purpos
 - **The root signing key is a development key.** Its private half sits on a build host,
   and every place that reports a signature says so.
 - **Arc and AMD are unverified.** One has no hardware here; the other is not built.
-- **CI exists and has never run.** `.github/workflows/ci.yml` checks formatting, clippy,
-  the test suite and the docs — on pushes to `main` and on pull requests. It was written
-  before either existed, so it has never fired once. It covers the Rust workspace only;
-  image builds need a Buildroot host and are still tested by being put on machines.
+- **CI runs, and the newest work has not been through it.** `.github/workflows/ci.yml`
+  checks formatting, clippy, the test suite and the docs, on pushes to `main` and on pull
+  requests, and it has passed on both. This line used to say it had never fired once,
+  which was true the day it was written and stopped being true on the very push that added
+  it — a sentence describing a state its own commit ended. What is true now is narrower:
+  development happens on a branch, `main` last moved on 2026-08-11, and everything since
+  is unverified by CI until that branch is merged. It covers the Rust workspace only; image
+  builds need a Buildroot host and are still tested by being put on machines.
 
 ## Licensing
 

@@ -691,6 +691,17 @@ and its certificate — sign with the second one.
   rollback destroying its own explanation, one floor down. `plexosd::disks::LAST_SCAN` keeps
   the outcome, because it is the only thing that knows. **Ask whether the fact you are
   deriving is a fact about a state or about an event.**
+- **Audit against the remote, not against what you last fetched — and check a claim before
+  repeating it.** A repository audit on 2026-08-14 reported five remote branches and
+  concluded that CI had never run. Both were wrong, and differently. The branch list came
+  from stale remote-tracking refs because nothing ran `git fetch` first, so a sixth branch
+  carrying two unique workflow commits was invisible and would have been left out of any
+  cleanup. The CI claim came from reading `on: push: [main]`, seeing `main` 112 commits
+  behind, and inferring — while `gh run list` shows dozens of runs including eight pushes to
+  `main`. Worse, the sentence had a source: the README said "has never fired once", which
+  was true the day it was written and was falsified by the very push that added it. An
+  inference dressed as a finding, and a stale document quoted as evidence. `git fetch
+  --prune` before reading refs; `gh run list` before saying anything about CI.
 - **A zero MBR disk signature makes `PARTUUID` non-unique.** The kernel synthesises
   `%08x-%02x` from the disk signature and the partition number, so a drive that was never
   given a signature enumerates as `00000000-01` — and so does the next one. That is exactly
@@ -999,6 +1010,21 @@ and its certificate — sign with the second one.
   regardless. A setting is not implemented when it round-trips; it is implemented when
   something branches on it. The shape to grep for is a config field whose only occurrences
   are the struct, the serializer and the form.
+  **The sixth was a whole section, and it was found by counting rather than by reading.**
+  `[plex]` — `media`, `transcode_dir`, `require_hardware_transcode` — had no reader anywhere
+  outside `config.rs`'s own tests, for the whole life of the project. The method that found
+  it takes one command and is worth keeping: list every field in the schema and count its
+  occurrences across the workspace. Anything at two or three is a struct, a default and a
+  test asserting that default, which is the "tests that only compare a thing to itself"
+  trap wearing a config field. Removed rather than wired: each had been overtaken by
+  something better placed, and ADR-0008's amendment says which. Note the shape of the
+  removal, because it is the general rule for this schema — **remove the whole section,
+  never a key from inside one.** `Config` is not `deny_unknown_fields` so an unknown section
+  is ignored, while every section is, so deleting a key makes a file carrying it unreadable
+  by the release that would have to fall back to it.
+  And one of the three is worth a second look: `media` described *exactly* the feature
+  ADR-0021 built from scratch a week later. Nobody grepped the schema before designing it.
+  Read `config.rs` before writing a feature about state a user might configure.
 - **Storing is not applying, and a settings page that conflates them is worse than none.**
   It looks like it worked. `plexosd::settings` reports four distinct outcomes per field
   for that reason, and the sharpest case is the timezone: with no zoneinfo in the image,
@@ -1600,23 +1626,20 @@ there reaches GitHub and nothing else, and Buildroot fetches from a dozen other 
 
 ## Open decisions
 
-None blocks a build. Item 4 is the one that would cost somebody an evening if it were met
+None blocks a build. Item 3 is the one that would cost somebody an evening if it were met
 without warning, and it has a written remedy rather than a fix.
 
-1. **Name — decided.** The product is **MediaLith** (2026-08-11). This entry existed
-   because "PlexOS" used a third-party trademark; it no longer does, and the disclaimer
-   in the README states the absence of any affiliation with Plex Inc.
-   **The internal namespace was deliberately not renamed with it**, and that is the part
-   still open: `/var/lib/plexos`, `/etc/plexos/config.toml`, `plexos.slot`, the
-   `plexos-<version>.efi` boot entries, the manifest's `product` field and every crate
-   name still say `plexos`. Each is a contract with a disk or with a release already in
-   the field — see "Names that did not change" in the README. Moving any of them is a
-   migration in which a release must accept both spellings for long enough that no machine
-   is left behind, and it gets cheaper the sooner it is done and more expensive the more
-   machines exist.
-2. **Secure Boot keys.** Enrol our own, or go through Microsoft's shim process.
-3. **Licence.** Not chosen.
-4. **When the anti-rollback floor should be recorded — IMPORTANT, deliberately deferred
+**Naming is no longer one of these.** It was item 1 for months, phrased as "the internal
+namespace is the part still open", while the README answered the same question in a table.
+**ADR-0022 closes it: MediaLith is the product, `plexos` is a frozen internal namespace,
+and none of it moves.** A grep still finds about 1,900 occurrences; every one is either a
+contract with a disk or churn with no beneficiary, and the ADR says which. Do not start a
+partial migration — a tree where `plexos` means "frozen" in some places and "not got round
+to it" in others is worse than either end state.
+
+1. **Secure Boot keys.** Enrol our own, or go through Microsoft's shim process.
+2. **Licence.** Not chosen.
+3. **When the anti-rollback floor should be recorded — IMPORTANT, deliberately deferred
    2026-08-12.** The sequence is written when the boot entry is installed, so a release that
    turns out to be unbootable raises the floor *above the release the machine ends up running
    after the rollback*, and republishing the last good release is refused as a downgrade.

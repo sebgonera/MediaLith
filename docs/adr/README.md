@@ -42,6 +42,7 @@ kind of decision that is embarrassing to get wrong quietly.
 | [0019](0019-physical-pairing.md) | Pairing a browser from the machine's own screen | Accepted |
 | [0020](0020-update-channels-and-discovery.md) | Update channels, discovery, and a static update service | Accepted |
 | [0021](0021-library-on-a-local-disk.md) | A media library on a disk in the machine | Accepted |
+| [0022](0022-medialith-is-the-product-plexos-is-the-namespace.md) | MediaLith is the product; `plexos` is a frozen internal namespace | Accepted |
 
 ## Template
 

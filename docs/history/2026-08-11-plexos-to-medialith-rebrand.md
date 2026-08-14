@@ -1,3 +1,9 @@
+# PlexOS → MediaLith: what the rebrand changed and what it deliberately did not
+
+> Moved here from `rebrand.txt` at the repository root on 2026-08-14, unchanged. It is a
+> record of one day's work, not a live document; the decision it describes is now
+> [ADR-0022](../adr/0022-medialith-is-the-product-plexos-is-the-namespace.md).
+
 ================================================================================
 PRODUCT REBRAND: PlexOS -> MediaLith
 ================================================================================
