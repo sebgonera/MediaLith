@@ -8,7 +8,7 @@
 //!
 //! **Unknown keys are rejected.** On an appliance, a typo that is silently ignored
 //! produces a system that boots, reports itself healthy, and does not do what the user
-//! asked — the worst available failure. `transcod_dir` must be a startup error.
+//! asked — the worst available failure. `hostnam` must be a startup error.
 //!
 //! **Every value has a working default.** A file containing only `schema_version = 1`
 //! must produce a functioning Plex server. Configuration expresses deviation from sane
@@ -24,7 +24,6 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::paths;
 use crate::version::CONFIG_SCHEMA_VERSION;
 
 /// Reads `schema_version` and nothing else.
@@ -106,9 +105,6 @@ pub struct Config {
     /// exactly this case and had never used.
     #[serde(default)]
     pub update_service: UpdateService,
-    /// Plex Media Server settings owned by the OS rather than by Plex.
-    #[serde(default)]
-    pub plex: Plex,
     /// Network file sharing.
     #[serde(default)]
     pub shares: Shares,
@@ -202,7 +198,6 @@ impl Default for Config {
             system: System::default(),
             updates: Updates::default(),
             update_service: UpdateService::default(),
-            plex: Plex::default(),
             shares: Shares::default(),
             network: NetworkConfig::default(),
         }
@@ -440,42 +435,28 @@ impl<'de> Deserialize<'de> for MaintenanceWindow {
     }
 }
 
-/// Plex settings the OS owns. Everything else belongs to Plex's own configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Plex {
-    /// Directories exposed to Plex as libraries, mounted read-only.
-    #[serde(default)]
-    pub media: Vec<String>,
-    /// Scratch directory for transcoding.
-    #[serde(default = "Plex::default_transcode_dir")]
-    pub transcode_dir: String,
-    /// Whether to require a verified hardware transcode before reporting healthy.
-    ///
-    /// On by default: silent fallback to software transcoding is the failure MediaLith
-    /// exists to make visible.
-    #[serde(default = "Plex::default_require_hw_transcode")]
-    pub require_hardware_transcode: bool,
-}
-
-impl Plex {
-    fn default_transcode_dir() -> String {
-        paths::PLEX_TRANSCODE_DIR.into()
-    }
-    const fn default_require_hw_transcode() -> bool {
-        true
-    }
-}
-
-impl Default for Plex {
-    fn default() -> Self {
-        Self {
-            media: Vec::new(),
-            transcode_dir: Self::default_transcode_dir(),
-            require_hardware_transcode: Self::default_require_hw_transcode(),
-        }
-    }
-}
+// The `[plex]` section was removed on 2026-08-14. It had three fields, no reader
+// anywhere outside this file's own tests, and each had been superseded by something
+// that does the job better:
+//
+//   * `media` — a bare list of paths. `plexosd::shares` and `plexosd::disks` own this
+//     now, and both track what a list of strings cannot: whether the thing is actually
+//     mounted, and an identity that survives the kernel renumbering the drives.
+//   * `transcode_dir` — `/var/cache/plex-transcode` is not a preference. It is granted
+//     in Plex's Landlock policy and exported as `TMPDIR` by `plexos_plex::run`, so a
+//     configurable path is only correct if the grant follows it. A setting whose value
+//     the sandbox does not know about is the deny-by-default trap this project has
+//     already paid for four times.
+//   * `require_hardware_transcode` — the capability is real and lives elsewhere.
+//     `/api/gpu` reports the verdict unconditionally and ADR-0018's activity card flags
+//     a software transcode while it is happening. The only thing the field would have
+//     added is failing the *boot* gate, and that gate decides rollback: a machine with
+//     no working GPU would have handed back every good update for ever.
+//
+// Removing the whole section rather than the three fields is the only shape that is
+// compatible in both directions. `Config` is not `deny_unknown_fields`, so a file that
+// still carries `[plex]` is ignored by this release; `Plex` was, so deleting a key from
+// inside it would have made such a file unreadable. See ADR-0008, amended.
 
 /// Network file sharing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -659,7 +640,6 @@ mod tests {
         // installations only: a machine whose config already names it never asks for this.
         assert_eq!(config.system.hostname, "medialith");
         assert!(config.updates.automatic);
-        assert!(config.plex.require_hardware_transcode);
         assert!(!config.shares.smb.enabled);
     }
 
@@ -678,9 +658,6 @@ mod tests {
             automatic = true
             window = "03:00-05:00"
 
-            [plex]
-            media = ["/var/media/movies", "/var/media/tv"]
-
             [shares.smb]
             enabled = true
         "#,
@@ -688,7 +665,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.system.hostname, "kino");
-        assert_eq!(config.plex.media.len(), 2);
         assert!(config.shares.smb.enabled);
         assert!(!config.shares.nfs.enabled);
         assert_eq!(config.updates.window.start_minute, 180);
@@ -696,11 +672,29 @@ mod tests {
 
     #[test]
     fn rejects_a_misspelled_key_rather_than_ignoring_it() {
-        let err = Config::parse("schema_version = 1\n[plex]\ntranscod_dir = \"/tmp\"").unwrap_err();
+        // The key was `transcod_dir` in `[plex]` until that section was removed, at which
+        // point this passed for the wrong reason for one commit: an unknown *section* is
+        // ignored by design, so the test was asserting the opposite of its own name. The
+        // property belongs to a section that still exists, and there is nothing special
+        // about which one.
+        let err = Config::parse("schema_version = 1\n[system]\nhostnam = \"kino\"").unwrap_err();
         assert!(
-            matches!(&err, ConfigError::Invalid(d) if d.contains("transcod_dir")),
+            matches!(&err, ConfigError::Invalid(d) if d.contains("hostnam")),
             "error should name the offending key, got: {err}"
         );
+    }
+
+    #[test]
+    fn a_section_this_build_has_never_heard_of_is_ignored_rather_than_refused() {
+        // The other half, and the half that makes removing `[plex]` safe: a file written
+        // by a release that still had it stays readable here. Without this, deleting a
+        // section would make every configuration carrying it unreadable — which is the
+        // rollback hazard the strictness split was designed around.
+        let config = Config::parse(
+            "schema_version = 1\n[plex]\nmedia = [\"/var/media/films\"]\n[system]\nhostname = \"kino\"",
+        )
+        .expect("an unknown section is a newer release talking, not an error");
+        assert_eq!(config.system.hostname, "kino");
     }
 
     #[test]

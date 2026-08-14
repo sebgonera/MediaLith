@@ -30,13 +30,34 @@ channel = "stable"
 automatic = true
 window = "03:00-05:00"
 
-[plex]
-media = ["/var/media/movies", "/var/media/tv"]
-transcode_dir = "/var/cache/plex-transcode"
-
 [shares.smb]
 enabled = true
 ```
+
+> **Amended 2026-08-14: the `[plex]` section was removed.** It carried `media`,
+> `transcode_dir` and `require_hardware_transcode`, and in the whole life of the project
+> nothing ever read any of them — the only occurrences outside this document were the
+> struct, its defaults, and two tests asserting those defaults. Each had also been
+> overtaken:
+>
+> * `media` by `plexosd::shares` and `plexosd::disks` (ADR-0021), which track whether a
+>   library is actually mounted and carry an identity that survives the kernel renumbering
+>   the drives — neither of which a list of paths can do;
+> * `transcode_dir` by the confinement design. `/var/cache/plex-transcode` is granted in
+>   Plex's Landlock policy and exported as `TMPDIR` by `plexos_plex::run`, so it is not a
+>   preference: a configurable path is only correct if the sandbox grant follows it, and a
+>   path the sandbox has not been told about is the failure mode this project has already
+>   paid for four times;
+> * `require_hardware_transcode` by `/api/gpu`, which reports the verdict unconditionally,
+>   and by ADR-0018's activity card, which flags a software transcode while it happens.
+>   The one thing the field would have added is failing the **boot** gate — and that gate
+>   decides rollback, so a machine with no working GPU would have handed back every good
+>   update for ever.
+>
+> Removing the whole section rather than the three keys is the only shape that is
+> compatible in both directions, and it is the strictness split below that makes it so: a
+> configuration still carrying `[plex]` is ignored by this release, where deleting a key
+> from inside a `deny_unknown_fields` section would have made that file unreadable.
 
 **Declarative and reconciled.** `plexosd` reads the file and drives system state to
 match. It never writes the file back — user comments and formatting survive, and
