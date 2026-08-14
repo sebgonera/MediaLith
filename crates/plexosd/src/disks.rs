@@ -765,7 +765,7 @@ struct ScanOutcome {
 /// cannot read should cost itself and nothing else. A volume already mounted is left
 /// alone, so scanning twice is not a way to lose the folder somebody was looking at.
 ///
-/// What it learnt is recorded in [`LAST_SCAN`] as well as returned, so the answer survives
+/// What it learnt is recorded in `LAST_SCAN` as well as returned, so the answer survives
 /// the response that carried it.
 ///
 /// # Errors

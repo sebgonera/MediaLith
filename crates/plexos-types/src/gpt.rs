@@ -7,7 +7,7 @@
 //! # Why this is here rather than delegated to `sfdisk`
 //!
 //! The first plan was to add `sfdisk` to the image and feed it the script
-//! [`crate::bin`]'s layout emitter already produces. It was the wrong plan for a reason
+//! the layout emitter's layout emitter already produces. It was the wrong plan for a reason
 //! this repository has recorded three times: **a program in the image is not a program
 //! that can do the job.** `erofs-utils` built without `lz4`, `busybox tar` without `xz`,
 //! `busybox losetup` without `--show` — each present, each unable, each discovered minutes

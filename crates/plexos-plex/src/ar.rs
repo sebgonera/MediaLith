@@ -53,7 +53,7 @@ pub enum Error {
         /// What was wrong with it.
         detail: String,
     },
-    /// More members than [`MAX_MEMBERS`].
+    /// More members than `MAX_MEMBERS`.
     TooManyMembers,
     /// The underlying file could not be read.
     Io(io::Error),

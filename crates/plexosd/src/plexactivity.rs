@@ -61,7 +61,7 @@
 //!   [`source_from_metadata`] — and is `null` when that fetch fails.
 //! * **HDR is structured, in the library.** `colorTrc: "smpte2084"`, `bitDepth: 10`,
 //!   `DOVIPresent: true`, `DOVIProfile: 8`. Plex's own display string for that file is
-//!   `"4K DoVi/HDR10"`, which is what [`hdr_format`] reproduces from the fields.
+//!   `"4K DoVi/HDR10"`, which is what `hdr_format` reproduces from the fields.
 //!
 //! # This is observability, and must never become a dependency
 //!

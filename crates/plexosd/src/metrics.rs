@@ -29,7 +29,7 @@
 //! real one rather than a hypothetical: whoever opens the dashboard on a phone as well as a
 //! laptop. Their requests interleave, so without a floor one of them computes a percentage
 //! over a twenty-millisecond window — two ticks across eight processors, which quantises
-//! into figures that jump between nothing and nonsense. [`MIN_WINDOW`] is that floor, and a
+//! into figures that jump between nothing and nonsense. `MIN_WINDOW` is that floor, and a
 //! request arriving inside it is answered from the last computed set rather than from a
 //! window too short to mean anything.
 //!
@@ -398,7 +398,7 @@ pub struct Process {
     ///
     /// `/proc/<pid>/comm` is truncated — the reference laptop's Plex is `Plex Media Serv`,
     /// which is a name no reader would search for. Read only for the processes actually
-    /// returned, so the cost is bounded by [`PROCESS_LIMIT`] rather than by the process
+    /// returned, so the cost is bounded by `PROCESS_LIMIT` rather than by the process
     /// count.
     pub command: Option<String>,
     /// Its state letter: `R`, `S`, `D`, `Z`.
@@ -443,7 +443,7 @@ struct Ticks {
     iowait: u64,
 }
 
-/// The rates a window produced, kept so a request arriving inside [`MIN_WINDOW`] can be
+/// The rates a window produced, kept so a request arriving inside `MIN_WINDOW` can be
 /// answered with the last real measurement rather than with noise.
 #[derive(Debug, Clone)]
 struct Rates {

@@ -104,7 +104,7 @@ pub fn hex(bytes: &[u8]) -> String {
     })
 }
 
-/// A token as the administrator sees it: [`ALPHABET`], upper case, no separators.
+/// A token as the administrator sees it: `ALPHABET`, upper case, no separators.
 ///
 /// The canonical form. [`grouped`] adds dashes for display and [`normalise`] takes any
 /// of it back to this.
@@ -132,7 +132,7 @@ pub fn encode_token(bytes: &[u8]) -> String {
     out
 }
 
-/// The token as it is printed: groups of [`GROUP`] separated by dashes.
+/// The token as it is printed: groups of `GROUP` separated by dashes.
 ///
 /// Grouping is not decoration. Sixteen unbroken characters are read by counting; four
 /// groups of four are read by shape, and the reader can keep their place after looking
@@ -173,7 +173,7 @@ pub fn normalise(input: &str) -> String {
 /// The stored form of a token.
 ///
 /// The token is normalised first, so that what is stored does not depend on how the
-/// administrator happened to type it. Both sides of [`matches`] go through here, which
+/// administrator happened to type it. Both sides of [`fn@matches`] go through here, which
 /// is what keeps that true rather than merely intended.
 #[must_use]
 pub fn fingerprint(token: &str) -> String {
@@ -234,7 +234,7 @@ pub fn matches(presented: &str, stored_fingerprint: &str) -> bool {
 /// the format and none of them is a secret.
 ///
 /// Shared rather than written once per credential. Three modules now compare a presented
-/// string against a held one — [`matches`] for the device token, [`crate::session`] for an
+/// string against a held one — [`fn@matches`] for the device token, [`crate::session`] for an
 /// administrator session, [`crate::pairing`] for a pairing code — and three hand-rolled
 /// loops is three chances for one of them to be an `==` that nobody noticed.
 #[must_use]

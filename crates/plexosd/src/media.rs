@@ -1,6 +1,6 @@
 //! Reading a Plex package off removable media, for a machine with no way to fetch one.
 //!
-//! The other half of ADR-0010's offline route. [`crate::console::upload_route`] takes a
+//! The other half of ADR-0010's offline route. the console's upload route takes a
 //! package from a browser; this takes one from a USB stick, which is what somebody with
 //! no browser on the same network actually has. Both end in the same place — a file at
 //! `apps/.package.deb` and [`crate::provision::Source::Supplied`] — so neither has its own

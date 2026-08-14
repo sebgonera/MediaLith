@@ -43,9 +43,9 @@
 //!   manifest bytes. Refuses a document from anyone else.
 //! - **[`sequence`]**: the manifest is not older than one already accepted. Refuses a
 //!   *genuine* document being replayed, which every signature check would pass.
-//! - **[`plan`]**: it is for this product, in a format this release can mount, and it fits
+//! - **[`mod@plan`]**: it is for this product, in a format this release can mount, and it fits
 //!   the slot. Refuses an update that is honest and inapplicable.
-//! - **[`uki`]** and [`write`]: the bytes that arrived are the bytes the manifest named,
+//! - **[`uki`]** and [`mod@write`]: the bytes that arrived are the bytes the manifest named,
 //!   and the boot entry belongs to the slot being written. Refuses a bundle assembled
 //!   wrongly, which no signature can notice because the signature is over the mistake.
 //!

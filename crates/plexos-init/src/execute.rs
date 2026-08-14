@@ -182,7 +182,7 @@ fn is_mounted(path: &str) -> bool {
 ///
 /// So a small bootstrap runs before planning. The plan still contains its own
 /// `/proc` mount, because the plan describes a complete boot and should be readable
-/// as such; [`perform`] skips any pseudo-filesystem already mounted rather than
+/// as such; `perform` skips any pseudo-filesystem already mounted rather than
 /// stacking a second mount over it.
 ///
 /// # Errors
