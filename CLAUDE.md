@@ -95,16 +95,42 @@ against the built artefacts rather than the build log — `ntfs_fs_type` and `in
 are symbols in `vmlinux` and there is no `.ko`, and the shipped `/usr` erofs was extracted
 and its `plexosd` grepped for strings the code actually uses.
 
-**What ADR-0021 has and has not done on hardware.** The scan runs: the appliance enumerated
-every partition on both attached disks, refused the six belonging to MediaLith itself, and
-offered the one that did not. **No NTFS volume has been opened** — the only non-MediaLith
-drive to hand is a blank 1 TB WD SN560 whose single MBR partition holds no filesystem, and
-all six filesystems correctly refused it. Browsing a drive and binding a folder under
-`/var/media` are still unrun.
+**ADR-0021 has now run, end to end, on hardware (2026-08-14).** A USB drive with an NTFS
+film library was plugged into the appliance: scanned, mounted `ntfs3`, browsed, a folder
+bound under `/var/media`, and Plex found and indexed the library. The Windows partition
+that was an unreadable block for the whole life of this project is readable.
+
+Two things came out of it that nobody planned.
+
+**The `PARTUUID` identity proved itself by accident.** The drive was replugged between
+attempts and the kernel gave it a different name — `sdc1` became `sdb1` — and the library
+came back regardless. That is the entire reason the record is keyed on `PARTUUID` rather
+than a device name, and it was demonstrated by an unrelated replug rather than by a test.
+
+**Playback failed at first with Plex error `s4032 (Manifest)` on every film, and why it
+started working is not known.** Everything the appliance could be asked was green
+throughout: the confinement log clean, `/dev/dri/renderD128` open to Plex, GPU `ready` with
+GuC and HuC running, 5.2 GB free on `/var`, the health gate passing, Plex signed in. Then
+three things changed at once — the machine took an update and rebooted, the library was
+removed and re-added, and the drive was replugged — and it played. **Three changes, one
+observation, no attribution.** The candidate worth chasing is the first: a reboot runs
+`disks::mount_all` *before* Plex starts, which is what ADR-0021 says the ordering is for,
+while adding a library from the console mounts it under a `/var/media` that Plex was
+already confined to. If that is the cause then the console's "restart Plex" offer is not
+sufficient and the honest instruction is "restart the appliance" — but that is a
+hypothesis, and the way to settle it is to add a library on a running machine and try to
+play it without rebooting.
 
 That first scan earned its keep anyway: it found that the refusal was being computed,
 logged, and then thrown away by a page that asked again with a `GET` — see the trap about
 deriving an event from a state. `...141256` is the fix.
+
+The first library added on real hardware was called `d93455e9-7042-4876-a52d-377a56fbe19b`,
+because the add path took its name from the field, and the field is filled from the folder
+the browser is *standing in* rather than the one whose button was pressed. On a drive
+chosen at its root that is the volume, whose scan-point name is the `PARTUUID`. Fixed in
+`...142020`; worth keeping because the page swaps that GUID for the drive's own name
+everywhere else and then typed one into the only field a person names things in.
 
 Also from the wireless work of 2026-08-13, still unrun: switching networks from the console
 page, and the return to the previous network after a join fails.
