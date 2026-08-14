@@ -7399,11 +7399,11 @@ function renderDriveBrowser() {
     driveBrowse = null;
     renderDriveBrowser();
   });
-  document.getElementById("drive-add").addEventListener("click", () => driveAdd(listing.path));
+  document.getElementById("drive-add").addEventListener("click", () => driveAdd(listing.path, true));
   document.querySelectorAll(".drive-into").forEach(b =>
     b.addEventListener("click", () => driveOpen(b.dataset.path)));
   document.querySelectorAll(".drive-choose").forEach(b =>
-    b.addEventListener("click", () => driveAdd(b.dataset.path)));
+    b.addEventListener("click", () => driveAdd(b.dataset.path, false)));
 }
 
 /// Clears a failure box this card put on itself.
@@ -7473,9 +7473,19 @@ async function driveOpen(path) {
   renderDriveBrowser();
 }
 
-async function driveAdd(path) {
+/// Adds a folder as a library.
+///
+/// `fromField` says where the name comes from, and it is not a detail. The name field is
+/// pre-filled from the folder the browser is *standing in*; the row buttons choose a
+/// folder *inside* it. Taking the field either way named a library after the wrong folder,
+/// and on a drive chosen at its root that folder is the volume, whose scan-point name is
+/// the PARTUUID -- so the first library added on hardware came out called
+/// `d93455e9-7042-4876-a52d-377a56fbe19b`. A GUID is the identifier this page goes out of
+/// its way not to show people.
+async function driveAdd(path, fromField) {
   const field = document.getElementById("drive-name");
-  const name = ((field && field.value) || driveSuggestName(path)).trim();
+  const typed = fromField && field ? field.value : "";
+  const name = (typed || driveSuggestName(path)).trim();
   const text = await drivesRequest({ action: "add", name, path });
   if (text === null) return;
   driveBrowse = null;
