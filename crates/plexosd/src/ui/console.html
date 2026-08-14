@@ -19,6 +19,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MediaLith</title>
+<!-- The mark as the tab icon. A data URI rather than a route: this page is one file
+     with no external anything, and adding /favicon.svg would mean a second thing to
+     serve, gate and keep in step. The small variant, because a tab is 16 px, and it
+     answers prefers-color-scheme itself -- browser chrome is not the page, so
+     currentColor buys nothing here.
+     Source: docs/brand/medialith-mark-small.svg -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cstyle%3Epath{fill:%2314171b}@media(prefers-color-scheme:dark){path{fill:%23e8eaed}}%3C/style%3E%3Cpath fill-rule='evenodd' d='M17.00 15.50Q17.00 11.00 21.35 9.84L42.65 4.16Q47.00 3.00 47.00 7.50L47.00 56.50Q47.00 61.00 42.50 61.00L21.50 61.00Q17.00 61.00 17.00 56.50Z M27.50 29.10Q27.50 26.50 29.67 27.92L39.83 34.58Q42.00 36.00 39.83 37.42L29.67 44.08Q27.50 45.50 27.50 42.90Z'/%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #f6f7f9;
@@ -281,6 +288,12 @@
     letter-spacing: -.01em;
     white-space: nowrap;
   }
+  /* The mark, beside the name. Sized against the cap height of the h1 rather than against
+     the header, so the two stay in proportion if either changes. It takes `currentColor`
+     like every other icon here, which is what keeps it correct in both themes without a
+     second file. Hidden from the accessibility tree: the h1 next to it already says the
+     name, and a second announcement of "MediaLith" is noise to a screen reader. */
+  header .mark { flex: 0 0 auto; width: 1.35rem; height: 1.35rem; color: var(--ink); }
   header .version { color: var(--muted); font-size: .8rem; white-space: nowrap; }
 
   /* The facts between the name and the controls. They scroll rather than wrap, because the
@@ -2824,6 +2837,19 @@
       </svg>
     </button>
 
+    <!-- The mark (docs/brand/medialith-mark.svg). Inline rather than an image element,
+         because this page is one file with no external anything, and because inline is what
+         lets it inherit currentColor and follow the theme.
+
+         This comment first spelled that tag out, and the self-containment test failed on
+         it: the test greps the page for the literal, and a note saying the page does not
+         use one reads to grep exactly like a page that does. Then the sentence explaining
+         the mistake spelled it out again and failed a second time. Same shape as the
+         marker string found inside the test asserting its own absence -- name the tag,
+         never write it. -->
+    <svg class="mark" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+      <path fill="currentColor" fill-rule="evenodd" d="M10.50 16.50Q10.50 12.50 14.35 11.43L24.65 8.57Q28.50 7.50 28.50 11.50L28.50 56.00Q28.50 60.00 24.50 60.00L14.50 60.00Q10.50 60.00 10.50 56.00Z M34.00 11.00Q34.00 7.00 37.88 6.03L48.12 3.47Q52.00 2.50 52.00 6.50L52.00 56.00Q52.00 60.00 48.00 60.00L38.00 60.00Q34.00 60.00 34.00 56.00Z M23.50 25.60Q23.50 23.00 25.83 24.16L42.17 32.34Q44.50 33.50 42.17 34.66L25.83 42.84Q23.50 44.00 23.50 41.40Z"/>
+    </svg>
     <h1 id="product">MediaLith</h1>
     <span class="version" id="version"></span>
 

@@ -481,6 +481,15 @@ network, pairing, expired — is a test rather than a photograph. `plexos-init` 
 and the console shell to `/dev/tty2`, one **Alt+F2** away, because a log written over a
 drawing wins.
 
+**The mark** — `docs/brand/`. Two standing stones with the play triangle struck across them
+and cut by the gap: two slots, unequal because only one booted, and a triangle that is
+severed and still reads. One path, one colour, `currentColor`, no mask — so there is no
+light file, no dark file and no accent file. It is inline in the console header and inlined
+again as the tab icon. Deliberately **not** on the attached screen (text mode, and the only
+instrument for that screen is somebody sitting in front of it) and **not** on a boot splash
+(the UKI could carry a `.splash` section, but that is the boot path and there is no
+rasteriser in this build). `docs/brand/README.md` carries the rules and what was rejected.
+
 **The console page** — one file, `crates/plexosd/src/ui/console.html`, embedded with
 `include_str!`. No framework, no build step, no external anything. Since the redesign it is
 an application shell rather than a long page: a sticky header (what the machine is, the
