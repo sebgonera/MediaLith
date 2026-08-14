@@ -363,7 +363,7 @@ fn perform(step: &BootStep, booted: Option<&str>, log: &mut dyn Log) -> io::Resu
 /// The first step that fails, with the step text included so the console says which
 /// one rather than only what the errno was.
 pub fn execute(steps: &[BootStep], log: &mut dyn Log) -> Result<Infallible, ExecError> {
-    // Asked once, before anything is resolved. A machine that has installed PlexOS onto a
+    // Asked once, before anything is resolved. A machine that has installed MediaLith onto a
     // disk and still has the installer stick in it carries two partitions called `usr_a`
     // and two called `var`, and a label alone cannot say which pair belongs to the system
     // the firmware just booted. Mounting the wrong `/var` is the silent half of that: the

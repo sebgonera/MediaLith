@@ -114,6 +114,18 @@ pub fn install_entry(esp: &Path, source: &Path, version: &str) -> io::Result<Pat
     let directory = esp.join(ENTRY_DIR);
     fs::create_dir_all(&directory)?;
 
+    // Legacy `plexos-` prefix, retained after the MediaLith product rename, and this one
+    // has a trap in it worth stating plainly.
+    //
+    // **The entry for a release is written by the release installing it, not by the one
+    // that will boot from it.** So a MediaLith bundle installed by a machine still running
+    // PlexOS gets a `plexos-` name whatever this build calls itself. `gate::decide_trial`
+    // then looks for its own entry by this same prefix; if the two ever disagree it finds
+    // nothing, declines to clear the try counter -- and the entry decays `+2-1`, `+1-2`,
+    // `+0-3` until the bootloader gives up and falls back. A healthy machine rolling itself
+    // back three reboots later, looking like a hardware fault.
+    //
+    // The name is invisible to anybody who is not mounting the ESP. It stays.
     let name = format!("plexos-{version}+{INITIAL_TRIES}.efi");
     let destination = directory.join(&name);
     fs::copy(source, &destination)?;

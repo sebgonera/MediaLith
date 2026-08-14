@@ -101,7 +101,7 @@ fn render_sgdisk() -> String {
 }
 
 const USAGE: &str = "\
-plexos-layout — emit the PlexOS partition layout (ADR-0003)
+plexos-layout — emit the MediaLith partition layout (ADR-0003)
 
 USAGE:
     plexos-layout [--format sfdisk|sgdisk]

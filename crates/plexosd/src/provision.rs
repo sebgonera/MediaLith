@@ -1,6 +1,6 @@
 //! Installing Plex from the console, with the work in the background.
 //!
-//! ADR-0010 says PlexOS never ships Plex: the appliance fetches the official Debian
+//! ADR-0010 says MediaLith never ships Plex: the appliance fetches the official Debian
 //! package from Plex's own endpoints, checks its signature against a pinned key, and
 //! turns the payload into an app image. Every one of those steps is built and tested in
 //! `plexos-plex`. What was missing was a caller — and a caller that does not block an
@@ -118,7 +118,7 @@ impl std::fmt::Display for CatalogueError {
                 "Plex's download catalogue could not be read: {detail}. Either the \
                  endpoint changed shape or something on the network answered in its \
                  place. Check {CATALOGUE_URL} from another machine; if it looks \
-                 different from what this expects, PlexOS needs updating rather than \
+                 different from what this expects, MediaLith needs updating rather than \
                  retrying."
             ),
             Self::NoMatch => write!(
@@ -580,7 +580,7 @@ impl Drop for Unfinished {
 /// What a run that ended without an outcome reports.
 const UNEXPECTED_END: &str = "the installation stopped unexpectedly, without saying why. Nothing was published, \
      so the machine is as it was before, and starting the installation again is safe. If \
-     it happens a second time the fault is in PlexOS rather than in the download.";
+     it happens a second time the fault is in MediaLith rather than in the download.";
 
 /// Asks Plex what the newest version is, and installs nothing.
 ///

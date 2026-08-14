@@ -126,14 +126,14 @@ impl std::fmt::Display for GptError {
         match self {
             Self::SectorSize(size) => write!(
                 f,
-                "this disk reports {size}-byte sectors, and PlexOS understands 512 and \
+                "this disk reports {size}-byte sectors, and MediaLith understands 512 and \
                  4096. Remedy: none from here -- the layout's sizes are in mebibytes and \
                  would not divide cleanly, and guessing would produce a table that tools \
                  disagree about."
             ),
             Self::TooSmall { capacity, needed } => write!(
                 f,
-                "this disk holds {} GiB and PlexOS needs at least {} GiB. Remedy: use a \
+                "this disk holds {} GiB and MediaLith needs at least {} GiB. Remedy: use a \
                  larger disk. The fixed partitions come to about 2.6 GiB (ADR-0003) and \
                  the rest is /var, which has to be big enough for a media database and \
                  transcoding scratch.",
@@ -713,7 +713,13 @@ mod tests {
         file.sync_all().ok()?;
         drop(file);
 
+        // In C, because every assertion below reads English out of this. util-linux is
+        // translated, so on a host whose locale is not English `sfdisk --list` answers
+        // "Typ etykiety dysku: gpt" and a test that greps for "Disklabel type" fails while
+        // the bytes it is about are perfect. Found on the build host, which is Polish.
         let out = std::process::Command::new(program)
+            .env("LC_ALL", "C")
+            .env("LANG", "C")
             .args(args)
             .arg(&path)
             .output()

@@ -38,7 +38,7 @@ pub struct Partition {
     /// GPT unique partition GUID, lower case.
     ///
     /// The only identifier here that is unique across disks. Labels are not — an installed
-    /// PlexOS with its installer stick attached has two partitions called `esp` — and this
+    /// MediaLith with its installer stick attached has two partitions called `esp` — and this
     /// is what `systemd-boot` reports in `LoaderDevicePartUUID` to say which one the
     /// firmware actually booted.
     pub partuuid: String,
@@ -129,7 +129,7 @@ pub const LOADER_DEVICE_PART_UUID: &str =
 ///
 /// # The only authoritative answer at boot
 ///
-/// Everything else PlexOS could ask is ambiguous once a machine has two PlexOS disks: the
+/// Everything else MediaLith could ask is ambiguous once a machine has two MediaLith disks: the
 /// labels are duplicated, and the running system has not been assembled yet so there is no
 /// device-mapper device to work back from. `systemd-boot` knows, because it is the thing
 /// the firmware loaded, and it writes the answer here.
@@ -182,7 +182,7 @@ pub fn disk_with_partuuid(partuuid: &str) -> io::Result<String> {
 ///
 /// # Why a label alone is not a question with one answer
 ///
-/// It was, for as long as a PlexOS machine had one PlexOS disk. The installer ended that:
+/// It was, for as long as a MediaLith machine had one MediaLith disk. The installer ended that:
 /// a machine with the system on its internal drive and the USB stick still plugged in has
 /// **two** partitions labelled `esp`, two labelled `usr_a`, and two labelled `var`.
 /// [`by_partlabel`] returns whichever the kernel enumerated first, and that call chooses
@@ -229,7 +229,7 @@ pub fn by_partlabel_on(disk: &str, label: &str) -> io::Result<String> {
 
 /// Resolves a GPT partition label to the device node `devtmpfs` created for it.
 ///
-/// **Ambiguous once more than one PlexOS disk is attached**, which an installed machine
+/// **Ambiguous once more than one MediaLith disk is attached**, which an installed machine
 /// with its installer stick still in it has. Prefer [`by_partlabel_on`] wherever the disk
 /// is known, and it is known wherever something is about to be written.
 ///
@@ -237,7 +237,7 @@ pub fn by_partlabel_on(disk: &str, label: &str) -> io::Result<String> {
 ///
 /// If no partition carries the label. The message lists what *was* found, because the
 /// realistic causes — an image written by a tool that dropped GPT labels, or a disk
-/// that is not a PlexOS disk at all — are indistinguishable without that list.
+/// that is not a MediaLith disk at all — are indistinguishable without that list.
 pub fn by_partlabel(label: &str) -> io::Result<String> {
     let partitions = labelled_partitions()?;
 
@@ -340,7 +340,7 @@ pub fn resolve(path: &str, log: &mut dyn FnMut(&str)) -> io::Result<String> {
 
 /// [`resolve`], preferring partitions on `disk`.
 ///
-/// `None` means "any disk", which is what a machine with one PlexOS disk has always meant
+/// `None` means "any disk", which is what a machine with one MediaLith disk has always meant
 /// and what this did before an installer existed.
 ///
 /// # Errors
@@ -351,33 +351,74 @@ pub fn resolve_on(disk: Option<&str>, path: &str, log: &mut dyn FnMut(&str)) -> 
         return Ok(path.to_owned());
     };
 
-    // Waited for first, whatever the disk: enumeration is what is slow, and a USB stick
-    // that has not appeared yet has no partitions to prefer between.
-    let any = wait_for_partlabel(label, DEVICE_TIMEOUT, log)?;
     let Some(disk) = disk else {
-        return Ok(any);
+        // Nothing to scope to: one-disk machines, and firmware that does not publish which
+        // device it booted. Waiting for the label on any disk is all there is, and is what
+        // this has always done.
+        return wait_for_partlabel(label, DEVICE_TIMEOUT, log);
     };
 
-    match by_partlabel_on(disk, label) {
-        Ok(scoped) => {
-            if scoped != any {
-                log(&format!(
-                    "{label} is on more than one disk; using {scoped} because the firmware \
-                     booted {disk}, not {any}"
-                ));
-            }
-            Ok(scoped)
+    // Waited for **on the disk the firmware booted**, and this ordering is the whole fix.
+    //
+    // It used to wait for the label on any disk and only then prefer the booted one, which
+    // reads as harmless and is a race. A machine booting from a USB stick with a second
+    // MediaLith disk attached enumerates the internal disk first: at 8.6 s the leftover
+    // 500 GB disk had `usr_a`, at 8.7 s this had already resolved to it and started
+    // dm-verity against it, and at 9.7 s -- a second later -- the stick's own partitions
+    // appeared. The boot failed with "metadata block 1 is corrupted", which is what
+    // verifying one installation's `/usr` against another's hash tree looks like.
+    //
+    // The fallback made it worse rather than saving it: `by_partlabel_on` could not find the
+    // partition on a stick that did not exist yet, so the code took the other disk's
+    // deliberately. For `/usr` that is a failed boot; for `/var` it is silent, and the
+    // machine comes up on another installation's Plex database, device token and
+    // certificate with nothing reporting anything wrong.
+    wait_for_partlabel_on(disk, label, DEVICE_TIMEOUT, log)
+}
+
+/// Waits for a labelled partition **on one disk**, and refuses every other disk's.
+///
+/// # Errors
+/// If the disk has no partition with that label before the timeout. It does not fall back
+/// to another disk: a `usr_a` belonging to a different installation is not a worse answer
+/// than none, it is a wrong one, and the `/var` case is wrong without saying so.
+pub fn wait_for_partlabel_on(
+    disk: &str,
+    label: &str,
+    timeout: Duration,
+    log: &mut dyn FnMut(&str),
+) -> io::Result<String> {
+    let deadline = Instant::now() + timeout;
+    let mut announced = false;
+
+    loop {
+        if let Ok(device) = by_partlabel_on(disk, label) {
+            return Ok(device);
         }
-        // The boot disk has no such partition. Reported and then the unscoped answer is
-        // used: refusing here would turn a machine that boots today into one that does
-        // not, over a preference.
-        Err(error) => {
-            log(&format!(
-                "{error}. Falling back to {any}, which is what this did before the boot \
-                 disk could be identified."
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "waited {}s for partition {label} on {disk}, which is the disk the \
+                     firmware booted. It never appeared. Another disk may carry that label \
+                     and this deliberately did not use it: mounting another installation's \
+                     partition is a wrong answer rather than a slow one. Remedy: if this \
+                     machine has a second MediaLith disk attached, unplug it and restart; \
+                     if not, the boot disk's partition table is not what this release \
+                     expects.",
+                    timeout.as_secs()
+                ),
             ));
-            Ok(any)
         }
+
+        if !announced {
+            announced = true;
+            log(&format!(
+                "waiting for partition {label} on {disk} (USB storage enumerates seconds \
+                 after PCI, so the disk this booted from may not be here yet)"
+            ));
+        }
+        sleep(POLL);
     }
 }
 
@@ -391,7 +432,7 @@ const EFIVARS_MOUNT: &str = "/run/plexos-efivars";
 /// assembled system: nothing after this needs `efivarfs` and leaving it mounted would put
 /// the firmware's variable store inside a running appliance for no reason.
 ///
-/// `None` for every failure, each logged. A machine with one PlexOS disk has always booted
+/// `None` for every failure, each logged. A machine with one MediaLith disk has always booted
 /// without this, and turning "I could not ask" into a failed boot would be a worse trade
 /// than the ambiguity it removes.
 #[must_use]
@@ -413,7 +454,28 @@ pub fn booted_disk(log: &mut dyn FnMut(&str)) -> Option<String> {
     let found = booted_partuuid(EFIVARS_MOUNT);
     let _ = crate::mount::unmount(EFIVARS_MOUNT);
 
-    let partuuid = found?;
+    // The one branch that used to be silent, and it is the branch that changes how every
+    // partition after it gets chosen. `found?` returned `None` here without a word, so a
+    // machine that fell back to resolving by label looked exactly like one that had asked
+    // and been answered — the boot log went straight from the banner to step 1. That is
+    // fine on a machine with one disk, which is what it was written for, and it is how an
+    // hour went into a two-disk boot that mounted another installation's `/usr`.
+    //
+    // `systemd-boot` sets this variable. Nothing else does, so its absence is a statement
+    // about what the firmware loaded rather than a fault: picking a UKI straight out of a
+    // firmware boot menu skips the boot loader entirely, and skips this with it.
+    let Some(partuuid) = found else {
+        log(
+            "systemd-boot left no LoaderDevicePartUUID, so which disk the firmware booted \
+             is unknown and partitions are resolved by label alone. That is correct on a \
+             machine with one MediaLith disk and ambiguous on a machine with two. Remedy: if \
+             this machine has a second one attached, boot the USB *device* from the \
+             firmware menu rather than a UKI on it — choosing the file directly skips the \
+             boot loader, and the boot loader is what answers this question.",
+        );
+        return None;
+    };
+
     match disk_with_partuuid(&partuuid) {
         Ok(disk) => {
             log(&format!(
@@ -431,6 +493,67 @@ pub fn booted_disk(log: &mut dyn FnMut(&str)) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_label_on_the_wrong_disk_is_refused_rather_than_used() {
+        // The boot this exists to stop, from a real console log. A USB stick with a second
+        // MediaLith disk attached: at 8.6 s the internal disk's `usr_a` existed, at 8.7 s
+        // PID 1 had resolved to it and started dm-verity, and at 9.7 s the stick's own
+        // partitions appeared. "metadata block 1 is corrupted" is what verifying one
+        // installation's /usr against another's hash tree looks like.
+        //
+        // The old code waited for the label on *any* disk and only then preferred the booted
+        // one, so the race was already lost by the time the preference was applied -- and
+        // when the preference could not be satisfied it took the other disk deliberately.
+        //
+        // A disk that does not exist stands in for one that has not enumerated yet: both are
+        // "no such partition on this disk", which is the state that used to fall through.
+        let mut said = Vec::new();
+        let error = wait_for_partlabel_on(
+            "nonexistent-disk",
+            "usr_a",
+            Duration::from_millis(20),
+            &mut |m| said.push(m.to_owned()),
+        )
+        .expect_err("a partition that is not on this disk must not resolve to another's");
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        let message = error.to_string();
+        assert!(
+            message.contains("firmware booted"),
+            "the refusal has to say which disk it was looking at: {message}"
+        );
+        assert!(
+            message.contains("Remedy:"),
+            "and name a remedy, like every other diagnostic here: {message}"
+        );
+        assert!(
+            message.contains("unplug"),
+            "the remedy for the boot this came from is to remove the other disk: {message}"
+        );
+    }
+
+    #[test]
+    fn without_a_booted_disk_the_old_behaviour_is_what_is_left() {
+        // `None` is not a failure: it is every one-disk machine, and every firmware that
+        // does not publish which device it booted. There is nothing to scope to, so the
+        // label alone is all there is -- and that has to keep working, or the fix for a
+        // two-disk machine would stop a one-disk machine booting.
+        //
+        // A path that is not a by-partlabel path is returned untouched, which is the branch
+        // every non-label device takes.
+        let mut said = Vec::new();
+        assert_eq!(
+            resolve_on(None, "/dev/vda2", &mut |m| said.push(m.to_owned())).unwrap(),
+            "/dev/vda2"
+        );
+        assert_eq!(
+            resolve_on(Some("vda"), "/dev/mapper/plexos-usr", &mut |m| said
+                .push(m.to_owned()))
+            .unwrap(),
+            "/dev/mapper/plexos-usr"
+        );
+    }
 
     /// The shape of a real partition uevent, as the kernel emits it.
     const PARTITION: &str = "MAJOR=254\nMINOR=2\nDEVNAME=vda2\nDEVTYPE=partition\n\
@@ -545,13 +668,21 @@ mod tests {
 
     #[test]
     fn a_missing_label_reports_what_was_found_instead() {
-        // On a developer machine there are no PlexOS labels, so this exercises the
-        // real failure text. "No such file or directory" alone gives nothing to act
-        // on; the list distinguishes "wrong disk" from "labels were dropped".
-        let error = by_partlabel("usr_a").unwrap_err();
+        // A label no disk can carry, rather than a real one that happens to be absent.
+        //
+        // This asked about `usr_a` and said "on a developer machine there are no MediaLith
+        // labels", which was true of the machine it was written on and stopped being true
+        // the moment somebody wrote an image to a USB stick and left it plugged in: the
+        // build host then has `sda1..sda6` labelled `esp`, `usr_a`, `usr_a_hash`, and the
+        // test fails on a machine where nothing is wrong. Third time this repository has
+        // produced a test that describes the machine it was written on.
+        //
+        // What is being tested is the failure *text*, and an impossible label exercises it
+        // on every host and on any day.
+        let error = by_partlabel("medialith-no-such-label").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         let text = error.to_string();
-        assert!(text.contains("usr_a"), "{text}");
+        assert!(text.contains("medialith-no-such-label"), "{text}");
         assert!(text.contains("kernel reports"), "{text}");
         assert!(text.contains("installer"), "no remedy given: {text}");
     }
@@ -573,7 +704,7 @@ mod tests {
 
     #[test]
     fn a_label_alone_stopped_being_a_question_with_one_answer() {
-        // The installer is what ended it. A machine with PlexOS on its internal disk and
+        // The installer is what ended it. A machine with MediaLith on its internal disk and
         // the stick it was installed from still plugged in carries two of every label, and
         // the label is what chooses the partition an update is written to.
         //
@@ -600,5 +731,94 @@ mod tests {
         assert_eq!(on("sda").as_deref(), Some("sda2"));
         assert_eq!(on("nvme0n1").as_deref(), Some("nvme0n1p2"));
         assert_eq!(on("vdb"), None, "and a disk that has none says so");
+    }
+
+    /// An `efivarfs` of this test's own. Rust runs tests as threads in one process, so a
+    /// fixed path is one test deleting what another is reading.
+    fn efivars(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("plexos-efivars-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    /// An EFI variable as `efivarfs` presents one: four bytes of attributes, then UTF-16.
+    ///
+    /// `0x06` is `BOOTSERVICE_ACCESS | RUNTIME_ACCESS` and no `NON_VOLATILE`, which is what
+    /// `systemd-boot` sets — the variable is written afresh on every boot and is meant not
+    /// to survive one.
+    fn efi_variable(value: &str) -> Vec<u8> {
+        let mut raw = vec![0x06, 0x00, 0x00, 0x00];
+        for unit in value.encode_utf16() {
+            raw.extend_from_slice(&unit.to_le_bytes());
+        }
+        // The trailing NUL a firmware string carries, which the reader has to survive.
+        raw.extend_from_slice(&[0x00, 0x00]);
+        raw
+    }
+
+    #[test]
+    fn the_booted_partition_is_read_out_of_the_bytes_efivarfs_presents() {
+        let dir = efivars("reads-the-guid");
+        fs::write(
+            dir.join(LOADER_DEVICE_PART_UUID),
+            efi_variable("1467b470-3fdf-4ad3-a2a1-d50d278d33fc"),
+        )
+        .expect("a variable to read");
+
+        assert_eq!(
+            booted_partuuid(&dir.to_string_lossy()).as_deref(),
+            Some("1467b470-3fdf-4ad3-a2a1-d50d278d33fc"),
+            "the attribute prefix is skipped and the UTF-16 padding dropped"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_firmware_that_shouts_the_guid_is_understood_anyway() {
+        let dir = efivars("case-insensitive");
+        fs::write(
+            dir.join(LOADER_DEVICE_PART_UUID),
+            efi_variable("1467B470-3FDF-4AD3-A2A1-D50D278D33FC"),
+        )
+        .expect("a variable to read");
+
+        // Compared against sysfs `PARTUUID`, which is lower case. A GUID that differs only
+        // in case is the same partition, and matching them as written would mean falling
+        // back to labels on a machine that answered the question perfectly.
+        assert_eq!(
+            booted_partuuid(&dir.to_string_lossy()).as_deref(),
+            Some("1467b470-3fdf-4ad3-a2a1-d50d278d33fc")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_variable_is_no_answer_rather_than_a_wrong_one() {
+        let dir = efivars("absent");
+        assert_eq!(
+            booted_partuuid(&dir.to_string_lossy()),
+            None,
+            "booted by something that is not systemd-boot, which is not a failure"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_truncated_variable_is_refused_rather_than_half_read() {
+        let dir = efivars("truncated");
+        fs::write(
+            dir.join(LOADER_DEVICE_PART_UUID),
+            efi_variable("1467b470-3fdf-4ad3"),
+        )
+        .expect("a variable to read");
+
+        // The length check is the whole of this. A half-read GUID matches no partition, so
+        // the honest outcome is "I could not ask" -- and the caller falls back to labels,
+        // which at least has a defined meaning. Returning the fragment would send
+        // `disk_with_partuuid` looking for a disk that cannot exist and turn a fallback
+        // into an error about hardware.
+        assert_eq!(booted_partuuid(&dir.to_string_lossy()), None);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

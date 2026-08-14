@@ -68,6 +68,28 @@ about what it measures, not about where it is red; and every part of §3.1 throu
 One number in §6 is stale in the direction that matters least: 331 passing tests have
 become 835.
 
+## Revision — 2026-08-11
+
+**§3.1, the "nothing checks free space" half — read, not enforced.** `plexos_sys::fs::space`
+wraps `statvfs(3)`, and the console's activity card reports `/var` and `/` against a severity
+threshold, so a partition at 92% is now visible from a browser instead of from a shell. The
+rest of §3.1 stands and the sharper half of it is untouched: **nothing refuses on the
+number.** There is still no check before staging an ~85 MB download and no `ENOSPC`-specific
+remedy in the update or provisioning paths, so a full `/var` remains a failure rather than a
+warning. Seeing a full disk and being unable to fill one are different problems, and only the
+first is done. Nothing in §3.1 about `/var/cache/plex-transcode` never being pruned has
+changed.
+
+**§2.2's neighbourhood gained a second instance, worth recording where the first one is.**
+Two tests in `plexosd` now fail on any development host that runs its own Plex —
+`plex::tests::a_handle_that_has_started_nothing_reports_nothing_running` and
+`an_unprovisioned_machine_is_told_where_plex_would_be_rather_than_failing`, both through
+`Handle::is_running`, which probes `127.0.0.1:32400`. The probe is right; ADR-0005's gate has
+to ask the port rather than only its own child. The suite is what is wrong: it is not
+hermetic, so a clean `cargo test --workspace` is impossible on such a host and CI being green
+says nothing about it. Same shape as the terminal test already in §2.2 — a test that
+describes the machine it was written on.
+
 ---
 
 ## 1. Release blockers
@@ -124,24 +146,73 @@ Two consequences worth naming:
 
 ### 1.3 There is no production update channel
 
-`tools/publish-update.sh` is `python3 -m http.server` over a directory, says so, and
-is right to be that for development. The design already permits a trivial production
-channel — the manifest is signed over exact bytes and sources are bare file names,
-so any static HTTPS host or object store works with no re-signing — but nothing
-provides one, and three pieces around it are missing:
+**Revised 2026-08-12 (ADR-0020).** The three pieces named here have been built; the
+thing they were pieces *of* still does not exist. What is closed, and what is not:
 
-- **Channels.** The manifest has a `channel` field; `sign-bundle.sh:97` hardcodes
-  `"dev"`. Nothing selects a channel on the appliance.
-- **Discovery.** Every update today is an operator POST with an explicit source URL.
-  There is no configured default source (`DEFAULT_SOURCE` is deliberately empty),
-  no periodic check, and no notification that an update exists. For an appliance
-  whose owner is not its builder, "updates happen when someone types a URL" is not
-  an update story.
-- **Revocation publishing.** The appliance fetches `revocations.json` from the update
-  source, and nothing in `tools/` publishes one — issuing a revocation is a manual
-  `plexos-sign revoke` plus hand-copying. The one mechanism that exists for a
-  compromised signing key needs to be as routine as publishing an update, because it
-  will be needed at the worst possible moment.
+- **Channels — closed.** `sign-bundle.sh` takes an explicit `--channel` and refuses
+  without one. `[updates].channel` is read, and `plexos_update::plan` refuses a
+  manifest published to any other channel, naming both sides and both remedies.
+  One feed per channel, no inheritance.
+- **Discovery — closed as a mechanism.** `[update_service].url` and a channel file
+  give an appliance somewhere to look; `plexosd::discover` checks about once a day,
+  five minutes after the daemon starts and never as part of the health gate, and the
+  console reports a verified release or a check that failed. It downloads nothing and
+  installs nothing without being asked.
+- **Revocation publishing — closed.** `tools/publish-revocations.sh` copies a
+  root-signed list into every release directory in a tree, and the procedure for
+  producing one is written at the top of that script rather than in somebody's memory.
+  It does not invent an empty list: signing needs the root key.
+
+**What remains open, and it is the important half:**
+
+- **There is no MediaLith update service.** No host, no domain, no published tree. The
+  product default is empty and every appliance ships with system updates unconfigured,
+  which is the honest state and not a working one. `tools/publish-update.sh` is still
+  `python3 -m http.server` over a directory, and is still right to be that for a bench.
+- **The root key is a development key** whose private half is on a build host. Nothing
+  about this section changes that; see §1.1.
+- **Production HTTPS depends on §1.4.** Discovery over `https://` is implemented and
+  TLS validation is not weakened to make it work — which means an appliance whose clock
+  is wrong may be unable to reach a real update service at all. **Automatic update
+  discovery works; production HTTPS deployment still depends on the
+  clock-synchronisation work below.**
+
+Update *distribution* is therefore not complete. What is complete is everything on the
+appliance and everything in the publishing tooling.
+
+### 1.35 A failed update raises the anti-rollback floor before it is known to have failed
+
+**Open decision, deliberately deferred on 2026-08-12. Do not close it by accident.**
+
+`update::write_slot` records the manifest's sequence as the new anti-rollback floor at the
+moment the boot entry is installed — after the partitions are written, before the machine has
+ever booted the release. The comment there explains the half that was thought through: doing
+it *earlier* would mean one failed download refuses that release for ever, on an appliance
+with deliberately no way to lower the number from the network.
+
+The sibling case had never been run until the ADR-0020 acceptance test ran it. Install a
+release, let ADR-0005 discover at boot that it is broken, and the machine hands itself back
+to the previous slot — with the floor now standing **above the release it is running**.
+Republishing the last known-good release, which is what anybody would reach for, is refused
+as a downgrade. Correctly: the counter cannot distinguish "the operator is recovering" from
+"an attacker is replaying", and that indistinguishability is the entire point of it.
+
+**What this costs today:** nothing is bricked, the console works, and the remedy is to
+publish a release with a **higher** stamp — which every new build has, since the stamp is a
+timestamp. Observed on the reference laptop, recovered by building
+`PLEXOS_VERSION=0.1.0.202608120254`.
+
+**Why it is not obviously a bug to fix.** The candidate change is to record the sequence when
+the *gate* marks the slot permanent rather than when the entry is installed, so "accepted"
+means "successfully ran". That is a change to the security-critical path ADR-0006 defines,
+and it has a cost of its own: between an install and a successful boot the floor would not
+have moved, so a machine that installs a release and is then handed an older signed one
+before rebooting would evaluate it against the older floor. Which of the two windows matters
+more is a real question, not an obvious one.
+
+**If it is taken up it needs its own ADR**, superseding the relevant part of ADR-0006, plus
+the rollback experiment run again — because the only way to see either behaviour is to break
+a release on purpose and reboot a machine three times.
 
 ### 1.4 The appliance cannot tell the time, and the trust chain consults the clock
 
@@ -157,11 +228,19 @@ fatal" posture as the rest of boot, closes this.
 
 ### 1.5 Name and licence
 
-Both already recorded as open decisions, both now blocking rather than deferrable:
+Two open decisions, and only one of them is still blocking:
 
-- **"PlexOS" uses a third-party trademark.** Renaming after release is a state
-  migration — `/var/lib/plexos` is in the frozen layout — so the last cheap moment
-  to decide is before the first unit ships, not after.
+- **The product name is settled: MediaLith** (2026-08-11), and it borrows nobody's
+  trademark. What this entry warned about has happened in the cheapest possible form —
+  the rename covered everything a person reads and **deliberately touched nothing on
+  disk**, so no machine needed migrating and a rollback to a release published under the
+  old name still works.
+  What is left is the internal namespace: `/var/lib/plexos`, `/etc/plexos/config.toml`,
+  the `plexos.` boot parameters, the `plexos-<version>.efi` entries and the manifest's
+  `product` field. None of it is visible to an owner, and each is a contract with a disk
+  or with an installed release, so moving it needs a release that accepts both spellings
+  for long enough that no machine is left behind. Still cheapest before the first unit
+  ships; no longer blocking, because nothing about it is wrong — only inconsistent.
 - **No licence is chosen.** Nothing can be distributed at all until one is. The
   image also aggregates GPL components (kernel, Buildroot packages), so shipping
   binaries carries source-offer obligations that need an answer (Buildroot's

@@ -185,17 +185,42 @@ fn clear_wedged_state(state: &Path, log: &mut dyn FnMut(&str)) {
 /// which is where the account token has to survive to be worth keeping at all.
 const PRESERVED_PREFERENCES: &str = "Preferences.xml.plexos-keep";
 
+/// Where `Preferences.xml` lives, which is the only place the account token exists.
+///
+/// Public because [`crate::plexactivity`] authenticates to Plex's own API with it. It
+/// reads this file through [`account_token`] rather than parsing it again: one parser for
+/// one format, so a server that has been signed out cannot be read two ways.
+#[must_use]
+pub fn preferences_file() -> PathBuf {
+    Path::new(PLEX_STATE).join("Preferences.xml")
+}
+
+/// The Plex account token in a preferences file, if there is a usable one.
+///
+/// **This is a credential and the appliance's alone.** It authenticates to Plex's own
+/// API, and nothing may put it in a response, a page, a query string or a log line. It is
+/// returned as a borrow of the caller's buffer so that it has no life of its own beyond
+/// the request that needed it.
+///
+/// The attribute has to be *present and non-empty*: Plex writes `PlexOnlineToken=""` on a
+/// server that has been signed out, so an empty value is the signed-out state rather than
+/// a token, and treating it as one produces a 401 from Plex against a file that looked
+/// fine.
+#[must_use]
+pub fn account_token(contents: &str) -> Option<&str> {
+    let rest = contents.split("PlexOnlineToken=\"").nth(1)?;
+    let token = rest.split('"').next()?;
+    (!token.is_empty()).then_some(token)
+}
+
 /// Whether a preferences file carries a Plex account token.
 ///
-/// The attribute has to be *present and non-empty*: Plex writes
-/// `PlexOnlineToken=""` on a server that has been signed out, and a copy of that is worth
-/// nothing — restoring it later would put the machine back exactly where it started while
-/// reporting that something had been recovered.
+/// The same question [`account_token`] answers, asked where the value itself must not be
+/// held: this decides whether a copy of the file is worth keeping, and a copy of a
+/// signed-out server's preferences would restore the machine to where it already was
+/// while reporting a recovery.
 fn carries_account_token(contents: &str) -> bool {
-    contents
-        .split("PlexOnlineToken=\"")
-        .nth(1)
-        .is_some_and(|rest| !rest.starts_with('"'))
+    account_token(contents).is_some()
 }
 
 /// Keeps a copy of `Preferences.xml` while it is known to be whole.
@@ -287,7 +312,7 @@ const DRI: &str = "/dev/dri";
 /// **This is what `udev` does everywhere else, and there is no `udev` here.** DRM does
 /// not set a mode on its device nodes, so `devtmpfs` creates them `0600 root:root`; every
 /// ordinary distribution then relaxes the render nodes with a rule like
-/// `SUBSYSTEM=="drm", KERNEL=="renderD*", MODE="0666"`. PlexOS has no such rule and
+/// `SUBSYSTEM=="drm", KERNEL=="renderD*", MODE="0666"`. MediaLith has no such rule and
 /// nothing else was doing it, so Plex — which runs as uid 900 and has its supplementary
 /// groups deliberately cleared — could not open the device at all.
 ///
@@ -1075,7 +1100,7 @@ mod tests {
     fn signed_in(token: &str) -> String {
         format!(
             "<?xml version=\"1.0\"?><Preferences MachineIdentifier=\"m\" \
-             PlexOnlineToken=\"{token}\" FriendlyName=\"PlexOS\"/>"
+             PlexOnlineToken=\"{token}\" FriendlyName=\"MediaLith\"/>"
         )
     }
 
@@ -1086,7 +1111,7 @@ mod tests {
         // the worst possible moment -- the first restart after the account was lost.
         assert!(carries_account_token(&signed_in("abc123")));
         assert!(!carries_account_token(
-            "<Preferences PlexOnlineToken=\"\" FriendlyName=\"PlexOS\"/>"
+            "<Preferences PlexOnlineToken=\"\" FriendlyName=\"MediaLith\"/>"
         ));
         assert!(!carries_account_token(
             "<Preferences MachineIdentifier=\"m\"/>"
@@ -1309,7 +1334,7 @@ mod tests {
         // names neither this list nor that one.
         let spec = plexos_plex::run::spec(
             Path::new(paths::PLEX_MOUNT),
-            "PlexOS",
+            "MediaLith",
             "0.1.0",
             std::env::consts::ARCH,
         );

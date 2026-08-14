@@ -1,6 +1,6 @@
 //! Bringing an NVIDIA card up, on a system with no `udev` and no `modprobe`.
 //!
-//! ADR-0015 step 2 said something in PlexOS would have to create `/dev/nvidia*` if the
+//! ADR-0015 step 2 said something in MediaLith would have to create `/dev/nvidia*` if the
 //! open modules did not register through the device model. They do not, and this is that
 //! something.
 //!

@@ -17,7 +17,7 @@
 #   610.57.04 against 6.19.14, EXIT=0, five modules, vermagic
 #   "6.19.14 SMP preempt mod_unload" -- the kernel this image actually boots.
 #
-# Buildroot drives it, the hooks check it, and it has run: an RTX 5060 running PlexOS
+# Buildroot drives it, the hooks check it, and it has run: an RTX 5060 running MediaLith
 # loads these four modules at boot, initialises through the GSP firmware below, and Plex
 # decodes and encodes on the card -- `final decoder: nvdec, final encoder: nvenc`.
 #

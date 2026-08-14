@@ -4,7 +4,7 @@
 # rollback on real hardware.
 #
 #   tools/break-bundle.sh <good-bundle-dir> <broken-bundle-dir> <version> \
-#                         <signing-key> <certificate>
+#                         <signing-key> <certificate> --channel <channel>
 #
 # The rollback path is the one branch of this project that a bug turns from "degrades"
 # into "bricks", and until it has actually run it is a claim rather than a fact. It
@@ -63,11 +63,25 @@ BROKEN="${2:-}"
 VERSION="${3:-}"
 KEY="${4:-}"
 CERT="${5:-}"
+shift 5 2>/dev/null || true
+
+# The channel is passed straight through to sign-bundle.sh, which has no default and will
+# not invent one (ADR-0020). A broken bundle published to a channel the appliance under test
+# does not track is refused before it is downloaded -- which is a perfectly correct refusal
+# and a completely useless experiment, because rollback is never reached.
+CHANNEL=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --channel) CHANNEL="${2:-}"; shift 2 ;;
+        --channel=*) CHANNEL="${1#--channel=}"; shift ;;
+        *) printf >&2 'unrecognised argument %s\n' "$1"; exit 2 ;;
+    esac
+done
 
 if [ -z "${GOOD}" ] || [ -z "${BROKEN}" ] || [ -z "${VERSION}" ] \
-   || [ -z "${KEY}" ] || [ -z "${CERT}" ]; then
-    printf >&2 'usage: %s <good-bundle-dir> <broken-bundle-dir> <version> <signing-key> <certificate>\n' "$0"
-    printf >&2 '  remedy: the first is output/images/plexos-update from a build; the\n'
+   || [ -z "${KEY}" ] || [ -z "${CERT}" ] || [ -z "${CHANNEL}" ]; then
+    printf >&2 'usage: %s <good-bundle-dir> <broken-bundle-dir> <version> <signing-key> <certificate> --channel <channel>\n' "$0"
+    printf >&2 '  remedy: the first is output/images/medialith-update from a build; the\n'
     printf >&2 '          third must sort above what the appliance is running, and the\n'
     printf >&2 '          last two are what tools/sign-bundle.sh takes\n'
     exit 1
@@ -84,9 +98,52 @@ case "${VERSION}" in
         ;;
 esac
 
+# A stamp far in the future is refused, and this guard exists because the mistake was made.
+#
+# The stamp is the anti-rollback sequence, and an appliance records it when the boot entry is
+# installed -- before anyone can know the release is the broken one. So a broken bundle
+# stamped ahead of real time raises the machine's floor above the clock, and every *honest*
+# build made before that time is then refused as a downgrade. That is not a fault in the
+# appliance: it is doing exactly what ADR-0006 asks. It is a fault in the experiment, and it
+# cost a rebuild the evening this tool was last used.
+#
+# One minute above the release under test is all that is needed -- systemd-boot orders by
+# version, so a broken bundle only has to sort above the running one, not above the future.
+#
+# Real releases are stamped from `date -u` by post-image.sh and cannot trip this. It is
+# checked here rather than in sign-bundle.sh deliberately: signing a genuine release with a
+# scheduled future stamp is somebody's decision to make, and only this tool has a reason to
+# be handed a version by hand.
+# Five, not an hour. The threshold has to be tighter than the mistake it prevents, and the
+# mistake made here was thirty minutes -- so an hour would have let it straight through and
+# the guard would have been a decoration. A future stamp is never *needed*: the bundle only
+# has to sort above the release under test, which is in the past. The five minutes are slack
+# for a build host whose clock is a little ahead, not room for a decision.
+FUTURE_MINUTES=5
+python3 - "${VERSION}" "${FUTURE_MINUTES}" <<'PYTHON' || exit 1
+import calendar, sys, time
+
+version, allowed = sys.argv[1], int(sys.argv[2])
+stamp = version.split(".")[-1]
+wanted = calendar.timegm(time.strptime(stamp, "%Y%m%d%H%M"))
+ahead = (wanted - time.time()) / 60
+
+if ahead > allowed:
+    sys.exit(
+        f"{version} is stamped {ahead:.0f} minutes into the future, and this refuses more\n"
+        f"  than {allowed}.\n"
+        "  The stamp becomes the appliance's anti-rollback floor the moment the boot entry\n"
+        "  is installed -- before the release has proven itself -- so a future stamp on a\n"
+        "  bundle you intend to fail leaves the machine refusing every honest build made\n"
+        "  before that time, including the one it rolled back to.\n"
+        "  Remedy: one minute above the release under test is enough. systemd-boot orders\n"
+        "  by version, so it only has to sort above the running one."
+    )
+PYTHON
+
 [ -f "${GOOD}/update.json" ] || {
     printf >&2 'no update.json in %s, so that is not a bundle\n' "${GOOD}"
-    printf >&2 '  remedy: point this at output/images/plexos-update\n'
+    printf >&2 '  remedy: point this at output/images/medialith-update\n'
     exit 1
 }
 
@@ -140,7 +197,7 @@ PYTHON
 # Re-signed, so the appliance accepts it and only verity can object. The manifest is
 # rewritten from the amended update.json rather than patched, for the reason above.
 rm -f "${BROKEN}/manifest.json" "${BROKEN}/manifest.json.sig"
-"$(dirname "$0")/sign-bundle.sh" "${BROKEN}" "${KEY}" "${CERT}"
+"$(dirname "$0")/sign-bundle.sh" "${BROKEN}" "${KEY}" "${CERT}" --channel "${CHANNEL}"
 
 printf 'broken bundle at %s\n' "${BROKEN}"
 printf '  version:   %s  (must sort above what the appliance runs)\n' "${VERSION}"

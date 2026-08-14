@@ -1,4 +1,4 @@
-# busybox options PlexOS needs and Buildroot's default configuration turns off.
+# busybox options MediaLith needs and Buildroot's default configuration turns off.
 #
 # Applied on top of package/busybox/busybox.config via
 # BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES. Every option here must be checked against

@@ -1,7 +1,7 @@
-# PlexOS
+# MediaLith
 
-An immutable, atomically-updated Linux appliance distribution built to run Plex Media
-Server well — and to say clearly what is wrong when it does not.
+An immutable, atomically-updated Linux appliance built to run Plex Media Server well —
+and to say clearly what is wrong when it does not.
 
 A general-purpose distribution running Plex has one characteristic failure: hardware
 transcoding stops working and **nothing says so**. Plex falls back to software, the CPU
@@ -9,7 +9,13 @@ saturates, playback stutters, and the person who owns the machine is left guessi
 layer above the fault reports success, because every layer above the fault runs as root
 and the fault is that Plex does not.
 
-PlexOS is a whole system built around not doing that.
+MediaLith is a whole system built around not doing that.
+
+> MediaLith is an independent community project and is not affiliated with, endorsed by,
+> or sponsored by Plex Inc. Plex and Plex Media Server are trademarks of Plex Inc.
+> Previously developed under the working name PlexOS; some internal identifiers still use
+> the legacy `plexos` namespace, deliberately — see [Names that did not
+> change](#names-that-did-not-change).
 
 ---
 
@@ -84,7 +90,7 @@ at all. Both halves have been demonstrated on hardware, the second one the hard 
 
 ## The crates
 
-Everything PlexOS owns is Rust. The kernel stays C, and so does the userland Plex needs —
+Everything MediaLith owns is Rust. The kernel stays C, and so does the userland Plex needs —
 Plex Media Server is a closed-source, dynamically linked glibc binary, and that constrains
 the base.
 
@@ -97,6 +103,9 @@ the base.
 | `plexos-update` | A/B updates, the signed trust chain, anti-rollback, revocation | 65 |
 | `plexos-types` | Every on-disk and on-wire format, plus the GPT writer | 65 |
 | `plexos-gpu` | Whether hardware transcoding works, and if not, what to do | 53 |
+
+The crate names are the legacy `plexos-*` namespace and stay that way for now — see [Names
+that did not change](#names-that-did-not-change).
 
 **`unsafe` is forbidden everywhere except `plexos-sys`**, which exists so that it can be.
 PID 1 has to issue syscalls; confining them to one small crate keeps the unsafe
@@ -128,6 +137,34 @@ does not; and GuC/HuC firmware shipped for exactly one chip generation, which tr
 at reduced quality on a different laptop and reported success throughout.
 
 ---
+
+## Requirements
+
+CPU and platform are separate questions, and conflating them is how a project ends up
+claiming it runs on "any x86-64 PC".
+
+**Processor.** A 64-bit x86 processor, and nothing above the architectural baseline —
+`-march=x86-64`, which is MMX, SSE and SSE2. MediaLith requires no SSE3, no SSSE3, no
+SSE4, no POPCNT, no `CMPXCHG16B`, no AVX. That is measured rather than assumed: the
+kernel's own `X86_REQUIRED_FEATURE_*` list for `x86_64` asks for nothing more, the three
+Rust binaries are built with no `-C target-cpu`, and Plex Media Server carries its own
+musl runtime and dispatches on CPUID at run time.
+
+Verified by booting the actual image under QEMU + OVMF with software emulation (TCG, not
+KVM — KVM masks CPUID without removing the instruction, so it cannot answer this) on
+`Opteron_G1`, `Conroe`, `Nehalem` and `Haswell` CPU models. On every one of them the
+machine reached firmware, kernel, PID 1, a dm-verity `/usr`, the network, the console,
+and Plex answering on loopback. **These are emulated CPU models, not physical
+machines**; no processor older than the reference laptop's Core i5-8265U has been tried
+in silicon.
+
+**Platform.** UEFI x86-64, GPT, and a disk and network adapter this kernel has a driver
+for. That is the constraint that actually decides whether a given machine works, and it
+is unchanged by the paragraph above: there is no legacy BIOS support, and a machine
+whose storage or NIC is not in the built-in driver set has no second chance, because
+there are no loadable modules for it.
+
+**Hardware transcoding** is a third question again, answered by `plexos-gpu` per machine.
 
 ## Hardware
 
@@ -167,26 +204,49 @@ state it was written in can be wrong in the state its own success produces.*
 
 ---
 
+## Names that did not change
+
+The product is MediaLith. A good deal of the machinery still says `plexos`, and that is a
+decision rather than an unfinished job: these names are **contracts with disks and with
+releases already in the field**, and this appliance is built so that a new release can
+fail and hand the machine back to an older one.
+
+| Still says `plexos` | Why it must |
+| --- | --- |
+| `product` in the update manifest | The updater refuses a bundle whose product differs. A MediaLith build claiming `medialith` would be **refused by every machine already installed**, leaving reinstallation — and a fresh `/var` — as the only route |
+| `/var/lib/plexos/**` | The one surface a rollback does not revert. The device token, the TLS key, the anti-rollback floor and the revocation list live here, and the release a rollback lands on must still find them |
+| `/etc/plexos/config.toml` | Persistent state wearing an `/etc` address: the overlay's upper layer is on `/var`. Renaming it silently reverts a machine's hostname, timezone and addressing to defaults |
+| `plexos.slot`, `plexos.roothash` | Inside each signed UKI, including the previous release's. A build that only understood new names could not boot the image it is supposed to fall back to |
+| `plexos-<version>.efi` boot entries | Written by the release *installing* an update, read by the release *booting* it. A disagreement leaves the try counter uncleared and the machine rolls itself back three reboots later, looking like a hardware fault |
+| `ID` and `SORT_KEY` in `os-release` | `SORT_KEY` is what systemd-boot groups entries by, and a mixed ESP would be two groups. `ID` has no consumer here at all |
+| Crate and binary names — `plexos-sys`, `plexosd`, … | A large diff, no user-visible benefit, and every build script, package definition and image assembly step is an opportunity to break something that works. The daemon is *the MediaLith management daemon*; the executable is still `plexosd` |
+
+Public branding does not have to match an on-disk namespace, and here it deliberately does
+not. Internal namespaces can migrate later, as a change designed for that purpose.
+
 ## What is not done
 
-- **The name** uses a third-party trademark and will probably have to change.
 - **Secure Boot keys** are not enrolled, so images are self-signed.
 - **The root signing key is a development key.** Its private half sits on a build host,
   and every place that reports a signature says so.
 - **Arc and AMD are unverified.** One has no hardware here; the other is not built.
-- **CI exists and has never run.** `.github/workflows/ci.yml` checks formatting, clippy,
-  the test suite and the docs — on pushes to `main` and on pull requests. It was written
-  before either existed, so it has never fired once. It covers the Rust workspace only;
-  image builds need a Buildroot host and are still tested by being put on machines.
+- **CI runs, and the newest work has not been through it.** `.github/workflows/ci.yml`
+  checks formatting, clippy, the test suite and the docs, on pushes to `main` and on pull
+  requests, and it has passed on both. This line used to say it had never fired once,
+  which was true the day it was written and stopped being true on the very push that added
+  it — a sentence describing a state its own commit ended. What is true now is narrower:
+  development happens on a branch, `main` last moved on 2026-08-11, and everything since
+  is unverified by CI until that branch is merged. It covers the Rust workspace only; image
+  builds need a Buildroot host and are still tested by being put on machines.
 
 ## Licensing
 
-- **PlexOS's own code is [Apache-2.0](LICENSE)** — everything in `crates/`, `buildroot/`
+- **MediaLith's own code is [Apache-2.0](LICENSE)** — everything in `crates/`, `buildroot/`
   and `tools/`.
 - **The kernel is GPL-2.0**, unmodified mainline built by Buildroot, and the rest of the
   base userland carries its own upstream licences. An image is an aggregate of separately
   licensed works, not a derivative of this repository.
-- **Plex Media Server is proprietary** and is not redistributed inside PlexOS images. It is
+- **Plex Media Server is proprietary** and is not redistributed inside MediaLith images. It is
   fetched from Plex's own servers at provisioning time
   ([ADR-0010](docs/adr/0010-plex-provisioning.md)).
 - **NVIDIA's userspace libraries are proprietary.** Their licence permits redistribution

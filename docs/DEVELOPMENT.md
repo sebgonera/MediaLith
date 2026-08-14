@@ -65,11 +65,22 @@ Debian or Ubuntu:
 
 ```
 sudo apt install build-essential git wget cpio rsync bc unzip file \
-                 libncurses-dev flex bison python3
+                 libncurses-dev flex bison python3 xfsprogs
 ```
 
 Buildroot builds its own toolchain and most host tools, so the list is short. Add
 `qemu-system-x86 ovmf` to try the resulting image without hardware.
+
+`xfsprogs` is the one that is easy to miss and it is a genuine requirement rather than
+an oversight: `/var` is XFS, and Buildroot has no *host* xfsprogs package to build
+`mkfs.xfs` with, so it has to come from the distribution. It was absent from this list
+for the life of the project, and the failure is at the very end of a full build —
+`post-image.sh` checks its tools up front and refuses, which is the right behaviour and
+still means hours of compilation before anything says so.
+
+Disk: **around 30 GB per output tree**. That is per tree and not per machine; building
+two configurations side by side for comparison needs both, plus room for the 8 GiB
+image each produces.
 
 **Recent Ubuntu ships uutils coreutils**, whose `install(1)` is affected by
 [uutils#12166](https://github.com/uutils/coreutils/issues/12166), and Buildroot
@@ -176,7 +187,7 @@ slot A populated.
 
 ### Under QEMU first
 
-PlexOS boots UEFI only, so QEMU needs OVMF firmware. Give it a writable copy of the
+MediaLith boots UEFI only, so QEMU needs OVMF firmware. Give it a writable copy of the
 variable store, or the boot order cannot be recorded:
 
 ```
@@ -201,13 +212,32 @@ kernel module: Permission denied` without it:
 sudo usermod -aG kvm "$USER"   # then log out and back in
 ```
 
-Without KVM, substitute `accel=tcg` **and name a CPU**: `-cpu Nehalem` or better.
-This is not optional. The defconfig sets `BR2_x86_corei7`, so everything Buildroot
-compiles targets that instruction set, while QEMU's default `qemu64` model does not
-implement it. The kernel and `plexos-init` boot fine — the former is built for generic
-x86-64 and the latter by the workspace's own cargo — and then the first Buildroot-built
-binary to run dies with `SIGILL`, which the console reports as
-`Attempted to kill init! exitcode=0x00000004`.
+Without KVM, substitute `accel=tcg`. Naming a CPU is no longer required: the defconfig
+selects `BR2_x86_x86_64`, so Buildroot compiles for generic x86-64 and QEMU's default
+`qemu64` model runs it.
+
+**This used to be a trap, and the shape of it is worth keeping** even though the cause
+is gone. The defconfig set `BR2_x86_corei7` for most of the project's life, so
+everything Buildroot compiled was permitted SSE4.2 and POPCNT while `qemu64` implements
+neither. What made it expensive to diagnose is that almost everything worked: the
+kernel is built for generic x86-64, `plexos-init` is built by the workspace's own cargo
+for `x86_64-unknown-linux-gnu`, and both booted perfectly — so the machine got all the
+way through firmware, kernel and PID 1 before the *first Buildroot-built binary* died
+with `SIGILL`, reported as `Attempted to kill init! exitcode=0x00000004`. A failure that
+late reads as a bug in the last thing that ran rather than as a property of the whole
+userspace.
+
+So: **a boot that reaches PID 1 has proved nothing about the userspace.** If something
+similar reappears, `tools/cpu-boot-matrix.sh` boots the real image on a named CPU model
+and reports how far it got, and `post-image-test.sh` stage 8 asserts the baseline at the
+configuration decision rather than on somebody's Core 2.
+
+One thing that matrix does **not** do is use KVM, and the reason generalises: KVM cannot
+test a CPU baseline. `-cpu Conroe` under KVM changes what CPUID reports and not what the
+silicon will execute, so an SSE4.2 instruction runs fine on a guest claiming to be a
+Core 2 and the result comes back green about a floor that is still there. Only TCG
+decodes each instruction against the model. Use `-cpu host` with KVM for speed, and TCG
+with a named model when the question is which instructions exist.
 
 `accel=tcg` is otherwise just slow: full software emulation of a boot that takes
 seconds under KVM. Fine for proving the boot path, painful for anything iterative.
@@ -280,8 +310,8 @@ address" and is not the same as a root of trust.
 ### Every publish
 
 ```
-tools/sign-bundle.sh output/images/plexos-update \
-    ~/.plexos-keys/signing-dev ~/.plexos-keys/signing-dev.cert
+tools/sign-bundle.sh output/images/medialith-update \
+    ~/.plexos-keys/signing-dev-2 ~/.plexos-keys/signing-dev-2.cert --channel dev
 tools/publish-update.sh
 ```
 
@@ -290,6 +320,41 @@ tools/publish-update.sh
 "will the machine take this" is answered on the build host rather than after a 74 MB
 download onto a machine in another room. `publish-update.sh` refuses to serve a bundle with
 no signed manifest, for the same reason.
+
+**`--channel` is required and has no default** (ADR-0020). An appliance refuses a release
+published to a channel it does not track, so the word has to be said rather than assumed —
+and defaulting to `stable` would put a development build on every machine that forgot the
+flag. Set the appliance's own channel in the console under **System → System updates**; a
+machine that has never been told is on `stable` and will refuse a `dev` bundle, correctly.
+
+### Publishing where an appliance can find it by itself
+
+The above is the bench path: it serves one bundle and somebody pastes the address. The
+other path is a static tree an appliance polls on its own, which is files and no server:
+
+```
+tools/publish-release.sh ~/updates output/images/medialith-update
+python3 -m http.server 8080 --directory ~/updates
+```
+
+That writes `channels/dev.json` and `releases/<release>/`, with the manifest named for its
+channel and the artefacts stored once. Point an appliance at
+`http://<build-host>:8080` under **System → System updates**, set its channel to `dev`, and
+it finds the release by itself within a day — or immediately with **Check now**.
+
+Promotion publishes the *same bytes* to another channel. Nothing is rebuilt and nothing is
+copied; a small manifest is re-signed beside the artefacts, and every digest is checked
+against the file on disk first:
+
+```
+tools/promote-release.sh ~/updates 0.1.1.202608250900 beta \
+    ~/.plexos-keys/signing-dev-2 ~/.plexos-keys/signing-dev-2.cert
+```
+
+A release identifier names bytes: publishing a release string that is already in the tree
+with different artefacts is refused, in both directions — the bundle must also match its own
+manifest, because an artefact rebuilt after signing is how a channel comes to point at bytes
+nobody published.
 
 The build stamp is load-bearing. `PLEXOS_VERSION` must end in `YYYYMMDDHHMM`, because that
 number is the manifest's anti-rollback `sequence` as well as the string `systemd-boot`
@@ -306,6 +371,11 @@ cargo run -p plexos-update --bin plexos-sign -- revoke \
 Served beside the manifest, it is picked up on the next check and stored. The counter must
 increase with every list published: an appliance keeps the highest it has seen, so an older
 list — genuinely root-signed, from before the revocation — un-revokes nothing.
+
+In a static tree the list has to be beside *every* manifest, because an appliance reads it
+from the directory it fetched its manifest from. `tools/publish-revocations.sh <tree> <list>`
+copies it into every release directory; the document is a few hundred bytes and the one that
+matters is whichever release a channel points at now.
 
 ## Secure Boot
 
@@ -346,7 +416,7 @@ sbverify --cert ~/.plexos-keys/secureboot/db.crt /tmp/boot.efi
 
 ### Enrolling the key in a machine, once
 
-Nothing in PlexOS does this. It is a person, in the firmware's own setup screens, and that
+Nothing in MediaLith does this. It is a person, in the firmware's own setup screens, and that
 is deliberate — see ADR-0017.
 
 1. Copy `db.auth`, `KEK.auth` and `PK.auth` somewhere the firmware can read. A FAT32 USB
@@ -356,7 +426,7 @@ is deliberate — see ADR-0017.
    be edited at all.
 3. Enrol `db.auth` into **db**. Some firmware calls this "Enroll key from file", some
    "Append", some hides it behind "Key Management". Then **look at the list** and confirm
-   `PlexOS Signature Database Key` is in it. Do not go on until it is.
+   `MediaLith Signature Database Key` is in it. Do not go on until it is.
 4. Enrol `KEK.auth` into **KEK**, and confirm it the same way.
 5. Enrol `PK.auth` into **PK** — **last**. This is the step that takes the platform out of
    Setup Mode and switches enforcement on.
@@ -391,7 +461,7 @@ Boot → Key Management**.
 ### When it does not boot
 
 A signed image on a machine that has not enrolled the key fails at the first step, and
-**the firmware's message will not mention PlexOS** — expect "Security Violation", "Invalid
+**the firmware's message will not mention MediaLith** — expect "Security Violation", "Invalid
 signature detected" or a screen naming only the file. That is the expected symptom of a
 correct image and an unenrolled machine, not of a bad build.
 

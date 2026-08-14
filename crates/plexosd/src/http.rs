@@ -54,6 +54,50 @@ pub const MAX_BODY: usize = 64 * 1024;
 /// Without this a single half-open connection holds a thread forever.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The mutating routes that do not require a credential, because they are how one is
+/// obtained.
+///
+/// Constants, and they live here rather than in `console` next to the other route strings,
+/// because [`refusal`] is what has to agree with the router about them. Two spellings of a
+/// path — one in the gate, one in the table — is how a route ends up either unreachable or
+/// quietly unauthenticated, and only one of those two mistakes announces itself.
+///
+/// Spending a pairing code from the machine's own screen (ADR-0019).
+pub const PAIR_ROUTE: &str = "/api/pair";
+
+/// Asking to be approved by a browser that is already an administrator (ADR-0019).
+pub const BROWSER_PAIR_START: &str = "/api/browser-pair/start";
+/// Collecting the session that approval produced — needs a secret only the asking browser
+/// has, which is what stands in for a credential.
+pub const BROWSER_PAIR_REDEEM: &str = "/api/browser-pair/redeem";
+/// Withdrawing a request, on the same terms.
+pub const BROWSER_PAIR_CANCEL: &str = "/api/browser-pair/cancel";
+
+/// Every route the gate lets past, in one list.
+///
+/// A list rather than a chain of conditions, and matched **exactly** rather than by prefix.
+/// This suite already pins that `/api/pair/` and `/api/paired` do not inherit the
+/// exemption; a prefix match here would quietly make `/api/browser-pair/anything` an
+/// unauthenticated corner of the API, and an unauthenticated route is not something that
+/// announces itself afterwards.
+///
+/// What keeps the list defensible is that none of these grants anything on its own:
+///
+/// - `PAIR_ROUTE` spends a code only somebody at the machine's screen could have caused to
+///   exist.
+/// - `BROWSER_PAIR_START` creates a request that does nothing until an authenticated
+///   administrator approves it. Anybody on the network may ask; asking is not being let in.
+/// - `BROWSER_PAIR_REDEEM` and `BROWSER_PAIR_CANCEL` require a 256-bit secret that was
+///   returned exactly once, to the browser that asked. Possession of it proves ownership of
+///   a request and nothing else — in particular it is not a bearer credential, and no other
+///   route accepts it.
+const OPEN_ROUTES: &[&str] = &[
+    PAIR_ROUTE,
+    BROWSER_PAIR_START,
+    BROWSER_PAIR_REDEEM,
+    BROWSER_PAIR_CANCEL,
+];
+
 /// A parsed request. Only what the routes actually use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
@@ -475,6 +519,14 @@ pub fn refusal(request: &Request, credential: &crate::auth::Credential) -> Optio
         return None;
     }
 
+    // The routes that cannot require a credential, because they are how a browser gets one.
+    // Listed in one place rather than reasoned about in each handler, so that the whole of
+    // the exception is visible in the function that grants every other route's access. See
+    // OPEN_ROUTES for why each of them grants nothing on its own.
+    if OPEN_ROUTES.contains(&request.path.as_str()) {
+        return None;
+    }
+
     // Everything past here changes the machine, and ADR-0013 says a token comes first.
     Some(match credential {
         // An unclaimed device. Refusing rather than allowing is the only safe reading:
@@ -486,22 +538,29 @@ pub fn refusal(request: &Request, credential: &crate::auth::Credential) -> Optio
              and nothing may change it. The token is printed on the console attached to \
              the machine at first start (ADR-0013).\n",
         ),
-        crate::auth::Credential::Set(fingerprint) => {
+        crate::auth::Credential::Set(_) => {
             let presented = request
                 .header("Authorization")
                 .and_then(crate::auth::bearer);
             match presented {
-                Some(token) if crate::auth::matches(token, fingerprint) => return None,
+                // Either credential, and this is the only place that knows there are two.
+                // The handler is told nothing about which arrived.
+                Some(token) if crate::auth::authenticate(token, credential).is_some() => {
+                    return None;
+                }
                 Some(_) => Response::text(
                     403,
-                    "That token is not this device's. The one printed on its console at \
-                     first start is the only one it accepts; deleting the credential \
-                     file and restarting issues a new one.\n",
+                    "That credential is not this device's, or the browser session it \
+                     names has ended. Remedy: press P on the screen attached to the \
+                     machine and scan the QR code, or enter the recovery device code \
+                     this device printed when it was first started.\n",
                 ),
                 None => Response::text(
                     401,
-                    "This route changes the machine and needs the device token: send it \
-                     as `Authorization: Bearer <token>`. Reading the status page needs \
+                    "This route changes the machine and needs an administrator \
+                     credential: send it as `Authorization: Bearer <credential>`. Pair a \
+                     browser by pressing P on the screen attached to the machine, or \
+                     enter the recovery device code. Reading the status page needs \
                      nothing.\n",
                 ),
             }
@@ -571,7 +630,6 @@ where
 /// If accepting fails in a way that ends the loop.
 pub fn serve_tls<F, U>(
     listener: &TcpListener,
-    config: &std::sync::Arc<rustls::ServerConfig>,
     credential: crate::auth::Credential,
     handler: F,
     upload: U,
@@ -590,14 +648,19 @@ where
             Ok(stream) => {
                 let handler = std::sync::Arc::clone(&handler);
                 let upload = std::sync::Arc::clone(&upload);
-                let config = std::sync::Arc::clone(config);
                 std::thread::spawn(move || {
                     let credential = crate::auth::current();
+                    // Read per connection rather than captured, so a certificate reissued
+                    // because the machine's address changed takes effect at once -- the
+                    // same reasoning, and the same shape, as the credential above.
+                    let Some(config) = crate::tls::serving() else {
+                        return;
+                    };
                     if set_timeouts(&stream).is_err() {
                         return;
                     }
-                    // A failure here is not per-connection: the configuration was
-                    // accepted when the console started, or the console never started.
+                    // A failure here is not per-connection: the configuration was accepted
+                    // when it was installed, or it was never installed.
                     if let Ok(connection) = rustls::ServerConnection::new(config) {
                         let mut tls = rustls::StreamOwned::new(connection, stream);
                         let _ = handle(&mut tls, &credential, handler.as_ref(), upload.as_ref());
@@ -736,6 +799,111 @@ mod tests {
     fn a_request_line_without_a_target_is_rejected_not_guessed() {
         assert_eq!(parse_request("GET\r\n"), Err(ParseError::Malformed));
         assert_eq!(parse_request(""), Err(ParseError::Malformed));
+    }
+
+    #[test]
+    fn an_administrator_session_opens_the_same_doors_as_the_recovery_code() {
+        // The whole of ADR-0019's integration with ADR-0013, asserted at the gate rather
+        // than at a route -- because a route is exactly where this must not be decided.
+        let handler = |_: &Request| Response::text(200, "reached");
+        let claimed = crate::auth::Credential::Set(crate::auth::fingerprint(TOKEN));
+
+        let session = crate::session::issue().expect("/dev/urandom");
+        let request = Request {
+            method: "POST".to_owned(),
+            path: "/api/provision".to_owned(),
+            headers: vec![("Authorization".to_owned(), format!("Bearer {session}"))],
+            body: Vec::new(),
+        };
+        assert_eq!(route(&request, &claimed, &handler).status, 200);
+
+        // And the recovery code has lost nothing by there being a second way in.
+        let with_code = Request {
+            headers: vec![("Authorization".to_owned(), format!("Bearer {TOKEN}"))],
+            ..request.clone()
+        };
+        assert_eq!(route(&with_code, &claimed, &handler).status, 200);
+
+        // Signed out, the same browser is a stranger again.
+        assert!(
+            crate::session::revoke(&session),
+            "cleanup: the session was live"
+        );
+        assert_eq!(route(&request, &claimed, &handler).status, 403);
+    }
+
+    #[test]
+    fn a_session_is_no_use_on_a_device_that_has_not_been_claimed() {
+        // An unclaimed device refuses every mutating route outright, and that must not be
+        // reachable around: a session issued before the credential existed would be a way
+        // past a state whose whole purpose is to have no way past.
+        let handler = |_: &Request| Response::text(200, "should not be reached");
+        let session = crate::session::issue().expect("/dev/urandom");
+        let request = Request {
+            method: "POST".to_owned(),
+            path: "/api/provision".to_owned(),
+            headers: vec![("Authorization".to_owned(), format!("Bearer {session}"))],
+            body: Vec::new(),
+        };
+        assert_eq!(
+            route(&request, &crate::auth::Credential::Unset, &handler).status,
+            503
+        );
+        assert!(
+            crate::session::revoke(&session),
+            "cleanup: the session was live"
+        );
+    }
+
+    #[test]
+    fn only_the_routes_that_hand_out_credentials_need_no_credential() {
+        // The exemption has to be an exact list. A prefix match, or a second spelling in
+        // the router, would make this an unauthenticated corner of the API rather than a
+        // few named doors -- and an unauthenticated route is not something that announces
+        // itself afterwards. The approval half of browser pairing sits under the same path
+        // prefix as the open half, which is what makes that distinction load-bearing.
+        let handler = |request: &Request| Response::text(200, request.path.clone());
+        let claimed = crate::auth::Credential::Set(crate::auth::fingerprint(TOKEN));
+
+        let anonymous = |path: &str| Request {
+            method: "POST".to_owned(),
+            path: path.to_owned(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+
+        for open in OPEN_ROUTES {
+            assert_eq!(
+                route(&anonymous(open), &claimed, &handler).status,
+                200,
+                "{open} is how a browser obtains a credential"
+            );
+        }
+
+        for path in [
+            "/api/pair/",
+            "/api/pairs",
+            "/api/pair/extra",
+            "/api/paired",
+            // The approval side of browser pairing. These decide whether somebody else is
+            // let in, so they are exactly the routes that must NOT be open -- and they sit
+            // under the same path prefix as three that are, which is why the list above is
+            // matched exactly rather than by prefix.
+            "/api/browser-pair/approve",
+            "/api/browser-pair/deny",
+            "/api/browser-pair/inspect",
+            "/api/browser-pair/",
+            "/api/browser-pair/start/extra",
+            "/api/terminal",
+            "/api/token",
+            "/api/power",
+        ] {
+            assert_eq!(
+                route(&anonymous(path), &claimed, &handler).status,
+                401,
+                "{path} must still demand a credential"
+            );
+        }
     }
 
     #[test]
@@ -1174,7 +1342,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let identity =
             crate::tls::load_or_create(&dir, &["localhost".to_owned()]).expect("an identity");
-        let config = crate::tls::server_config(&identity).expect("a server config");
+        // Installed rather than passed: the server reads the configuration in force per
+        // connection now, so that a certificate reissued for a new address takes effect
+        // without a restart.
+        crate::tls::install(crate::tls::server_config(&identity).expect("a server config"));
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
         let port = listener.local_addr().unwrap().port();
@@ -1183,7 +1354,6 @@ mod tests {
             let mut log = |_: &str| {};
             let _ = serve_tls(
                 &listener,
-                &config,
                 crate::auth::Credential::Unset,
                 |request| Response::text(200, format!("served {}", request.path)),
                 |_: &Request, _: &mut dyn BufRead| None,

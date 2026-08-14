@@ -63,7 +63,7 @@ impl std::fmt::Display for Error {
             Self::NoPartition { label, cause } => write!(
                 f,
                 "no partition labelled {label}: {cause}. This disk was not written by a \
-                 PlexOS installer, or its GPT is damaged. Nothing was written."
+                 MediaLith installer, or its GPT is damaged. Nothing was written."
             ),
             Self::Io { doing, cause } => write!(f, "{doing}: {cause}"),
             Self::Mismatch {
@@ -102,7 +102,7 @@ pub fn to_partition(
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<String, Error> {
     // Scoped to a disk, and that is the whole of the argument for this parameter: once
-    // PlexOS can install itself, a machine can carry two partitions with this label, and
+    // MediaLith can install itself, a machine can carry two partitions with this label, and
     // whichever the kernel enumerated first is not a choice anything made. An update
     // installed in that state went to a disk nothing had chosen -- it was the right one,
     // and nothing made it so.
@@ -260,7 +260,7 @@ mod tests {
         .unwrap_err();
         let message = error.to_string();
         assert!(
-            message.contains("not written by a PlexOS installer"),
+            message.contains("not written by a MediaLith installer"),
             "{message}"
         );
         assert!(message.contains("Nothing was written"), "{message}");

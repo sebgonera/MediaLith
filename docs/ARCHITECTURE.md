@@ -1,11 +1,11 @@
-# PlexOS Architecture
+# MediaLith Architecture
 
 This document describes the system as designed. Individual decisions, with their
 alternatives and consequences, live in [`docs/adr/`](adr/).
 
 ## 1. Shape of the system
 
-PlexOS is an **image-based appliance OS**. It has no package manager on the device
+MediaLith is an **image-based appliance OS**. It has no package manager on the device
 and no in-place upgrade path. The unit of change is a whole `/usr` image, written to
 whichever of two slots is not currently running, and activated by a reboot.
 
@@ -75,7 +75,7 @@ is a machine with a network problem, not a machine that needs its OS reverted.
 
 ## 3. No *separate* initramfs
 
-An earlier draft of this document claimed PlexOS has no initramfs at all and that the
+An earlier draft of this document claimed MediaLith has no initramfs at all and that the
 kernel execs `plexos-init` directly. That was wrong, and the correction matters enough
 to state plainly rather than quietly edit.
 
@@ -84,7 +84,7 @@ can create a verity device from the command line via `dm-mod.create`, but that f
 `/usr` itself to be the root, which forecloses the tmpfs root and `/etc` overlay the
 rest of this design depends on. Something has to run first.
 
-What PlexOS actually has is an initramfs **with no separate artifact**. A Unified
+What MediaLith actually has is an initramfs **with no separate artifact**. A Unified
 Kernel Image is a single PE binary with kernel, initrd, and command line in their own
 sections, signed as a unit. So the property the earlier claim was reaching for still
 holds exactly:
@@ -157,7 +157,7 @@ us; the Plex payload is built by Plex and cannot be redistributed by us at all
 
 ## 6. Hardware transcoding
 
-This is the feature that justifies the project. The failure mode PlexOS exists to
+This is the feature that justifies the project. The failure mode MediaLith exists to
 eliminate is the one every Plex user knows: transcoding silently falls back to
 software, the CPU pins at 100%, and playback stutters — with nothing in any log
 saying why.
@@ -212,7 +212,7 @@ tell when it does not" is answerable before an image exists to answer it on.
 base of under 100 packages, Buildroot's `make pkg-stats` wired into CI, and a hard
 rule that anything not required to run Plex does not go in the image.
 
-**Plex packaging changes.** PlexOS depends on the shape of Plex's Debian package and
+**Plex packaging changes.** MediaLith depends on the shape of Plex's Debian package and
 its glibc requirements. A breaking change upstream breaks provisioning. The app-image
 boundary limits the blast radius to one component.
 

@@ -6,10 +6,36 @@
 # nothing that answers "how much is left", which on a four-hour first build on two
 # cores is the only question anyone actually has.
 #
-#   tools/build-progress.sh              one-shot
-#   tools/build-progress.sh --watch      refreshes until the build stops
+#   tools/build-progress.sh                    one-shot
+#   tools/build-progress.sh --watch            live, refreshing twice a second
+#   tools/build-progress.sh --watch -i 5       live, every 5 seconds
 #
 # The output directory is taken from $PLEXOS_OUTPUT, then $1, then ./output.
+#
+# ---------------------------------------------------------------------------
+# What "live" costs, and why it is not simply a shorter sleep
+# ---------------------------------------------------------------------------
+#
+# --watch used to clear the screen and redraw every 30 seconds. Two things were
+# wrong with that and only one of them is the interval.
+#
+# `du -sh` walks the whole output tree, which is several gigabytes and tens of
+# thousands of files. At 30-second intervals that is merely wasteful; at two
+# seconds it is a disk hammering the build it is supposed to be watching. So the
+# expensive readings are sampled on their own slower clock and the last value is
+# shown in between, marked with its age rather than pretended to be current.
+#
+# And `clear` is the wrong instrument. It destroys scrollback -- including the
+# error you were reading when you started watching -- and it flickers, because
+# the terminal paints an empty screen before the new frame arrives. The frame is
+# redrawn in place instead, by moving the cursor back over the block just
+# written, which leaves everything above it untouched.
+#
+# The remaining problem is that a weighted package bar barely moves during a
+# kernel build: one package, several minutes, no change to any counter. A bar
+# that does not move reads as a hung build. So the frame also carries the last
+# line the build actually printed, which changes constantly and is the thing
+# that makes it visibly alive.
 #
 # ---------------------------------------------------------------------------
 # What the percentage means, and what it does not
@@ -26,13 +52,31 @@
 
 set -uo pipefail
 
-OUTPUT="${PLEXOS_OUTPUT:-${1:-$(pwd)/output}}"
-[ "${OUTPUT}" = "--watch" ] && OUTPUT="$(pwd)/output"
-BUILD="${OUTPUT}/build"
-LOG="$(dirname "${OUTPUT}")/build.log"
-
 WATCH=0
-for arg in "$@"; do [ "${arg}" = "--watch" ] && WATCH=1; done
+INTERVAL="${PLEXOS_PROGRESS_INTERVAL:-0.5}"
+POSITIONAL=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --watch) WATCH=1 ;;
+        -i|--interval)
+            shift
+            [ $# -gt 0 ] || { printf 'error: --interval needs a number of seconds\n' >&2; exit 2; }
+            INTERVAL="$1"
+            ;;
+        --interval=*) INTERVAL="${1#*=}" ;;
+        -*) printf 'error: unknown option %s\n' "$1" >&2; exit 2 ;;
+        *) POSITIONAL="$1" ;;
+    esac
+    shift
+done
+
+OUTPUT="${PLEXOS_OUTPUT:-${POSITIONAL:-$(pwd)/output}}"
+BUILD="${OUTPUT}/build"
+LOG="${PLEXOS_BUILD_LOG:-$(dirname "${OUTPUT}")/build.log}"
+
+# How often the readings that walk the tree are taken. Everything else is cheap
+# enough to do on every frame.
+DU_EVERY=30
 
 if [ ! -d "${BUILD}" ]; then
     printf 'No Buildroot output at %s\n' "${OUTPUT}" >&2
@@ -122,7 +166,20 @@ targets_list() {
     fi
 }
 
-is_running() { pgrep -f "O=${OUTPUT}" >/dev/null 2>&1 || pgrep -f 'buildroot-upstream' >/dev/null 2>&1; }
+# Is a build actually running?
+#
+# `pgrep -f` matches whole command lines, so it matches this watcher too when the
+# output path was passed as an argument -- and a watcher that finds itself never
+# stops, reporting "building" at a finished build for as long as anybody leaves it
+# open. That is the trap already recorded about pkill matching its own shell, and it
+# matters more now that this loop runs twice a second instead of twice a minute.
+# Own pid and own parent are excluded.
+is_running() {
+    local pids
+    pids=$( { pgrep -f "O=${OUTPUT}" || true; pgrep -f 'buildroot-upstream' || true; } 2>/dev/null \
+            | grep -vx -e "$$" -e "${PPID}" )
+    [ -n "${pids}" ]
+}
 
 # A package counts as done when it has any *installed stamp.
 done_packages() {
@@ -144,14 +201,49 @@ human_time() {
     printf '%dh %02dm' $((s / 3600)) $(((s % 3600) / 60))
 }
 
+# `printf '%0.s#'` with no arguments still prints the literal `#` once, because the
+# format is applied one time with an empty argument list. So the obvious spelling drew
+# a one-character bar at 0% -- a bar claiming progress that had not happened, which is
+# the one thing a progress bar must never do. Both runs are guarded.
 bar() {
-    local pct=$1 width=42 filled
+    local pct=$1 width=42 filled empty
     filled=$((pct * width / 100))
     [ "${filled}" -gt "${width}" ] && filled=${width}
+    [ "${filled}" -lt 0 ] && filled=0
+    empty=$((width - filled))
     printf '['
-    printf '%0.s#' $(seq 1 "${filled}") 2>/dev/null
-    printf '%0.s-' $(seq 1 $((width - filled))) 2>/dev/null
+    [ "${filled}" -gt 0 ] && printf '%0.s#' $(seq 1 "${filled}")
+    [ "${empty}" -gt 0 ] && printf '%0.s-' $(seq 1 "${empty}")
     printf ']'
+}
+
+# Disk usage, sampled on its own clock. Walking a multi-gigabyte tree on every frame
+# would make the watcher a load on the build it is watching.
+DU_CACHE=""
+DU_TAKEN=0
+disk_used() {
+    local now
+    now=$(date +%s)
+    if [ -z "${DU_CACHE}" ] || [ $((now - DU_TAKEN)) -ge "${DU_EVERY}" ]; then
+        DU_CACHE="$(du -sh "${OUTPUT}" 2>/dev/null | cut -f1)"
+        DU_TAKEN=${now}
+    fi
+    printf '%s' "${DU_CACHE:-?}"
+}
+
+# The last thing the build actually printed, trimmed to the terminal.
+#
+# This is what makes the frame visibly alive. The weighted bar barely moves during a
+# kernel build -- one package, several minutes, no counter changing -- and a bar that
+# does not move reads as a hung build, which is the question this script exists to
+# answer.
+log_tail() {
+    local width line
+    width=$(tput cols 2>/dev/null || echo 100)
+    width=$((width - 20))
+    [ "${width}" -lt 20 ] && width=20
+    line=$(tail -c 4096 "${LOG}" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -1)
+    printf '%.*s' "${width}" "${line}"
 }
 
 report() {
@@ -224,7 +316,7 @@ report() {
     errors=$(grep -cE 'Error [0-9]+$' "${LOG}" 2>/dev/null)
     errors=${errors:-0}
 
-    printf '\n  PlexOS build  %s  %s%%\n' "$(bar "${pct}")" "${pct}"
+    printf '\n  MediaLith build  %s  %s%%\n' "$(bar "${pct}")" "${pct}"
     if [ "${unknown}" -eq 1 ]; then
         printf '  %-14s %s\n' "packages" "${n_done} done; TOTAL UNKNOWN, so this bar reads high"
     else
@@ -248,14 +340,14 @@ report() {
     else
         printf '  %-14s %s\n' "errors" "${errors}"
     fi
-    printf '  %-14s %s\n' "disk used" "$(du -sh "${OUTPUT}" 2>/dev/null | cut -f1)"
+    printf '  %-14s %s\n' "disk used" "$(disk_used)"
 
     if [ "${errors}" != "0" ] && [ "${status}" = "STOPPED" ]; then
         printf '\n  Last error:\n'
         grep -E 'Error [0-9]+$' "${LOG}" 2>/dev/null | tail -1 | sed 's/^/    /'
     fi
     if [ "${status}" = "COMPLETE" ]; then
-        printf '\n  Image: %s\n' "${OUTPUT}/images/plexos.img"
+        printf '\n  Image: %s\n' "${OUTPUT}/images/medialith.img"
     fi
     if [ "${status}" = "STOPPED" ] && [ "${pct}" -lt 100 ]; then
         printf '\n  The build is not running. Resume it with:\n'
@@ -265,12 +357,33 @@ report() {
 }
 
 if [ "${WATCH}" -eq 1 ]; then
+    # Leave the cursor visible again however this ends, including Ctrl-C. A terminal
+    # left with a hidden cursor is a small thing that outlives the program and is
+    # entirely this program's fault.
+    tty_out=0
+    [ -t 1 ] && tty_out=1
+    if [ "${tty_out}" -eq 1 ]; then
+        printf '\033[?25l'
+        trap 'printf "\033[?25h\n"; exit 0' INT TERM EXIT
+    fi
+
+    drawn=0
     while true; do
-        clear
-        report
-        printf '  refreshing every 30s, Ctrl-C to stop\n'
+        # Built whole before anything is printed, so the frame is not assembled on
+        # screen a line at a time while the terminal shows half of it.
+        frame="$(report
+                 printf '  %-14s %s\n' "building now" "$(log_tail)"
+                 printf '\n  refreshing every %ss — Ctrl-C to stop\n' "${INTERVAL}")"
+
+        # Back over the previous frame and clear from there down, rather than
+        # clearing the screen: everything printed before this watcher started stays
+        # where it was, which is usually the command that failed.
+        [ "${tty_out}" -eq 1 ] && [ "${drawn}" -gt 0 ] && printf '\033[%dA\033[0J' "${drawn}"
+        printf '%s\n' "${frame}"
+        drawn=$(printf '%s\n' "${frame}" | wc -l)
+
         is_running || break
-        sleep 30
+        sleep "${INTERVAL}"
     done
 else
     report

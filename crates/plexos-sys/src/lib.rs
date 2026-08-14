@@ -1,4 +1,4 @@
-//! The audited unsafe surface of PlexOS.
+//! The audited unsafe surface of MediaLith.
 //!
 //! Every other crate in the workspace sets `unsafe_code = "forbid"`. This one exists
 //! so that they can: the work `plexos-init` does as PID 1 — creating a device-mapper
@@ -45,8 +45,10 @@
 //! of that logic would be two things to get wrong.
 
 pub mod clock;
+pub mod cpu;
 pub mod device;
 pub mod dm;
+pub mod fs;
 pub mod hostname;
 pub mod landlock;
 pub mod module;
@@ -55,6 +57,7 @@ pub mod power;
 pub mod privilege;
 pub mod process;
 pub mod pty;
+pub mod tty;
 pub mod verity;
 
 pub use device::{Partition, by_partlabel, wait_for_partlabel};

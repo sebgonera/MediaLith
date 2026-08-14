@@ -74,6 +74,22 @@ pub struct Service {
     pub args: &'static [&'static str],
     /// Environment to give it, since it inherits none worth having.
     pub env: &'static [(&'static str, &'static str)],
+    /// A terminal to give it instead of PID 1's own, if it should not share the screen.
+    ///
+    /// `None` means it inherits stdin, stdout and stderr from PID 1 — which is
+    /// `/dev/console`, which is the foreground virtual terminal, which is the screen
+    /// somebody is looking at. That was right while everything on this machine was a log.
+    ///
+    /// It stopped being right when the screen became a *drawing* (ADR-0019): a dashboard
+    /// and a daemon's log cannot share a terminal, because the log wins and the result is a
+    /// dashboard with lines through it. So the console shell and `plexosd`'s output go to
+    /// `/dev/tty2` and the dashboard has `/dev/tty1` to itself, one Alt+F2 apart.
+    ///
+    /// This does not give the service a *controlling* terminal — nothing here calls
+    /// `setsid` or `TIOCSCTTY`, and nothing did before either. Job control on the console
+    /// shell is therefore exactly as absent as it has always been, which is worth saying
+    /// out loud so that its absence is not read as something this change took away.
+    pub tty: Option<&'static str>,
 }
 
 /// What the supervisor did, in the words the console gets.
@@ -267,6 +283,29 @@ impl Supervisor {
     }
 }
 
+/// Three handles on one terminal, for a child's standard streams.
+///
+/// Three opens rather than one and two `try_clone`s, and the difference matters: cloned
+/// descriptors share a file offset and a set of status flags, so a service that put its
+/// terminal into a different mode would change it for the other two. Separate opens are
+/// three independent descriptions of the same device, which is what a shell expects.
+fn open_terminal(
+    path: &str,
+) -> io::Result<(
+    std::process::Stdio,
+    std::process::Stdio,
+    std::process::Stdio,
+)> {
+    let open = || {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map(std::process::Stdio::from)
+    };
+    Ok((open()?, open()?, open()?))
+}
+
 /// The delay before attempt number `failures`.
 fn backoff(failures: usize) -> u64 {
     BACKOFF_MS[failures.min(BACKOFF_MS.len() - 1)]
@@ -292,9 +331,21 @@ impl Environment for System {
             command.env(key, value);
         }
 
-        // stdin, stdout and stderr are inherited, which is what puts the shell on the
-        // console. PID 1 holds /dev/console, so a child that inherits them is talking to
-        // the screen attached to the machine.
+        // stdin, stdout and stderr are inherited unless the service asked for a terminal
+        // of its own. PID 1 holds /dev/console, so a child that inherits them is talking to
+        // the screen attached to the machine — which is exactly what the dashboard needs
+        // nothing else to be doing.
+        //
+        // A terminal that cannot be opened leaves the service on PID 1's own console,
+        // which is a machine whose screen is a log again rather than one that will not
+        // boot. Nothing is said about it here that the service will not say better itself,
+        // on the console it falls back to.
+        if let Some(path) = service.tty
+            && let Ok((stdin, stdout, stderr)) = open_terminal(path)
+        {
+            command.stdin(stdin).stdout(stdout).stderr(stderr);
+        }
+
         let child = command.spawn()?;
         let pid = child.id();
         self.children.push(child);
@@ -338,6 +389,7 @@ mod tests {
         program: "/bin/true",
         args: &[],
         env: &[],
+        tty: None,
     }];
 
     static TWO: &[Service] = &[
@@ -346,12 +398,14 @@ mod tests {
             program: "/bin/true",
             args: &[],
             env: &[],
+            tty: None,
         },
         Service {
             name: "shell",
             program: "/bin/true",
             args: &[],
             env: &[],
+            tty: None,
         },
     ];
 

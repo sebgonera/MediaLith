@@ -116,7 +116,7 @@ fn issue(dir: &Path, names: &[String], key_pair: &rcgen::KeyPair) -> io::Result<
     let mut params = rcgen::CertificateParams::new(names.to_vec()).map_err(bad_material)?;
     params
         .distinguished_name
-        .push(rcgen::DnType::CommonName, "PlexOS console");
+        .push(rcgen::DnType::CommonName, "MediaLith console");
 
     let certificate = params.self_signed(key_pair).map_err(bad_material)?;
     let der = certificate.der().to_vec();
@@ -200,6 +200,94 @@ pub fn fingerprint() -> Option<String> {
     FINGERPRINT.get().cloned()
 }
 
+/// The configuration the console is serving, so it can be replaced without a restart.
+///
+/// Held here rather than captured by [`crate::http::serve_tls`], for exactly the reason
+/// [`crate::auth`] holds the credential the same way: the identity is a property of the
+/// machine and the machine changes underneath a server that runs for months.
+///
+/// What changes is the address. A DHCP lease moves, a cable is unplugged, a wireless
+/// interface comes up after the certificate was issued — and on this appliance all three
+/// have happened. Until this existed the certificate named whatever the machine had at the
+/// moment it started, for ever: one of them ended up serving `192.168.2.190` under a
+/// certificate for `192.168.2.102`, an address it no longer had.
+///
+/// That breaks nothing a browser does — a self-signed certificate warns either way — and it
+/// breaks the one thing that makes a self-signed certificate mean anything, which is
+/// comparing the fingerprint at `/api/status` against what the browser was shown. The two
+/// were about different machines.
+static SERVING: std::sync::RwLock<Option<Arc<rustls::ServerConfig>>> = std::sync::RwLock::new(None);
+
+/// Puts a configuration in force. Every connection accepted after this uses it.
+pub fn install(config: Arc<rustls::ServerConfig>) {
+    *SERVING
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(config);
+}
+
+/// The configuration in force, if the console is serving.
+#[must_use]
+pub fn serving() -> Option<Arc<rustls::ServerConfig>> {
+    SERVING
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// The names the certificate in force actually covers.
+static COVERS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// Records what the certificate was issued for.
+///
+/// A lock rather than a `OnceLock`, because the answer changes: a certificate reissued for
+/// a new address has to be able to say so, or the pairing QR would go on avoiding an
+/// address that is now perfectly good.
+pub fn remember_names(names: &[String]) {
+    *COVERS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = names.to_vec();
+}
+
+/// What the certificate in force was issued for.
+///
+/// The watcher compares against this rather than against what it last saw, so a reissue
+/// that failed is retried on the next pass instead of being remembered as done.
+#[must_use]
+pub fn issued_for() -> Vec<String> {
+    COVERS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Whether the certificate in force names `address`.
+///
+/// This exists because of something a machine did rather than something anybody predicted.
+/// The reference laptop has a wired adapter and a wireless one, and their DHCP leases
+/// arrive in that order — but the wireless lease landed *after* the certificate was issued,
+/// so `/api/status` listed `192.168.2.190` first among the addresses somebody could type
+/// while the certificate named only `192.168.2.102`.
+///
+/// Nothing was broken by that on its own: a self-signed certificate produces a warning
+/// either way. What it broke is the one check that makes a self-signed certificate mean
+/// anything — comparing the fingerprint at `/api/status` against what the browser shows —
+/// because the two would be about different addresses.
+///
+/// Before there was a QR code this was invisible, because a person typing an address types
+/// the one they were told. A QR code chooses for them, so it has to choose one the
+/// certificate can vouch for.
+///
+/// An empty set means nothing has been issued yet, and everything is treated as covered:
+/// refusing every address because the answer is not known would turn "no TLS yet" into "no
+/// pairing ever".
+#[must_use]
+pub fn covers(address: &str) -> bool {
+    let names = COVERS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    names.is_empty() || names.iter().any(|name| name == address)
+}
+
 /// Writes key material with permissions set before any bytes reach the disk.
 fn write_private(path: &Path, der: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
@@ -234,6 +322,68 @@ fn bad_material(error: impl std::fmt::Display) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_certificate_follows_the_addresses_and_keeps_its_key() {
+        // Found on a real machine: it answered at 192.168.2.190 under a certificate for
+        // 192.168.2.102, because the wired adapter it had booted with was unplugged. The
+        // certificate was issued once, at start-up, and named whatever the machine had then
+        // -- for ever.
+        //
+        // What that breaks is not the connection; a self-signed certificate warns either
+        // way. It is the fingerprint at /api/status, which is the only thing that makes a
+        // self-signed certificate mean anything, and which was about a different address.
+        //
+        // Named for this test: Rust runs tests as threads in one process, so a fixed path
+        // is one test deleting what another is reading.
+        let dir = std::env::temp_dir().join("plexos-tls-follows-addresses-test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let first = load_or_create(&dir, &names_for(&["192.168.2.102".to_owned()], "box"))
+            .expect("an identity");
+        assert!(first.key_is_new);
+
+        // The cable is unplugged and a wireless lease arrives.
+        let second = load_or_create(&dir, &names_for(&["192.168.2.190".to_owned()], "box"))
+            .expect("a reissued identity");
+
+        assert_ne!(
+            first.certificate, second.certificate,
+            "the certificate has to be reissued for the address the machine now has"
+        );
+        assert_eq!(
+            first.fingerprint, second.fingerprint,
+            "and the key has to be kept: a fingerprint that moved whenever a router handed \
+             out a different address would teach that the warning means nothing"
+        );
+        assert!(!second.key_is_new, "nothing regenerated the key");
+
+        // And nothing is reissued when the addresses have not moved, or a console that
+        // checks every minute would hand out a new certificate every minute.
+        let third = load_or_create(&dir, &names_for(&["192.168.2.190".to_owned()], "box"))
+            .expect("the same identity");
+        assert_eq!(second.certificate, third.certificate);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn what_the_certificate_covers_can_change_because_the_certificate_can() {
+        // `covers` decides which address goes in the pairing QR. It was a OnceLock, which
+        // was right while a certificate was issued once and never again -- and would have
+        // made the QR go on avoiding an address that had since become perfectly good.
+        remember_names(&["192.168.2.102".to_owned()]);
+        assert!(covers("192.168.2.102"));
+        assert!(!covers("192.168.2.190"));
+
+        remember_names(&["192.168.2.190".to_owned()]);
+        assert!(
+            covers("192.168.2.190"),
+            "a reissue has to be able to say so"
+        );
+        assert!(!covers("192.168.2.102"));
+        assert_eq!(issued_for(), vec!["192.168.2.190".to_owned()]);
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("plexos-tls-{name}"));

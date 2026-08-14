@@ -1,10 +1,10 @@
-# PlexOS kernel requirements, applied on top of the architecture default config.
+# MediaLith kernel requirements, applied on top of the architecture default config.
 #
 # A fragment rather than a full linux.config, deliberately. A complete .config is
-# thousands of lines of architecture defaults in which the handful of options PlexOS
+# thousands of lines of architecture defaults in which the handful of options MediaLith
 # actually depends on are invisible, and every kernel bump becomes a merge conflict
 # over settings nobody chose. This file states requirements and nothing else, so a
-# reviewer can see the whole of what PlexOS needs from the kernel on one screen.
+# reviewer can see the whole of what MediaLith needs from the kernel on one screen.
 #
 # The rule that shapes most of it: **=y, not =m**. The initrd inside the UKI is a
 # single static binary with no module loader, no udev, and no modules to load
@@ -54,6 +54,23 @@ CONFIG_EFI_EARLYCON=y
 #
 # The smaller fonts stay compiled in so fbcon=font:<name> can pick another at boot
 # without rebuilding; the default is set on the kernel command line in post-image.sh.
+#
+# CONFIG_FONTS is the one that makes the rest of this section mean anything, and its
+# absence cost this project four months of a console nobody could read. Every font below
+# `depends on !SPARC && FONTS`, so with FONTS unset kconfig dropped all four **without
+# erroring** and left the two the kernel picks by default — 8x16 and 8x8. The command line
+# then asked for `fbcon=font:TER16x32`, `find_font` returned NULL for a font that was never
+# compiled in, and fbcon carried on with 8x16.
+#
+# The symptom is not a missing font. It is a 2880x1620 panel showing a 360x101 character
+# grid, which on a 15-inch screen is text about three millimetres tall — and it was
+# diagnosed as "the command line does not take effect" twice before anybody looked in
+# `.config`. That is the trap already recorded at the top of CLAUDE.md, walked into from the
+# one direction where the evidence points somewhere else entirely.
+#
+# `ls lib/fonts/*.o` in the build directory answers it in a second: two object files where
+# there should be four.
+CONFIG_FONTS=y
 CONFIG_FONT_TER16x32=y
 CONFIG_FONT_TER10x18=y
 CONFIG_FONT_8x16=y
@@ -99,6 +116,31 @@ CONFIG_ISO9660_FS=y
 # ext4 for a stick formatted on a Linux machine, which is the case for anybody who would
 # be reading a Debian package in the first place.
 CONFIG_EXT4_FS=y
+# NTFS, and the case for it is the ordinary one rather than the removable-media path.
+#
+# This appliance is booted from a USB stick on a computer that already has Windows on its
+# internal disk, and that is where the films are. Without this, that partition is an
+# unreadable block: the whole library is inches away on a disk the machine can see, spin
+# up and enumerate, and cannot open. The same applies to any USB drive somebody has been
+# filling from Windows, which is NTFS above the exFAT sizes.
+#
+# ntfs3 rather than the old ntfs driver: CONFIG_NTFS_FS is now nothing but a backward
+# compatibility shim that `select`s this one (fs/ntfs3/Kconfig, read in the 6.19.14 tree
+# rather than recalled), so naming the old symbol gets this driver anyway and hides which
+# one is doing the work.
+#
+# The detail that makes this usable, and the one that would otherwise have been guessed
+# wrong: a Windows left by Fast Startup or hibernation has VOLUME_FLAG_DIRTY set and an
+# unreplayed log, and both refusals in fs/ntfs3/super.c:1367,1373 are guarded by `!ro`.
+# So a read-only mount of a hibernated Windows partition **succeeds** — and MediaLith
+# mounts media read-only unconditionally, so the common case needs no `force` and no
+# advice to go and shut Windows down properly. Anything that ever wants to write here
+# gets a different answer, which is the correct one.
+#
+# LZX_XPRESS is what reads a file somebody compressed with `compact`. Without it those
+# files are present, listed, and unreadable, which is the worst of the three states.
+CONFIG_NTFS3_FS=y
+CONFIG_NTFS3_LZX_XPRESS=y
 # Partition labels are how plexos-init finds a slot (ADR-0003).
 CONFIG_EFI_PARTITION=y
 
@@ -117,6 +159,24 @@ CONFIG_USB_STORAGE=y
 # measure rather than a requirement -- but booting an appliance image from a USB
 # stick is a first-class case here, not a curiosity.
 CONFIG_USB_UAS=y
+# Intel VMD, and this is the one absence on the list that costs a machine outright.
+#
+# VMD is a secondary PCI host bridge: with it enabled in firmware -- which is the factory
+# setting on a great many Dell, HP, Lenovo and NUC-class machines, usually labelled "RAID"
+# or "Intel RST" rather than VMD -- the NVMe drives disappear from the ordinary PCI bus and
+# appear behind the bridge instead. A kernel without this driver does not see a slow disk
+# or a degraded one; it sees no disk at all, on a machine whose firmware setup screen lists
+# the drive by model. The installer then reports nothing to install onto and the remedy it
+# offers -- attach a disk -- is one nobody can act on, because the disk is attached.
+#
+# Built in for the same reason as NVMe and AHCI above: this is the path to the root
+# filesystem, and there is no initramfs module to rescue a kernel that cannot reach it.
+#
+# What this is not: RAID. Intel RST RAID *volumes* are a separate thing that needs md
+# metadata handling and userspace this image does not carry. A disk that is a member of an
+# RST RAID volume stays unsupported. What this buys is the far commoner case -- a single
+# NVMe drive behind VMD because that is how the machine shipped.
+CONFIG_VMD=y
 
 # --- Graphics and transcoding ----------------------------------------------
 # i915 covers Gen9.5 (Whiskey Lake UHD 620, the reference machine). xe is the newer
@@ -136,11 +196,31 @@ CONFIG_PCI=y
 CONFIG_USB_SUPPORT=y
 CONFIG_USB_XHCI_HCD=y
 CONFIG_USB_RTL8152=y
+# The other USB Ethernet families, and r8152 alone was a one-adapter list.
+#
+# USB_RTL8152 covers the adapter attached to the reference laptop and nothing else. ASIX
+# AX88179/178A is the other chip in the great majority of USB 3 gigabit adapters sold, and
+# CDC Ethernet with its NCM successor is the class protocol -- what a dock, a phone
+# tethering, and most adapters that are not Realtek or ASIX actually speak.
+#
+# USB_USBNET is the framework all three sit on and it was off, which is why none of the
+# three appeared in .config at all: a symbol whose dependency is unmet is not reported as
+# refused, it is simply absent, and grepping for it finds nothing either way.
+#
+# Built in rather than modular for the reason the note at the end of this file gives: on a
+# machine with no built-in Ethernet the USB adapter *is* the network, and it has to be
+# there when plexosd brings links up during boot rather than after something loads a
+# module. CDCETHER and CDC_NCM are `default y` once the framework is on; they are named
+# anyway, because a default is a thing that changes without telling anybody.
+CONFIG_USB_USBNET=y
+CONFIG_USB_NET_AX88179_178A=y
+CONFIG_USB_NET_CDCETHER=y
+CONFIG_USB_NET_CDC_NCM=y
 CONFIG_IWLWIFI=y
 CONFIG_IWLMVM=y
 CONFIG_CFG80211=y
 CONFIG_MAC80211=y
-# Wired adapters common on the mini-PCs PlexOS targets.
+# Wired adapters common on the mini-PCs MediaLith targets.
 CONFIG_E1000E=y
 CONFIG_IGB=y
 CONFIG_IGC=y
@@ -149,12 +229,47 @@ CONFIG_INET=y
 CONFIG_IPV6=y
 CONFIG_TCP_CONG_BBR=y
 
+# --- Virtual machines ------------------------------------------------------
+# QEMU, Proxmox and anything else built on virtio. All four were already `=y` when this
+# section was written -- they come from the architecture default config, which is exactly
+# why they are named here. An option nothing in this file states is an option a kernel bump
+# or a defconfig change can turn into `=m` without a word, and a virtio disk that became a
+# module is a machine that does not boot at all. Pinning them costs nothing and makes the
+# state a decision rather than an inheritance.
+#
+# Both disk transports, because which one a hypervisor offers is the hypervisor's choice
+# and not the guest's: Proxmox defaults to virtio-scsi and plain QEMU invocations usually
+# say virtio-blk.
+CONFIG_VIRTIO_PCI=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_SCSI_VIRTIO=y
+CONFIG_VIRTIO_NET=y
+
 # --- Sharing ---------------------------------------------------------------
 # ksmbd rather than Samba: in-kernel, and materially faster for large sequential
 # reads, which is the entire access pattern of a media library (ARCHITECTURE.md).
 CONFIG_SMB_SERVER=y
 CONFIG_NFSD=y
 CONFIG_NFSD_V4=y
+
+# And the *client*, which is a different thing that was missing while its server sat here
+# looking like it.
+#
+# The library on this appliance is expected to live on a NAS, and `plexosd::shares` mounts
+# it: `Kind::Smb.fstype()` returns `smb3`, which is the filesystem type this option
+# registers. Without CONFIG_CIFS the kernel has never heard of `smb3`, so every SMB mount
+# fails with ENODEV -- on an appliance whose console offers an "Add a share" form with SMB
+# in it, whose share code is tested, and whose kernel already carries an SMB *server*. Two
+# adjacent symbols, opposite directions, and the one that was set is the one this feature
+# does not use.
+#
+# Built in with the rest of the filesystems. Modular would mean nothing loads it, which is
+# the same absence wearing a `.ko`.
+#
+# The `select`s it pulls in are the SMB3 crypto -- CMAC, CCM, GCM, AES and the rest -- and
+# they are not optional: they are how signing and encryption work, and a server that
+# requires either is the ordinary configuration now rather than a hardened one.
+CONFIG_CIFS=y
 
 # --- Process isolation -----------------------------------------------------
 # Plex runs unprivileged and confined (ADR-0007).
@@ -211,7 +326,7 @@ CONFIG_MODULE_SIG_SHA256=y
 #
 # `efivarfs` is the one that matters. plexos_sys::device mounts it at
 # /run/plexos-efivars to read LoaderDevicePartUUID, which is how PID 1 learns which ESP
-# the firmware actually booted -- the fix for a machine with two PlexOS disks, where
+# the firmware actually booted -- the fix for a machine with two MediaLith disks, where
 # resolving by label had been a coin toss. As a module the mount returns ENODEV, the
 # lookup fails, and the boot falls back to exactly the behaviour that fix replaced. It
 # is invisible on a one-disk machine and it is the whole defence on a two-disk one.
@@ -220,6 +335,45 @@ CONFIG_MODULE_SIG_SHA256=y
 # check what became `=m` and pin anything the image depends on. `find target -name '*.ko'`
 # answers it in a second, and nothing else will say a word.
 CONFIG_EFIVAR_FS=y
+
+# That rule was written and then not finished, which is the part worth recording. The note
+# above pinned `efivarfs` and stopped; a build later, `.config` still carried eleven `=m`
+# lines building eight `.ko` files, and `find output/target -name '*.ko'` answered it in a
+# second exactly as promised, the first time anybody ran it. The eight are one thermal
+# driver and seven netfilter extensions -- seven rather than ten, because the three
+# `NF_LOG_*` symbols all build into `nf_log_syslog`.
+#
+# The one that mattered is this. `plexosd::metrics` reads processor die temperature from a
+# thermal zone typed `x86_pkg_temp`, and CONFIG_X86_PKG_TEMP_THERMAL is what publishes that
+# zone. As a module, with nothing in this image able to load one, the zone never exists --
+# so the activity card falls back to `acpitz`, a chassis sensor, and reports it. Nothing
+# fails, nothing is logged, and the number on the page is a real temperature of the wrong
+# thing. The remedy string in metrics.rs said to set the symbol to `y` "rather than `m`,
+# because this image is built with CONFIG_MODULES off", which stopped being true in the
+# section above and turned a correct instruction into a wrong explanation.
+CONFIG_X86_PKG_TEMP_THERMAL=y
+
+# The other seven modules are netfilter extensions, and they are here as `n` rather than
+# `y` -- ten symbols, because three of them share one module.
+#
+# They arrive from the architecture default config, not from anything this file asks for,
+# and nothing in this image can reach them: there is no iptables, no nft, no userspace of
+# any kind that speaks to netfilter, and no module loader to bring them in if there were.
+# Seven `.ko` files that ship in every image, ride in `/usr` under the root hash, and can
+# never be loaded is not a feature that is silently gone -- it is a feature that was never
+# wanted, taking up room and one line each in the shipped-module list that stage 7 now
+# checks. Turning them off makes that list exactly the four modules MediaLith deliberately
+# loads, which is what makes an unexpected `.ko` mean something.
+CONFIG_NETFILTER_XT_MARK=n
+CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=n
+CONFIG_NETFILTER_XT_TARGET_LOG=n
+CONFIG_NETFILTER_XT_TARGET_MASQUERADE=n
+CONFIG_NF_LOG_ARP=n
+CONFIG_NF_LOG_IPV4=n
+CONFIG_NF_LOG_IPV6=n
+CONFIG_NF_LOG_SYSLOG=n
+CONFIG_NF_REJECT_IPV4=n
+CONFIG_NF_REJECT_IPV6=n
 
 # ---------------------------------------------------------------------------
 # Note: wired Ethernet may arrive over USB
@@ -231,10 +385,20 @@ CONFIG_EFIVAR_FS=y
 #
 # It removes the concern about configuring wireless before a network exists: with a
 # wired adapter present at setup, the first-boot flow in ADR-0010 works exactly as
-# designed. PlexOS v1 therefore **requires a wired connection at setup**, over PCI or
-# USB, and does not support wireless configuration. For a media server that is a
-# reasonable requirement rather than a limitation — the wireless-before-network
-# ordering can be designed later if it is ever wanted.
+# designed.
+#
+# **MediaLith does support configuring Wi-Fi.** The sentence that stood here said it did
+# not, which was true when it was written and stopped being true when `plexosd::wifi`,
+# `/api/wifi` and the console's Network view were built: a network can be scanned for,
+# joined with a passphrase, and forgotten, from the page or from the machine's own screen.
+#
+# What has *not* changed is the ordering, and that is the part worth keeping. Wireless is
+# configured **through the console**, and the console is reached over the network — so a
+# machine with no link has no way to be told about a wireless one. **A wired connection is
+# therefore still what first-boot setup asks for**, over PCI or USB, and everything above
+# is why it is built in rather than left to a module. That is a property of where the
+# setting is entered, not of what the radio can do; the wireless-before-network ordering
+# is a first-boot question and is deliberately not answered here.
 #
 # One consequence does follow, and it is not obvious. USB devices enumerate later than
 # PCI ones, sometimes by seconds. Against the five-second boot target that is enough

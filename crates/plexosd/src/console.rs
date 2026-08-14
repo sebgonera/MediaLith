@@ -1,6 +1,6 @@
 //! The status console: the routes, and the page.
 //!
-//! This is the first thing in PlexOS a person interacts with rather than reads off a
+//! This is the first thing in MediaLith a person interacts with rather than reads off a
 //! kernel console, and its job is narrow: answer "is this machine working, and if not,
 //! what do I do about it" from a browser on another device.
 //!
@@ -51,29 +51,188 @@ pub const HTTP_PORT: u16 = 80;
 /// Default port: HTTPS, because that is the only thing this console serves (ADR-0014).
 pub const DEFAULT_PORT: u16 = HTTPS_PORT;
 
+/// The daemon's shared state, as one thing the route table can be handed.
+///
+/// This was seven separate parameters until the activity card needed an eighth, at which
+/// point clippy's argument limit said what the signature had been saying for a while: a
+/// route table needs whatever the daemon holds, that set grows with every feature, and
+/// threading it positionally is how two `Arc<Job>`s of different types eventually get
+/// passed the wrong way round. Named fields cost nothing and the compiler checks them.
+///
+/// Every field is an `Arc` because the work behind these routes outlives the request that
+/// started it: an install is minutes, a provision is longer, and the sampler has to keep
+/// the previous reading or no percentage on the dashboard can exist.
+pub struct Services {
+    /// The state of any Plex provisioning run.
+    ///
+    /// Reached from every request because `GET /api/provision` is how the page follows one,
+    /// and a request that started an installation returns long before it finishes.
+    pub provision: std::sync::Arc<crate::provision::Job>,
+    /// The Plex process itself.
+    pub plex: std::sync::Arc<crate::plex::Handle>,
+    /// The state of any OS update.
+    pub update: std::sync::Arc<crate::update::Job>,
+    /// What is known about releases this appliance is not running (ADR-0020).
+    ///
+    /// Beside the update job rather than inside it, because they answer different
+    /// questions: one is a job that writes a partition, and this is a fact about the world
+    /// that stays true whether or not anybody is installing anything.
+    pub discovery: std::sync::Arc<crate::discover::Discovery>,
+    /// The state of any install-to-disk.
+    pub install: std::sync::Arc<crate::install::Job>,
+    /// The state of any wireless scan or join.
+    pub wifi: std::sync::Arc<crate::wifi::Job>,
+    /// The previous reading of `/proc`, which is what makes a rate possible.
+    pub metrics: std::sync::Arc<crate::metrics::Sampler>,
+}
+
+impl Services {
+    /// A daemon that has done nothing yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            provision: std::sync::Arc::new(crate::provision::Job::new()),
+            plex: std::sync::Arc::new(crate::plex::Handle::new()),
+            update: std::sync::Arc::new(crate::update::Job::new()),
+            discovery: std::sync::Arc::new(crate::discover::Discovery::new()),
+            install: std::sync::Arc::new(crate::install::Job::new()),
+            wifi: std::sync::Arc::new(crate::wifi::Job::new()),
+            metrics: std::sync::Arc::new(crate::metrics::Sampler::new()),
+        }
+    }
+}
+
+impl Default for Services {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Answers one request, against the machine described by `env`.
 ///
 /// Separated from the socket so the whole route table can be tested against a recorded
 /// machine, which is the same boundary every other module here draws.
 ///
-/// `job` carries the state of any provisioning run. It is reached from every request
-/// because `GET /api/provision` is how the page follows one, and a request that started
-/// an installation returns before that installation is anywhere near finished.
-///
 /// This function does **not** check the device token. [`http::route`] does, before this
 /// is called, for every method that is not a read — so a route added here is
 /// authenticated by construction rather than by its author remembering to be.
 #[must_use]
-pub fn respond(
-    request: &Request,
-    env: &impl Environment,
-    job: &std::sync::Arc<crate::provision::Job>,
-    plex: &std::sync::Arc<crate::plex::Handle>,
-    update: &std::sync::Arc<crate::update::Job>,
-    install: &std::sync::Arc<crate::install::Job>,
-    wifi: &std::sync::Arc<crate::wifi::Job>,
-) -> Response {
+#[expect(
+    clippy::too_many_lines,
+    reason = "this is a dispatch table, and its length is the number of routes rather than \
+              complexity. Splitting it to satisfy a line count would scatter the one thing \
+              whose value is being in a single place -- every route the console answers, \
+              readable in order, next to the comment saying why each is a GET or a POST. \
+              `expect` rather than `allow` so that a future version short enough not to \
+              need this is told to drop it."
+)]
+pub fn respond(request: &Request, env: &impl Environment, services: &Services) -> Response {
+    let Services {
+        provision: job,
+        plex,
+        update,
+        discovery,
+        install,
+        wifi,
+        metrics,
+    } = services;
+
     match (request.method.as_str(), request.path.as_str()) {
+        ("GET" | "HEAD", "/api/metrics") | ("POST", "/api/metrics/processes") => {
+            metrics_route(request, env, metrics)
+        }
+
+        // What Plex is playing right now. A `POST` for the same reason the process list is
+        // one, and it is the stronger case of the two: a title, a username, a device name
+        // and a position in a film are what somebody in this house is doing this evening,
+        // and a `GET` would make a household's viewing readable by anything on the LAN for
+        // as long as the appliance runs. The method-based gate in `http::refusal` is what
+        // enforces it — one policy, in front of the whole table, rather than a check in
+        // here that a later route could forget.
+        //
+        // The open-`GET` principle is untouched: it exists so a *broken* machine can still
+        // be diagnosed, and nothing here is needed to diagnose one. `/api/status`,
+        // `/api/gpu` and `/healthz` answer as freely as they ever did.
+        ("POST", "/api/plex/sessions") => {
+            let report =
+                crate::plexactivity::observe(std::path::Path::new(plexos_types::paths::PLEX_MOUNT));
+            match serde_json::to_string(&report) {
+                Ok(body) => Response::json(body),
+                Err(error) => Response::text(
+                    500,
+                    format!("could not serialise the Plex activity: {error}\n"),
+                ),
+            }
+        }
+        // Restart Plex, and only Plex.
+        //
+        // Plex is confined by a Landlock policy built at the moment it starts, from the
+        // paths that exist then — so a library mounted afterwards may be invisible to it,
+        // and both the shares card and the drives card have to say so. Until this route
+        // existed the only thing either of them could offer was restarting the whole
+        // appliance, which stops the console, the terminal and every other stream in the
+        // house to pick up a folder.
+        //
+        // It is `stop` then `ensure_started`, which is what `plex::swap` does either side
+        // of replacing the app image. Nothing is unmounted, because nothing about the app
+        // image has changed.
+        ("POST", "/api/plex/restart") => {
+            let mut log = |line: &str| println!("plexosd: plex: {line}");
+            log(
+                "restarting Plex at the console's request, so it can see a library added \
+                 since it started",
+            );
+            plex.stop(crate::plex::SWAP_GRACE, &mut log);
+            plex.ensure_started(
+                std::path::Path::new(plexos_types::paths::PLEX_MOUNT),
+                &mut log,
+            );
+            // Answering takes about twenty seconds, so this reports what was *asked for*
+            // rather than claiming Plex is up. A page told "restarted" that then finds a
+            // dead port reads as a machine that lied to it.
+            Response::json("{\"restarting\":true}")
+        }
+
+        // A poster, and nothing else.
+        //
+        // A POST for the same reason the sessions route is one: a poster says what somebody
+        // in this house is watching, which is the class of thing this console keeps behind a
+        // credential. `<img src>` cannot send an Authorization header, so the page fetches
+        // this and turns the bytes into an object URL rather than pointing an element at a
+        // GET that would need no credential at all.
+        //
+        // **Not a proxy.** The body carries a rating key and it is a number. It cannot name
+        // a host, a port, a path, a URL or a token; everything else is resolved inside
+        // `plexactivity` from Plex's own metadata, and a path that is not on the local
+        // server is refused there.
+        ("POST", "/api/plex/poster") => {
+            let key = serde_json::from_slice::<serde_json::Value>(&request.body)
+                .ok()
+                .and_then(|v| {
+                    v.get("rating_key")
+                        .and_then(|k| k.as_str())
+                        .map(ToOwned::to_owned)
+                });
+            let Some(key) = key else {
+                return Response::text(400, "the body must carry a `rating_key`.\n");
+            };
+            match crate::plexactivity::poster_for(
+                std::path::Path::new(plexos_types::paths::PLEX_MOUNT),
+                &key,
+            ) {
+                Some((kind, bytes)) => Response {
+                    status: 200,
+                    content_type: kind.mime(),
+                    body: bytes,
+                    location: None,
+                },
+                // One answer for every failure, and deliberately: which internal step failed
+                // is a statement about Plex's library and its filesystem, and the page draws
+                // its own placeholder either way. Nothing here echoes anything Plex said.
+                None => Response::text(404, "no artwork for that item.\n"),
+            }
+        }
+
         // Starting an installation. Returns as soon as the work is handed to a thread:
         // the download alone is minutes, and a request held open for it would time out
         // in the browser with the install still running and no way to say so.
@@ -106,6 +265,51 @@ pub fn respond(
         // Checking for, and installing, a new /usr. Same shape as provisioning and for
         // the same reason: the work is minutes and a request cannot be held open for it.
         ("POST", "/api/update") => {
+            // Before a job exists, and that ordering is the whole of this fix. An empty
+            // source used to start an update, which then failed, which left the console
+            // saying "Failed — the update failed" about somebody who had simply not filled
+            // in a field yet. A missing argument is a bad request; it is not a failed
+            // update, and it must not leave a failed update behind for the page to draw.
+            let source = crate::update::source_in(&request.body);
+            if source.trim().is_empty() {
+                // No address means "the release you showed me", which is the ordinary way
+                // in for somebody who did not build this machine: the appliance already
+                // knows where to look, and the feed it reads is the same one the check
+                // read. It resolves on the job's thread rather than here, because that
+                // fetch can take a minute against a service that is down and a request
+                // must not be held open for it.
+                let configured = crate::settings::load(&crate::settings::path())
+                    .is_ok_and(|config| config.update_service.is_configured());
+                if !configured {
+                    return Response::text(
+                        400,
+                        "no update source was given, and this appliance has no update \
+                         service configured. Remedy: set one in Settings, or paste the \
+                         address that tools/publish-update.sh prints on the build host. \
+                         Guessing where to fetch a whole operating system from is not \
+                         something this appliance will do.\n",
+                    );
+                }
+                if !update.begin() {
+                    return Response::text(
+                        409,
+                        "An update is already running. Watch it at GET /api/update.\n",
+                    );
+                }
+                let install = crate::update::wants_install(&request.body);
+                crate::update::spawn_from_service(update, install);
+                return Response::json(format!("{{\"install\":{install}}}"));
+            }
+            // A bundle on a plugged-in medium has to be mounted for the whole update, not
+            // copied first: it is four hundred megabytes across several files, read from
+            // the manifest onwards. `mount_for_update` hands back a guard that lets go of
+            // the medium however the update ends -- including half-way, which is exactly
+            // when somebody wants to pull the stick out and try it somewhere else.
+            let medium = match mount_for_update(&source) {
+                Ok(medium) => medium,
+                Err(refusal) => return refusal,
+            };
+
             if !update.begin() {
                 return Response::text(
                     409,
@@ -113,14 +317,47 @@ pub fn respond(
                 );
             }
             let install = crate::update::wants_install(&request.body);
-            crate::update::spawn(update, crate::update::source_in(&request.body), install);
+            crate::update::spawn_holding(update, source, install, medium);
             Response::json(format!("{{\"install\":{install}}}"))
         }
 
-        ("GET" | "HEAD", "/api/update") => match serde_json::to_string(&update.snapshot()) {
-            Ok(json) => Response::json(json),
-            Err(error) => Response::text(500, format!("could not serialise progress: {error}\n")),
-        },
+        // Bundles on a plugged-in medium: the alternative to an address, for a machine
+        // with no route to the build host. A POST, so the gate applies -- a list of what is
+        // on somebody's USB sticks is not for every reader on the LAN.
+        ("POST", "/api/update/media") => bundles_on_media(env),
+
+        // Asking the configured update service whether there is a newer MediaLith release,
+        // and installing nothing. A POST for the reason `/api/provision/check` is one: it
+        // reaches the network on the appliance's behalf. That changes no state here and is
+        // still a thing an administrator credential should gate, because "make this machine
+        // talk to that address" is an instruction and not a question.
+        //
+        // The periodic check needs none of this. It is the appliance asking on its own
+        // behalf, from a thread nobody had to authenticate to.
+        ("POST", "/api/update/check") => {
+            if update.snapshot().phase.is_running() {
+                return Response::text(
+                    409,
+                    "An update is already running, and it is checking the same thing. \
+                     Watch it at GET /api/update.\n",
+                );
+            }
+            if !discovery.begin() {
+                return Response::json("{\"checking\":true}".to_owned());
+            }
+            let checking = std::sync::Arc::clone(discovery);
+            std::thread::spawn(move || crate::discover::check(&checking));
+            Response::json("{\"checking\":true}".to_owned())
+        }
+
+        ("GET" | "HEAD", "/api/update") => {
+            match serde_json::to_string(&update_report(update, discovery)) {
+                Ok(json) => Response::json(json),
+                Err(error) => {
+                    Response::text(500, format!("could not serialise progress: {error}\n"))
+                }
+            }
+        }
 
         // What a new appliance still needs, in order (ADR-0016). Read-only and derived
         // entirely from state other endpoints already report, so it cannot disagree with
@@ -132,7 +369,7 @@ pub fn respond(
             }
         }
 
-        // Putting PlexOS on a disk (ADR-0016). The most destructive route here, and the
+        // Putting MediaLith on a disk (ADR-0016). The most destructive route here, and the
         // only one whose refusals are the point rather than the edge cases.
         ("GET" | "HEAD", "/api/install") => report_disks(env, install),
 
@@ -154,6 +391,24 @@ pub fn respond(
 
         ("POST", "/api/shares") => crate::shares::handle(&request.body),
 
+        // The other place a library lives: a disk in this machine. A GET is the
+        // inventory and discloses no more than /api/install already does; every POST
+        // mounts something, looks inside somebody's Windows disk, or changes what Plex
+        // is shown, and the method gate has already demanded the credential for all of
+        // them by the time this runs.
+        ("GET" | "HEAD", "/api/disks") => match crate::disks::report(env) {
+            Ok(report) => match serde_json::to_string(&report) {
+                Ok(json) => Response::json(json),
+                Err(error) => Response::text(500, format!("could not serialise disks: {error}\n")),
+            },
+            Err(error) => Response::text(500, format!("the drives could not be read: {error}\n")),
+        },
+
+        ("POST", "/api/disks") => {
+            let mut log = |line: &str| println!("plexosd: disks: {line}");
+            crate::disks::handle(&request.body, &mut log)
+        }
+
         // The configuration, what the machine is doing about it, and confirming an
         // address change. Grouped into one helper because `respond` is a route table and
         // these three share everything except their verb.
@@ -170,6 +425,27 @@ pub fn respond(
         ("POST", "/api/terminal") => terminal_route(&request.body),
 
         ("POST", "/api/token") => rotate_token(),
+
+        // Pairing (ADR-0019). The one mutating route that carries no credential, because
+        // it is how a browser gets one -- `http::refusal` names it and lets it past. What
+        // it accepts is a code that only somebody standing at the machine's own screen can
+        // have caused to exist.
+        ("POST", crate::http::PAIR_ROUTE) => pair_route(&request.body),
+
+        // The session a pairing produced: is it still good, and end it.
+        ("POST", "/api/session") => session_route(request),
+
+        // One browser approving another (ADR-0019). The first three carry no credential --
+        // `http::refusal` names them -- because they are how a browser obtains one; the
+        // last three decide whether somebody else is let in, so the gate has already
+        // demanded an administrator before they are reached.
+        ("POST", crate::http::BROWSER_PAIR_START) => browser_pair_start(request),
+        ("POST", crate::http::BROWSER_PAIR_REDEEM) => browser_pair_redeem(&request.body),
+        ("POST", crate::http::BROWSER_PAIR_CANCEL) => browser_pair_cancel(&request.body),
+        ("POST", "/api/browser-pair/waiting") => browser_pair_waiting(),
+        ("POST", "/api/browser-pair/inspect") => browser_pair_inspect(&request.body),
+        ("POST", "/api/browser-pair/approve") => browser_pair_decide(&request.body, true),
+        ("POST", "/api/browser-pair/deny") => browser_pair_decide(&request.body, false),
 
         // The three questions above the interface list: a resolver, a route, and a name
         // that actually resolves. Its own route rather than a field on /api/status
@@ -293,12 +569,19 @@ fn respond_read_only(request: &Request, env: &impl Environment, path: &str) -> R
 /// after a reboot, which is worse than one that plainly cannot be claimed yet.
 ///
 /// [`Credential::Unset`]: crate::auth::Credential::Unset
-pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::Credential {
+pub fn claim(
+    path: &std::path::Path,
+    log: &mut dyn FnMut(&str),
+) -> (crate::auth::Credential, Option<String>) {
     use crate::auth::Credential;
 
     if let Credential::Set(fingerprint) = crate::auth::read(path) {
         log("device claimed; changes need its token");
-        return Credential::Set(fingerprint);
+        // No plaintext, and there is nowhere to get one. Every boot after the first takes
+        // this path, which is why the second return value is an Option rather than a
+        // String: "the code, if it exists right now" is the honest type, and a machine
+        // that could produce it on demand would be one an attacker could ask.
+        return (Credential::Set(fingerprint), None);
     }
 
     let token = match crate::auth::generate() {
@@ -309,7 +592,7 @@ pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::
                  machine until one exists. /dev/urandom is unreadable, which means /dev \
                  is not mounted -- a larger fault than the missing token."
             ));
-            return Credential::Unset;
+            return (Credential::Unset, None);
         }
     };
 
@@ -324,7 +607,7 @@ pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::
              /var is mounted and writable.",
             path.display()
         ));
-        return Credential::Unset;
+        return (Credential::Unset, None);
     }
 
     // Banner rather than a log line. This is the one secret the machine will ever show,
@@ -355,7 +638,11 @@ pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::
     log("================================================================");
     log("");
 
-    Credential::Set(fingerprint)
+    // The plaintext goes back to the caller as well as to the log, so the dashboard can
+    // put it on the attached screen in a form somebody can read without scrolling through
+    // boot messages. It is handed over, not stored: nothing writes it, and the dashboard
+    // drops it the moment a key is pressed.
+    (Credential::Set(fingerprint), Some(token))
 }
 
 /// Issues a new device token and puts it in force at once.
@@ -370,12 +657,34 @@ pub fn claim(path: &std::path::Path, log: &mut dyn FnMut(&str)) -> crate::auth::
 fn rotate_token() -> Response {
     match crate::auth::rotate(std::path::Path::new(crate::auth::CREDENTIAL_FILE)) {
         Ok(token) => {
+            // Everything the old credential admitted goes with it. Rotation is what
+            // somebody does when a credential has leaked, and a browser that was paired
+            // under the old one is a browser somebody may have paired with it -- leaving
+            // those sessions standing would make this a password change that logs nobody
+            // out. The pairing offer goes for the same reason: a QR on the screen is a
+            // credential in the room, and this is somebody asking for a clean slate.
+            //
+            // The browser that asked for the rotation is signed out by this too, which is
+            // deliberate and is what the page warns about before it asks. Anything else
+            // would mean deciding that one session is special, and the only way to know
+            // which is to trust the request that arrived.
+            let sessions = crate::session::revoke_all();
+            crate::pairing::cancel();
+
             // Also to the attached screen, which is where ADR-0013 says a device
             // announces itself — and the only place left if the browser that asked for
             // it loses the reply.
             let shown = crate::auth::grouped(&token);
-            println!("plexosd: the device token is now {shown}");
-            Response::json(format!("{{\"token\":\"{shown}\"}}"))
+            println!("plexosd: the recovery device code is now {shown}");
+            if sessions > 0 {
+                println!(
+                    "plexosd: {sessions} administrator browser session(s) revoked by the \
+                     rotation"
+                );
+            }
+            Response::json(format!(
+                "{{\"token\":\"{shown}\",\"sessions_revoked\":{sessions}}}"
+            ))
         }
         Err(error) => Response::text(
             500,
@@ -386,6 +695,457 @@ fn rotate_token() -> Response {
             ),
         ),
     }
+}
+
+/// Spends a pairing code and issues an administrator session (ADR-0019).
+///
+/// The only route on this console that changes the machine without a credential, and the
+/// only one that can be: it is where a credential comes from. What stands in for
+/// authentication is that [`crate::pairing`] has nothing to spend unless somebody pressed
+/// a key on the screen attached to the machine — an appliance nobody has touched answers
+/// every request here identically, and says so.
+///
+/// # Nothing here may say the code out loud
+///
+/// Not in the log, not in an error message, not in a panic. The refusals come from
+/// [`crate::pairing::Refusal`], which is an enum of three states and carries no input, so
+/// the code has no path into a message even by accident. The success line names the address
+/// that paired and nothing else.
+///
+/// # Bounded before it is parsed
+///
+/// `http` already caps a body at [`crate::http::MAX_BODY`]; this caps the field as well,
+/// because a 64 KiB "code" is not a mistyped one and there is no reason to hash it.
+fn pair_route(body: &[u8]) -> Response {
+    /// Longest string that could be a pairing code.
+    ///
+    /// The code is [`crate::pairing::SECRET_CHARS`]; the slack is for a client that sends
+    /// it with punctuation rather than for anything this issues.
+    const MAX_CODE: usize = 64;
+
+    let request: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        // The parser's message describes the document's shape and never its contents, so
+        // this cannot leak a code that arrived inside a malformed body.
+        Err(_) => {
+            return Response::text(
+                400,
+                "the body must be JSON of the form {\"code\": \"...\"}.\n",
+            );
+        }
+    };
+
+    let Some(code) = request.get("code").and_then(serde_json::Value::as_str) else {
+        return Response::text(400, "the body must carry a `code` field.\n");
+    };
+
+    if code.len() > MAX_CODE {
+        // Refused as wrong rather than as too long: telling a caller which of their inputs
+        // was the wrong *shape* is a way to learn the shape.
+        return Response::text(403, format!("{}\n", crate::pairing::Refusal::Wrong));
+    }
+
+    if let Err(refusal) = crate::pairing::consume(code) {
+        return Response::text(403, format!("{refusal}\n"));
+    }
+
+    match crate::session::issue() {
+        Ok(token) => {
+            println!("plexosd: administrator browser paired");
+            Response::json(format!(
+                "{{\"authenticated\":true,\"session_token\":\"{token}\",\
+                 \"expires_in\":{},\"idle_timeout\":{}}}",
+                crate::session::ABSOLUTE_LIFETIME.as_secs(),
+                crate::session::IDLE_TIMEOUT.as_secs()
+            ))
+        }
+        // The code is already spent at this point and deliberately not put back: a failure
+        // to read /dev/urandom is not a state to recover a credential into, and pressing P
+        // again costs one keystroke.
+        Err(error) => Response::text(
+            500,
+            format!(
+                "the pairing code was accepted but no session could be issued: {error}. \
+                 Remedy: press P on the screen attached to the machine to pair again. If \
+                 that keeps failing, /dev is not mounted, which is a larger fault than \
+                 this one.\n"
+            ),
+        ),
+    }
+}
+
+/// Asks after the administrator session this request carries, or ends it.
+///
+/// `check` needs no implementation at all, which is the point of it: this route is a
+/// `POST`, so [`crate::http::refusal`] has already decided whether the caller is an
+/// administrator before the handler exists. Reaching here *is* the answer. A second
+/// implementation of the question would be a second thing to keep in agreement with the
+/// gate.
+fn session_route(request: &Request) -> Response {
+    let action = serde_json::from_slice::<serde_json::Value>(&request.body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        });
+
+    match action.as_deref() {
+        Some("check") | None => Response::json("{\"authenticated\":true}"),
+        Some("sign-out") => {
+            // The credential this request arrived with, which is the only session a
+            // request is entitled to end. Signing out with the recovery device code
+            // revokes nothing and is not an error: there is no server-side state behind it
+            // to remove, and the browser drops its own copy either way.
+            let presented = request
+                .header("Authorization")
+                .and_then(crate::auth::bearer)
+                .unwrap_or_default();
+            let revoked = crate::session::revoke(presented);
+            if revoked {
+                println!("plexosd: administrator session signed out");
+            }
+            Response::json(format!("{{\"signed_out\":{revoked}}}"))
+        }
+        Some(other) => Response::text(
+            400,
+            format!("{other:?} is not a session action. Remedy: one of check, sign-out.\n"),
+        ),
+    }
+}
+
+/// One field out of a small JSON body.
+fn field(body: &[u8], name: &str) -> Option<String> {
+    /// Longer than any value these routes take. A 256-bit value is 64 hex characters; the
+    /// slack is for punctuation a client might send, not for anything this issues.
+    const LONGEST: usize = 128;
+
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()?
+        .get(name)?
+        .as_str()
+        .filter(|value| value.len() <= LONGEST)
+        .map(ToOwned::to_owned)
+}
+
+/// Asks to be approved by a browser that is already an administrator (ADR-0019).
+///
+/// Unauthenticated, and that is safe because asking is not being let in: this creates a
+/// request that does nothing at all until an authenticated administrator approves it. What
+/// it costs an attacker who floods it is one of sixteen slots for five minutes, which is
+/// why the store refuses rather than evicting.
+///
+/// The reply carries the desktop's secret, and that is the only time it exists anywhere but
+/// in the browser that asked. It is deliberately **not** in the QR: the whole two-value
+/// design is that photographing the screen is not enough.
+fn browser_pair_start(request: &Request) -> Response {
+    let agent = request.header("User-Agent").unwrap_or_default();
+
+    let opened = match crate::browserpair::open(agent) {
+        Ok(opened) => opened,
+        // 503 rather than 400: nothing about the request was wrong, the appliance is simply
+        // full, and the message says how long that lasts.
+        Err(why) => return Response::text(503, format!("{why}\n")),
+    };
+
+    // The address is chosen the same way the physical console chooses it, through the facts
+    // the whole daemon shares -- so the two QR codes on two screens never name different
+    // ways to reach one machine.
+    let url = format!("https://{}/#approve={}", browser_pair_host(), opened.id);
+
+    let matrix = match crate::dashboard::qr::Symbol::encode(&url) {
+        Ok(symbol) => symbol.matrix(),
+        Err(why) => return Response::text(500, format!("{why}\n")),
+    };
+
+    match json(&serde_json::json!({
+        "request_id": opened.id,
+        "desktop_secret": opened.secret,
+        "verification": opened.verification,
+        "expires_in": crate::browserpair::LIFETIME.as_secs(),
+        "url": url,
+        "qr": matrix,
+    })) {
+        Ok(body) => Response::json(body),
+        Err(why) => Response::text(500, format!("{why}\n")),
+    }
+}
+
+/// The address to put in the desktop's QR code.
+///
+/// The same answer the attached screen gives, arrived at the same way: the addresses this
+/// machine reports as reachable, with the ones its certificate names first. Two screens
+/// naming two different ways to reach one appliance is the shape of fault that gets
+/// diagnosed as "pairing does not work".
+fn browser_pair_host() -> String {
+    let mut addresses =
+        crate::status::Status::gather_with(&System, plexos_gpu::report::Report::generate(&System))
+            .network
+            .reachable_at;
+    crate::dashboard::model::prefer_covered(&mut addresses, crate::tls::covers);
+    addresses.first().cloned().unwrap_or_default()
+}
+
+/// Mounts the medium a source is on, if it is on one.
+///
+/// `None` for an address and for a path that is not under the media root — an
+/// administrator naming a directory on `/var` is doing something legitimate and needs
+/// nothing mounted.
+///
+/// The volume is taken from the path rather than from the request, so there is no second
+/// field for a client to disagree with itself about: `/run/plexos-media/sdb1/…` names
+/// `sdb1` and nothing else does.
+fn mount_for_update(source: &str) -> Result<Option<crate::update::Mounted>, Response> {
+    let root = crate::media::mount_point("");
+    let Ok(rest) = std::path::Path::new(source).strip_prefix(&root) else {
+        return Ok(None);
+    };
+    let Some(volume) = rest
+        .components()
+        .next()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+    else {
+        return Ok(None);
+    };
+
+    // The device is looked up rather than taken from the path, so a name that is not a
+    // block device cannot become a mount attempt.
+    let device = format!("/dev/{volume}");
+    let point = crate::media::mount_point(&volume);
+    match crate::media::mount_ro(&device, &point) {
+        Ok(_) => Ok(Some(crate::update::Mounted::at(point))),
+        Err(error) => Err(Response::text(
+            409,
+            format!(
+                "the medium holding that bundle could not be mounted ({volume}: {error}). \
+                 Remedy: check that it is still plugged in, then scan again -- the paths a \
+                 scan returns are only good while the medium is there.\n"
+            ),
+        )),
+    }
+}
+
+/// Update bundles on plugged-in media.
+///
+/// The alternative to pasting an address, and an alternative rather than a replacement: a
+/// machine on the same network as the build host is better served by a URL, and a machine
+/// that is not -- or whose network is the thing being fixed -- needs this.
+///
+/// A bundle is a directory holding a signed manifest. That is the whole test, and it is the
+/// right one: it is what `tools/sign-bundle.sh` writes and what the updater reads first,
+/// so anything this lists is something the updater will at least give an honest answer
+/// about. Nothing here trusts it further than that -- the signature, the certificate chain,
+/// the revocation list and the anti-rollback floor are all still ahead of it, unchanged.
+fn bundles_on_media(env: &impl Environment) -> Response {
+    let running = crate::install::running_disk(env);
+    let Ok(volumes) = crate::media::volumes(env, running.as_deref()) else {
+        return Response::text(
+            500,
+            "the list of block devices could not be read, so no medium could be looked \
+             at.\n",
+        );
+    };
+
+    let mut found = Vec::new();
+    let mut skipped = Vec::new();
+
+    for volume in volumes {
+        let point = crate::media::mount_point(&volume.name);
+        match crate::media::mount_ro(&volume.device, &point) {
+            Ok(_) => {
+                found.extend(bundles_in(&point, &volume.name));
+                crate::media::unmount(&point);
+            }
+            Err(error) => skipped.push(format!("{}: {error}", volume.name)),
+        }
+    }
+
+    match json(&serde_json::json!({ "bundles": found, "skipped": skipped })) {
+        Ok(body) => Response::json(body),
+        Err(why) => Response::text(500, format!("{why}\n")),
+    }
+}
+
+/// Directories under `point` that hold a signed manifest.
+///
+/// One level down as well as the root, which is where `publish-update.sh` puts it: somebody
+/// copies `medialith-update` onto a stick and the stick is what gets plugged in.
+fn bundles_in(point: &std::path::Path, volume: &str) -> Vec<serde_json::Value> {
+    /// What makes a directory a bundle rather than a directory.
+    const MANIFEST: &str = "manifest.json";
+
+    let mut found = Vec::new();
+    let mut look = |dir: &std::path::Path| {
+        if !dir.join(MANIFEST).is_file() {
+            return;
+        }
+        // The release is read from the manifest rather than from the directory name,
+        // because the name is whoever copied it and the manifest is what will be verified.
+        let release = std::fs::read_to_string(dir.join(MANIFEST))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|value| {
+                value
+                    .get("release")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            });
+        found.push(serde_json::json!({
+            "volume": volume,
+            "path": dir.to_string_lossy(),
+            "release": release,
+            "signed": dir.join("manifest.json.sig").is_file(),
+        }));
+    };
+
+    look(point);
+    if let Ok(entries) = std::fs::read_dir(point) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                look(&entry.path());
+            }
+        }
+    }
+    found
+}
+
+/// Everything waiting for a decision. Authenticated by the gate.
+///
+/// The route that makes browser approval work on a phone at all. Scanning the desktop's QR
+/// code lands in a **new tab**, and a session lives in `sessionStorage`, which belongs to a
+/// tab — so the browser that arrives by scanning never holds the session, in any browser,
+/// on any phone. That is not a defect anywhere; it is what `sessionStorage` is.
+///
+/// So the signed-in browser asks instead. Nothing is scanned and nothing is pasted: the
+/// desktop shows a number, this says who is asking, and the two are compared by eye.
+fn browser_pair_waiting() -> Response {
+    let waiting: Vec<serde_json::Value> = crate::browserpair::waiting()
+        .into_iter()
+        .map(|(id, described)| {
+            serde_json::json!({
+                "request_id": id,
+                "browser": described.browser,
+                "age_seconds": described.age_seconds,
+                "verification": described.verification,
+            })
+        })
+        .collect();
+
+    match json(&serde_json::json!({ "waiting": waiting })) {
+        Ok(body) => Response::json(body),
+        Err(why) => Response::text(500, format!("{why}\n")),
+    }
+}
+
+/// What an administrator is shown before approving. Authenticated by the gate.
+fn browser_pair_inspect(body: &[u8]) -> Response {
+    let Some(id) = field(body, "request_id") else {
+        return Response::text(400, "the body must carry a `request_id` field.\n");
+    };
+
+    match crate::browserpair::describe(&id) {
+        Some(describes) => match json(&describes) {
+            Ok(body) => Response::json(body),
+            Err(why) => Response::text(500, format!("{why}\n")),
+        },
+        None => Response::text(
+            404,
+            "no browser is waiting under that request. Remedy: it has either expired -- \
+             they last five minutes -- or been dealt with already. Ask the other browser \
+             to show a new code.\n",
+        ),
+    }
+}
+
+/// Approves or refuses a waiting browser. Authenticated by the gate.
+///
+/// **No session token crosses this route in either direction.** What an administrator sends
+/// is a sentence about a request; what comes back is whether it was still there to decide.
+/// The session the desktop eventually receives is minted by the appliance, when the desktop
+/// redeems, out of the same store every other session comes from.
+///
+/// The gate accepts either credential, so a browser holding the recovery device code may
+/// approve as well as one holding a session. That follows from ADR-0013 rather than being
+/// decided here: the recovery code already authorises installing an operating system and
+/// opening a root shell, so withholding "may let another browser in" from it would be a
+/// distinction with nothing behind it.
+fn browser_pair_decide(body: &[u8], approve: bool) -> Response {
+    let Some(id) = field(body, "request_id") else {
+        return Response::text(400, "the body must carry a `request_id` field.\n");
+    };
+
+    if crate::browserpair::decide(&id, approve) {
+        println!(
+            "plexosd: an administrator {} a waiting browser",
+            if approve { "approved" } else { "refused" }
+        );
+        return Response::json(format!("{{\"approved\":{approve}}}"));
+    }
+
+    Response::text(
+        409,
+        "that request is no longer waiting to be decided: it has expired, or it was \
+         already approved, refused or used. Remedy: ask the other browser to show a new \
+         code.\n",
+    )
+}
+
+/// Collects the session an approval produced.
+///
+/// Unauthenticated in the ordinary sense and not open: it needs the 256-bit secret returned
+/// once to the browser that asked. That secret proves ownership of a request and nothing
+/// else — it is not a bearer credential and no other route will look at it.
+///
+/// This is also the desktop's polling route, which is why "not yet" is an ordinary 200 with
+/// a status in it rather than an error: a browser asking every two seconds should not be
+/// reading failures while it waits.
+fn browser_pair_redeem(body: &[u8]) -> Response {
+    let (Some(id), Some(secret)) = (field(body, "request_id"), field(body, "desktop_secret"))
+    else {
+        return Response::text(
+            400,
+            "the body must carry `request_id` and `desktop_secret`.\n",
+        );
+    };
+
+    let answer = match crate::browserpair::redeem(&id, &secret) {
+        crate::browserpair::Outcome::Pending => serde_json::json!({"status": "pending"}),
+        crate::browserpair::Outcome::Denied => serde_json::json!({"status": "denied"}),
+        // One answer for expired, unknown and wrong-secret alike. Distinguishing them would
+        // tell whoever photographed a screen that they hold half of what they need.
+        crate::browserpair::Outcome::Refused => serde_json::json!({"status": "refused"}),
+        crate::browserpair::Outcome::Approved(session) => {
+            println!("plexosd: a browser approved by an administrator was let in");
+            serde_json::json!({
+                "status": "approved",
+                "session_token": session,
+                "expires_in": crate::session::ABSOLUTE_LIFETIME.as_secs(),
+                "idle_timeout": crate::session::IDLE_TIMEOUT.as_secs(),
+            })
+        }
+    };
+
+    match json(&answer) {
+        Ok(body) => Response::json(body),
+        Err(why) => Response::text(500, format!("{why}\n")),
+    }
+}
+
+/// Withdraws a request. Needs the secret, so only the browser that asked can do it.
+fn browser_pair_cancel(body: &[u8]) -> Response {
+    let (Some(id), Some(secret)) = (field(body, "request_id"), field(body, "desktop_secret"))
+    else {
+        return Response::text(
+            400,
+            "the body must carry `request_id` and `desktop_secret`.\n",
+        );
+    };
+
+    // Whether it was there or not, the caller's desired state is the state they are in, so
+    // this is not an error either way.
+    let cancelled = crate::browserpair::cancel(&id, &secret);
+    Response::json(format!("{{\"cancelled\":{cancelled}}}"))
 }
 
 /// The settings routes: read, write, and confirm an address change.
@@ -511,6 +1271,40 @@ fn terminal_route(body: &[u8]) -> Response {
     }
 }
 
+/// What the machine is doing now, and — behind a `POST` — what is running on it.
+///
+/// The sampler comes from the daemon rather than being built here because a rate is the
+/// difference between two readings: one created per request would have nothing to compare
+/// against and would report `null` forever, which looks like an empty dashboard rather than
+/// like a mistake.
+///
+/// The split between the two is not cosmetic. Every `GET` on this console answers without a
+/// credential, deliberately, because somebody diagnosing a machine that will not boot should
+/// not have to find a token first — and a list of every process with its command line is not
+/// that kind of reading. It is closer to what the terminal exposes, and the terminal is all
+/// `POST` for exactly this reason (ADR-0013, ADR-0014). The gate in [`http::route`] is
+/// method-based, so being a `POST` *is* the protection; nothing in this function checks
+/// anything.
+fn metrics_route(
+    request: &Request,
+    env: &impl Environment,
+    metrics: &crate::metrics::Sampler,
+) -> Response {
+    let (what, body) = if request.method == "POST" {
+        (
+            "the processes",
+            serde_json::to_string(&metrics.processes(env)),
+        )
+    } else {
+        ("the metrics", serde_json::to_string(&metrics.sample(env)))
+    };
+
+    match body {
+        Ok(json) => Response::json(json),
+        Err(error) => Response::text(500, format!("could not serialise {what}: {error}\n")),
+    }
+}
+
 /// Serialises a value, turning a failure into the same `String` error the routes use.
 fn json<T: serde::Serialize>(value: &T) -> Result<String, String> {
     serde_json::to_string(value).map_err(|e| format!("could not serialise the reply: {e}"))
@@ -530,6 +1324,7 @@ fn save_settings(body: &[u8]) -> Result<String, String> {
     let previous = crate::settings::load(&path)?;
     let mut config = previous.clone();
     crate::settings::patch(&mut config, body)?;
+    crate::settings::patch_updates(&mut config, body)?;
     let touched_network = crate::settings::patch_network(&mut config, body)?;
 
     let mut log = |line: &str| println!("plexosd: addressing: {line}");
@@ -616,18 +1411,7 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     // On every boot rather than only when something changes it: the kernel forgets its
     // hostname at reboot, so a name set once and never re-applied lasts until the power
     // goes off.
-    match crate::settings::load(&crate::settings::path()) {
-        Ok(config) => {
-            let applied = crate::settings::apply(&config);
-            log(&format!("hostname: {:?}", applied.hostname));
-            log(&format!("timezone: {:?}", applied.timezone));
-        }
-        Err(error) => log(&format!(
-            "could not read the configuration: {error}. The machine runs with kernel \
-             defaults, and the settings page says the same thing rather than showing \
-             defaults as though they were somebody's choices."
-        )),
-    }
+    apply_stored_configuration(log);
 
     // Created before the network is brought up, because the rejoin below reports into it
     // and the page polls it: a wireless network that fails to come back has to be visible
@@ -674,7 +1458,10 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     // The certificate is issued here rather than before the wait, so that it names the
     // address somebody is about to type. The socket is already bound, so a browser that
     // arrives during this waits in the backlog instead of being refused.
-    let tls = identity_for(&addresses, log)?;
+    identity_for(&addresses, log)?;
+    // And reissued when the machine's addresses change, which on DHCP they do. The key is
+    // kept, so the fingerprint does not move.
+    watch_addresses();
 
     if let Some(cleartext) = cleartext {
         std::thread::spawn(move || {
@@ -686,7 +1473,8 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     // The credential is read once, here, and what it is decides how the console
     // behaves rather than merely what it logs: an unclaimed device refuses every
     // mutating route outright (ADR-0013).
-    let credential = claim(std::path::Path::new(crate::auth::CREDENTIAL_FILE), log);
+    let (credential, first_boot_code) =
+        claim(std::path::Path::new(crate::auth::CREDENTIAL_FILE), log);
 
     // One job and one Plex for the life of the daemon, shared by every connection thread.
     // Both are properties of the machine rather than of whoever asked: a second browser
@@ -694,11 +1482,18 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
     let job = std::sync::Arc::new(crate::provision::Job::new());
     let plex = std::sync::Arc::new(crate::plex::Handle::new());
     let update = std::sync::Arc::new(crate::update::Job::new());
+    let discovery = std::sync::Arc::new(crate::discover::Discovery::new());
 
     // Before Plex, not after. The Landlock policy is built when Plex starts, from the
     // paths that exist then; mounting a library afterwards may leave it unreachable, and
     // that is a question this project has already been caught guessing at.
+    //
+    // Both kinds, and both for the same reason. A library on a server and a library on
+    // the Windows partition of this machine's own internal disk are the same thing to
+    // everything downstream -- a directory under /var/media that existed before Plex was
+    // confined -- and they differ only in what has to happen to put it there.
     crate::shares::mount_all(log);
+    crate::disks::mount_all(&System, log);
 
     // Before serving, so a machine that was provisioned on an earlier boot is running
     // Plex by the time anyone loads the page. On an unprovisioned one this says so and
@@ -760,28 +1555,133 @@ pub fn run(port: u16, log: &mut dyn FnMut(&str)) -> io::Result<()> {
         }
     });
 
-    let served_job = std::sync::Arc::clone(&job);
+    // After the gate's thread is started and not before it, so that nothing about an update
+    // service can be in flight while the question "is this boot healthy" is still open. The
+    // first check is minutes away in any case; the ordering is here to make the rule
+    // readable rather than to make it true (ADR-0020).
+    crate::discover::schedule(&discovery, &update, |line| {
+        println!("plexosd: updates: {line}");
+    });
+
+    // After the network, so the first frame already carries the address a browser should
+    // be pointed at; before `serve_tls`, which never returns.
+    spawn_dashboard(first_boot_code, &plex, &served_wifi);
+
     let uploading_job = std::sync::Arc::clone(&job);
     let uploading_plex = std::sync::Arc::clone(&plex);
-    let installer = std::sync::Arc::new(crate::install::Job::new());
+    // One set for the whole daemon. The sampler in here is the reason it cannot be built
+    // per request: the previous reading of `/proc` is what every percentage on the activity
+    // card is a difference from.
+    let services = Services {
+        provision: std::sync::Arc::clone(&job),
+        plex,
+        update,
+        discovery,
+        install: std::sync::Arc::new(crate::install::Job::new()),
+        wifi: served_wifi,
+        metrics: std::sync::Arc::new(crate::metrics::Sampler::new()),
+    };
     http::serve_tls(
         &listener,
-        &tls,
         credential,
-        move |request| {
-            respond(
-                request,
-                &System,
-                &served_job,
-                &plex,
-                &update,
-                &installer,
-                &served_wifi,
-            )
-        },
+        move |request| respond(request, &System, &services),
         move |request, reader| upload_route(request, reader, &uploading_job, &uploading_plex),
         log,
     )
+}
+
+/// Puts the stored configuration into force, at every boot.
+///
+/// A failure is reported and not fatal. An appliance whose configuration file will not parse
+/// still has to serve its console — that page is where somebody fixes the file — and it says
+/// the same thing rather than drawing defaults as though they were anybody's choices.
+fn apply_stored_configuration(log: &mut dyn FnMut(&str)) {
+    match crate::settings::load(&crate::settings::path()) {
+        Ok(config) => {
+            let applied = crate::settings::apply(&config);
+            log(&format!("hostname: {:?}", applied.hostname));
+            log(&format!("timezone: {:?}", applied.timezone));
+        }
+        Err(error) => log(&format!(
+            "could not read the configuration: {error}. The machine runs with kernel \
+             defaults, and the settings page says the same thing rather than showing \
+             defaults as though they were somebody's choices."
+        )),
+    }
+}
+
+/// What `GET /api/update` answers: the job, and what is known about releases beyond it.
+///
+/// Flattened, so every field the page has always read stays exactly where it was and the
+/// new state arrives beside it under one name. One request rather than two, because the two
+/// halves are read together in one card and a page that polled them separately could draw
+/// "up to date" next to a version it had just been told about.
+#[derive(Debug, serde::Serialize)]
+struct UpdateReport {
+    /// The install job.
+    #[serde(flatten)]
+    progress: crate::update::Progress,
+    /// What the update service last said (ADR-0020).
+    availability: crate::discover::Availability,
+}
+
+fn update_report(
+    update: &std::sync::Arc<crate::update::Job>,
+    discovery: &std::sync::Arc<crate::discover::Discovery>,
+) -> UpdateReport {
+    let mut availability = discovery.snapshot();
+
+    // What the machine is *set to* is true before anything has been checked, and the page
+    // draws it either way. Without this, an appliance tracking dev reports an empty channel
+    // for the first five minutes of every boot -- and the page's own fallback then draws the
+    // word "stable" over it, which is a settings page telling somebody the opposite of what
+    // their file says. Found on the appliance immediately after an update, in the window
+    // where nothing had been checked yet.
+    if let Ok(config) = crate::settings::load(&crate::settings::path())
+        && availability.channel.is_empty()
+    {
+        availability.channel = config.updates.channel;
+        config
+            .update_service
+            .url
+            .trim()
+            .clone_into(&mut availability.source);
+    }
+
+    UpdateReport {
+        progress: update.snapshot(),
+        availability,
+    }
+}
+
+/// Starts the screen attached to the machine (ADR-0019).
+///
+/// On a thread inside this process rather than as a service of its own, and that is the
+/// security design rather than an economy: the pairing offer and the sessions it produces
+/// live in this process's memory, so nothing has to be written to `/run`, nothing has to be
+/// kept in step across a process boundary, and there is no window in which two things could
+/// spend one code.
+///
+/// Its failure is a machine with no monitor, which is most of them. It is logged and the
+/// appliance carries on, because it always has.
+fn spawn_dashboard(
+    first_boot_code: Option<String>,
+    plex: &std::sync::Arc<crate::plex::Handle>,
+    wifi: &std::sync::Arc<crate::wifi::Job>,
+) {
+    // The same handle the console's own power route uses, and that is the point rather than
+    // an economy: `stop_now` asks it to stop Plex, and a second handle would be a second
+    // opinion about whether Plex is running.
+    let plex = std::sync::Arc::clone(plex);
+    // And the same wireless job the console page polls, which is the point rather than an
+    // economy again: the radio can only be held by one thing, and two jobs would be two
+    // opinions about whether it is busy -- so a scan started at the screen would be
+    // invisible in the browser and a second supplicant would be started on top of it.
+    let wifi = std::sync::Arc::clone(wifi);
+    std::thread::spawn(move || {
+        let mut log = |line: &str| println!("plexosd: dashboard: {line}");
+        crate::dashboard::run(first_boot_code, &plex, &wifi, &mut log);
+    });
 }
 
 /// Everything `GET /api/provision` answers: the job, and the machine around it.
@@ -1019,7 +1919,7 @@ fn bind(address: SocketAddr) -> io::Result<TcpListener> {
     })
 }
 
-/// The disks on this machine, with the one PlexOS runs from marked.
+/// The disks on this machine, with the one MediaLith runs from marked.
 fn report_disks(env: &impl Environment, install: &std::sync::Arc<crate::install::Job>) -> Response {
     let source = crate::install::running_disk(env);
     match serde_json::to_string(&install.snapshot(env, source.as_deref())) {
@@ -1145,8 +2045,8 @@ fn begin_install(
         return Response::text(
             500,
             "this machine's own disk could not be identified, so no disk can safely be \
-             erased. Remedy: none from the console -- PlexOS finds its own disk behind the \
-             verified /usr, and not finding it means this is not a booted PlexOS system.\n",
+             erased. Remedy: none from the console -- MediaLith finds its own disk behind the \
+             verified /usr, and not finding it means this is not a booted MediaLith system.\n",
         );
     };
 
@@ -1170,7 +2070,7 @@ fn begin_install(
                 500,
                 format!(
                     "this system's own partitions could not be found ({error}), so there \
-                     is nothing to copy. This is not a PlexOS disk.\n"
+                     is nothing to copy. This is not a MediaLith disk.\n"
                 ),
             );
         }
@@ -1221,15 +2121,14 @@ fn wait_for_addresses(
 }
 
 /// Issues or reloads the console's certificate and reports what a person has to check.
-fn identity_for(
-    addresses: &[String],
-    log: &mut dyn FnMut(&str),
-) -> io::Result<std::sync::Arc<rustls::ServerConfig>> {
-    let identity = crate::tls::load_or_create(
-        std::path::Path::new(plexos_types::paths::TLS_DIR),
-        &crate::tls::names_for(addresses, &hostname()),
-    )?;
+fn identity_for(addresses: &[String], log: &mut dyn FnMut(&str)) -> io::Result<()> {
+    let names = crate::tls::names_for(addresses, &hostname());
+    let identity =
+        crate::tls::load_or_create(std::path::Path::new(plexos_types::paths::TLS_DIR), &names)?;
     crate::tls::remember(&identity.fingerprint);
+    // What it was issued for, so the pairing QR can point at an address this certificate
+    // vouches for rather than at whichever one sysfs happened to list first.
+    crate::tls::remember_names(&names);
 
     // On the attached screen, which is the only place a fingerprint can be compared
     // against what a browser shows before the first connection. ADR-0014 called that
@@ -1248,7 +2147,71 @@ fn identity_for(
         );
     }
 
-    crate::tls::server_config(&identity)
+    crate::tls::install(crate::tls::server_config(&identity)?);
+    Ok(())
+}
+
+/// Reissues the certificate when the machine's addresses change.
+///
+/// The certificate names the addresses the machine has, and until this existed it named the
+/// ones it had *at the moment the console started* — for ever. That is wrong on an appliance
+/// whose address comes from DHCP, and it was wrong on a real machine within a day: one of
+/// them ended up answering at `192.168.2.190` under a certificate for `192.168.2.102`,
+/// because the wired adapter it had booted with was unplugged.
+///
+/// Nothing a browser does breaks — a self-signed certificate warns either way. What breaks
+/// is the only thing that makes a self-signed certificate mean anything: comparing the
+/// fingerprint at `/api/status` against what the browser was shown. Those were about
+/// different addresses.
+///
+/// **The key is kept**, which is the property that makes this safe to do on a timer.
+/// `load_or_create` reissues under the existing key, so the fingerprint does not move and
+/// nobody who has already checked it is asked to check it again. A certificate that changed
+/// its fingerprint whenever a router handed out a different address would teach exactly one
+/// lesson: that the warning means nothing.
+///
+/// A minute is often enough. A lease changes in seconds and is then stable for hours, and
+/// the cost of noticing late is a certificate naming an address the machine no longer has —
+/// which is the state this replaces, so a minute of it is not a regression.
+fn watch_addresses() {
+    /// How often the machine is asked what addresses it has.
+    const EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+    std::thread::spawn(move || {
+        let mut log = |line: &str| println!("plexosd: tls: {line}");
+        loop {
+            std::thread::sleep(EVERY);
+
+            let addresses: Vec<String> = crate::net::addresses(&System)
+                .iter()
+                .map(|a| a.ip().to_owned())
+                .collect();
+            let wanted = crate::tls::names_for(&addresses, &hostname());
+
+            // Compared against what is in force rather than against what was last seen, so
+            // a reissue that failed is retried rather than remembered as done.
+            if crate::tls::issued_for() == wanted {
+                continue;
+            }
+
+            match identity_for(&addresses, &mut log) {
+                Ok(()) => log(&format!(
+                    "the certificate now names {}",
+                    if addresses.is_empty() {
+                        "no address; this machine has none".to_owned()
+                    } else {
+                        addresses.join(", ")
+                    }
+                )),
+                Err(error) => log(&format!(
+                    "could not reissue the certificate for {}: {error}. The console keeps \
+                     serving the one it has, which may name an address this machine no \
+                     longer answers at.",
+                    addresses.join(", ")
+                )),
+            }
+        }
+    });
 }
 
 /// This machine's host name, for the certificate.
@@ -1270,15 +2233,7 @@ mod tests {
 
     /// `respond` against a console that has never provisioned anything.
     fn respond_test(request: &Request, env: &impl Environment) -> Response {
-        respond(
-            request,
-            env,
-            &std::sync::Arc::new(crate::provision::Job::new()),
-            &std::sync::Arc::new(crate::plex::Handle::new()),
-            &std::sync::Arc::new(crate::update::Job::new()),
-            &std::sync::Arc::new(crate::install::Job::new()),
-            &std::sync::Arc::new(crate::wifi::Job::new()),
-        )
+        respond(request, env, &Services::new())
     }
 
     fn get(path: &str) -> Request {
@@ -1288,6 +2243,447 @@ mod tests {
             headers: Vec::new(),
             body: Vec::new(),
         }
+    }
+
+    /// A `POST` with a JSON body, for the routes that take one.
+    fn post(path: &str, body: &str) -> Request {
+        Request {
+            method: "POST".to_owned(),
+            path: path.to_owned(),
+            headers: Vec::new(),
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
+    /// What `POST /api/pair` answered, as the page would read it.
+    fn pair_with(code: &str) -> (u16, String) {
+        let response = respond_test(
+            &post(crate::http::PAIR_ROUTE, &format!("{{\"code\":\"{code}\"}}")),
+            &Fixture::new(),
+        );
+        (
+            response.status,
+            String::from_utf8_lossy(&response.body).into_owned(),
+        )
+    }
+
+    #[test]
+    fn an_appliance_nobody_has_touched_pairs_with_nothing() {
+        // The state every machine on the LAN sees for all but five minutes of its life,
+        // and the reason this route can be unauthenticated: there is nothing to spend.
+        let _serialised = crate::pairing::test_lock();
+        let (status, body) = pair_with("ANYTHINGATALL");
+        assert_eq!(status, 403);
+        assert!(body.contains("Remedy:"), "{body}");
+        assert!(
+            body.contains("press P"),
+            "and the remedy is the physical action, which is the whole security model: \
+             {body}"
+        );
+    }
+
+    #[test]
+    fn the_code_on_the_screen_pairs_once_and_then_never_again() {
+        // The end-to-end shape of ADR-0019 through the route table: a code that only the
+        // attached screen could have produced becomes a session, and the second browser to
+        // present the same code gets nothing.
+        let _serialised = crate::pairing::test_lock();
+        let code = crate::pairing::start().expect("/dev/urandom");
+
+        let (status, body) = pair_with(&code);
+        assert_eq!(status, 200, "{body}");
+
+        let issued: serde_json::Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(issued["authenticated"], serde_json::json!(true));
+        assert_eq!(
+            issued["expires_in"],
+            serde_json::json!(crate::session::ABSOLUTE_LIFETIME.as_secs())
+        );
+        assert_eq!(
+            issued["idle_timeout"],
+            serde_json::json!(crate::session::IDLE_TIMEOUT.as_secs())
+        );
+
+        let session = issued["session_token"].as_str().expect("a session token");
+        assert_eq!(session.len(), crate::session::TOKEN_BYTES * 2);
+        assert_ne!(session, code, "the session is not the pairing code renamed");
+
+        let (again, _) = pair_with(&code);
+        assert_eq!(
+            again, 403,
+            "single use, and the second browser is a stranger"
+        );
+
+        assert!(crate::session::revoke(session), "cleanup: it was live");
+    }
+
+    #[test]
+    fn nothing_in_a_pairing_reply_carries_a_credential_it_should_not() {
+        // The list is short and every item on it has a reason to be tempting: the recovery
+        // code because the route is about credentials, the Plex token because it is the
+        // other secret this daemon holds, and the fingerprints because they are what the
+        // server actually compares.
+        let _serialised = crate::pairing::test_lock();
+        let code = crate::pairing::start().expect("/dev/urandom");
+        let (_, body) = pair_with(&code);
+
+        for forbidden in ["device-token", "PlexOnlineToken", "fingerprint", "digest"] {
+            assert!(
+                !body.contains(forbidden),
+                "{forbidden} must not appear: {body}"
+            );
+        }
+
+        let issued: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let session = issued["session_token"].as_str().unwrap();
+        assert!(crate::session::revoke(session));
+    }
+
+    #[test]
+    fn a_pairing_body_that_is_not_what_it_should_be_is_refused_without_a_hint() {
+        // And in particular a very long one is refused as wrong rather than as too long:
+        // telling a caller which of their inputs had the wrong *shape* is a way to learn
+        // the shape.
+        let _serialised = crate::pairing::test_lock();
+        let _ = crate::pairing::start().expect("/dev/urandom");
+
+        assert_eq!(
+            respond_test(&post(crate::http::PAIR_ROUTE, "not json"), &Fixture::new()).status,
+            400
+        );
+        assert_eq!(
+            respond_test(
+                &post(crate::http::PAIR_ROUTE, "{\"nope\":1}"),
+                &Fixture::new()
+            )
+            .status,
+            400
+        );
+
+        let (status, body) = pair_with(&"A".repeat(4096));
+        assert_eq!(status, 403);
+        assert!(!body.contains("long"), "{body}");
+        crate::pairing::cancel();
+    }
+
+    #[test]
+    fn a_pairing_refusal_never_repeats_what_was_presented() {
+        // The rule that keeps a wrong code out of a log and out of a browser's history. It
+        // holds by construction -- Refusal carries no input -- and this is what stops that
+        // becoming untrue later.
+        let _serialised = crate::pairing::test_lock();
+        let _ = crate::pairing::start().expect("/dev/urandom");
+        let guess = "WRONGCODE7T8BHVWPQ2M4X6Z";
+        let (status, body) = pair_with(guess);
+
+        assert_eq!(status, 403);
+        assert!(!body.contains(guess), "the guess is echoed back: {body}");
+        crate::pairing::cancel();
+    }
+
+    #[test]
+    fn reaching_the_session_route_is_itself_the_answer_to_being_signed_in() {
+        // No implementation, and that is the point: the route is a POST, so the gate
+        // decided before the handler existed. A second implementation of "are you an
+        // administrator" is a second thing to keep in agreement with the gate.
+        let response = respond_test(
+            &post("/api/session", "{\"action\":\"check\"}"),
+            &Fixture::new(),
+        );
+        assert_eq!(response.status, 200);
+        assert!(String::from_utf8_lossy(&response.body).contains("\"authenticated\":true"));
+    }
+
+    #[test]
+    fn signing_out_ends_the_session_the_request_arrived_with() {
+        let _serialised = crate::pairing::test_lock();
+        let code = crate::pairing::start().expect("/dev/urandom");
+        let (_, body) = pair_with(&code);
+        let session = serde_json::from_str::<serde_json::Value>(&body).unwrap()["session_token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let mut request = post("/api/session", "{\"action\":\"sign-out\"}");
+        request
+            .headers
+            .push(("Authorization".to_owned(), format!("Bearer {session}")));
+
+        let response = respond_test(&request, &Fixture::new());
+        assert_eq!(response.status, 200);
+        assert!(String::from_utf8_lossy(&response.body).contains("\"signed_out\":true"));
+
+        // And it is gone from the gate, which is the only place that matters.
+        assert!(
+            crate::auth::authenticate(
+                &session,
+                &crate::auth::Credential::Set(crate::auth::fingerprint("4K7QM2XR9T8BHVWP"))
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn signing_out_with_a_recovery_code_revokes_nothing_and_is_not_an_error() {
+        // There is no server-side state behind the recovery code to remove. The browser
+        // drops its own copy either way, which is the outcome the caller wanted.
+        let mut request = post("/api/session", "{\"action\":\"sign-out\"}");
+        request.headers.push((
+            "Authorization".to_owned(),
+            "Bearer 4K7Q-M2XR-9T8B-HVWP".to_owned(),
+        ));
+
+        let response = respond_test(&request, &Fixture::new());
+        assert_eq!(response.status, 200);
+        assert!(String::from_utf8_lossy(&response.body).contains("\"signed_out\":false"));
+    }
+
+    /// `POST /api/browser-pair/start`, as an unauthenticated desktop would send it.
+    fn browser_pair_start_as(agent: &str) -> serde_json::Value {
+        let mut request = post(crate::http::BROWSER_PAIR_START, "{}");
+        request
+            .headers
+            .push(("User-Agent".to_owned(), agent.to_owned()));
+        let response = respond_test(&request, &Fixture::new());
+        assert_eq!(response.status, 200);
+        serde_json::from_slice(&response.body).expect("json")
+    }
+
+    fn browser_pair_post(path: &str, body: &str) -> (u16, serde_json::Value) {
+        let response = respond_test(&post(path, body), &Fixture::new());
+        let parsed = serde_json::from_slice(&response.body).unwrap_or_else(
+            |_| serde_json::json!({"body": String::from_utf8_lossy(&response.body)}),
+        );
+        (response.status, parsed)
+    }
+
+    #[test]
+    fn the_desktops_qr_carries_the_request_and_never_the_secret() {
+        // The whole two-value design, asserted where it can actually be got wrong. The id
+        // is on a monitor for anybody to photograph; the secret is the thing that makes the
+        // photograph worthless, and it must appear nowhere in what is drawn.
+        let _serialised = crate::browserpair::test_lock();
+        let opened = browser_pair_start_as("Mozilla/5.0 (Windows NT 10.0) Chrome/120");
+
+        let url = opened["url"].as_str().expect("a url");
+        let id = opened["request_id"].as_str().expect("an id");
+        let secret = opened["desktop_secret"].as_str().expect("a secret");
+
+        assert!(url.contains(&format!("#approve={id}")), "{url}");
+        assert!(
+            !url.contains(secret),
+            "the secret must not be in the QR: {url}"
+        );
+        assert!(!url.contains('?'), "never a query parameter: {url}");
+        assert_ne!(id, secret);
+
+        // And nothing else that authenticates anything is in there either.
+        for forbidden in ["session_token", "device-token", "Bearer"] {
+            assert!(!url.contains(forbidden), "{forbidden} in {url}");
+        }
+
+        // The matrix is the appliance's own encoder, so the page paints rather than
+        // encodes -- one implementation of ISO/IEC 18004 in this product, not two.
+        let rows = opened["qr"].as_array().expect("a matrix");
+        assert!(rows.len() >= 29, "a symbol, {} rows", rows.len());
+        for row in rows {
+            let row = row.as_str().expect("a row of 1s and 0s");
+            assert_eq!(row.len(), rows.len(), "square");
+            assert!(row.bytes().all(|b| b == b'0' || b == b'1'), "{row}");
+        }
+    }
+
+    #[test]
+    fn a_waiting_browser_gets_nothing_until_an_administrator_says_yes() {
+        // The state an attacker most wants to shortcut, through the routes rather than the
+        // store: the desktop has asked, holds its own secret, and is still nobody.
+        let _serialised = crate::browserpair::test_lock();
+        let opened = browser_pair_start_as("Chrome/120");
+        let id = opened["request_id"].as_str().unwrap();
+        let secret = opened["desktop_secret"].as_str().unwrap();
+
+        let body = format!(r#"{{"request_id":"{id}","desktop_secret":"{secret}"}}"#);
+        let (status, answer) = browser_pair_post(crate::http::BROWSER_PAIR_REDEEM, &body);
+        assert_eq!(status, 200, "polling is not an error");
+        assert_eq!(answer["status"], "pending");
+        assert!(
+            answer["session_token"].is_null(),
+            "no token before approval"
+        );
+    }
+
+    #[test]
+    fn approval_lets_the_desktop_collect_a_session_of_its_own_exactly_once() {
+        let _serialised = crate::browserpair::test_lock();
+        let opened = browser_pair_start_as("Chrome/120");
+        let id = opened["request_id"].as_str().unwrap().to_owned();
+        let secret = opened["desktop_secret"].as_str().unwrap().to_owned();
+
+        let (status, _) = browser_pair_post(
+            "/api/browser-pair/approve",
+            &format!(r#"{{"request_id":"{id}"}}"#),
+        );
+        assert_eq!(status, 200);
+
+        let redeem = format!(r#"{{"request_id":"{id}","desktop_secret":"{secret}"}}"#);
+        let (status, answer) = browser_pair_post(crate::http::BROWSER_PAIR_REDEEM, &redeem);
+        assert_eq!(status, 200);
+        assert_eq!(answer["status"], "approved");
+
+        let session = answer["session_token"].as_str().expect("a session");
+        assert_eq!(session.len(), crate::session::TOKEN_BYTES * 2);
+        // An ordinary session with the ordinary deadlines, not a second kind of credential.
+        assert_eq!(
+            answer["expires_in"],
+            serde_json::json!(crate::session::ABSOLUTE_LIFETIME.as_secs())
+        );
+
+        // And it really opens doors, which is the only test of a credential that matters.
+        let claimed = crate::auth::Credential::Set(crate::auth::fingerprint("4K7QM2XR9T8BHVWP"));
+        assert_eq!(
+            crate::auth::authenticate(session, &claimed),
+            Some(crate::auth::Principal::AdminSession)
+        );
+
+        // Replay: the same approved request, the same correct secret, and nothing.
+        let (_, again) = browser_pair_post(crate::http::BROWSER_PAIR_REDEEM, &redeem);
+        assert_eq!(again["status"], "refused");
+        assert!(again["session_token"].is_null());
+
+        assert!(crate::session::revoke(session), "cleanup: it was live");
+    }
+
+    #[test]
+    fn the_session_the_desktop_gets_is_not_the_one_the_approver_holds() {
+        // The principle this feature is built around: the phone is not a relay. There is no
+        // path by which its token could reach the desktop, and this is what says so at the
+        // boundary where somebody might one day add one.
+        let _serialised = crate::browserpair::test_lock();
+        let approver = crate::session::issue().expect("/dev/urandom");
+
+        let opened = browser_pair_start_as("Chrome/120");
+        let id = opened["request_id"].as_str().unwrap().to_owned();
+        let secret = opened["desktop_secret"].as_str().unwrap().to_owned();
+
+        // The approver's own request carries its session in a header, and the reply says
+        // nothing about it.
+        let mut approve = post(
+            "/api/browser-pair/approve",
+            &format!(r#"{{"request_id":"{id}"}}"#),
+        );
+        approve
+            .headers
+            .push(("Authorization".to_owned(), format!("Bearer {approver}")));
+        let response = respond_test(&approve, &Fixture::new());
+        let said = String::from_utf8_lossy(&response.body);
+        assert!(
+            !said.contains(&approver),
+            "the approver's token came back: {said}"
+        );
+
+        let (_, answer) = browser_pair_post(
+            crate::http::BROWSER_PAIR_REDEEM,
+            &format!(r#"{{"request_id":"{id}","desktop_secret":"{secret}"}}"#),
+        );
+        let desktop = answer["session_token"].as_str().expect("a session");
+        assert_ne!(
+            desktop, approver,
+            "the desktop was handed the phone's session"
+        );
+
+        // Two independent sessions: ending one leaves the other.
+        assert!(crate::session::revoke(&approver));
+        let claimed = crate::auth::Credential::Set(crate::auth::fingerprint("4K7QM2XR9T8BHVWP"));
+        assert!(
+            crate::auth::authenticate(desktop, &claimed).is_some(),
+            "signing the phone out must not sign the desktop out"
+        );
+        assert!(crate::session::revoke(desktop), "cleanup");
+    }
+
+    #[test]
+    fn a_refusal_reaches_the_desktop_rather_than_leaving_it_waiting() {
+        // Somebody tapped Deny. The desktop should say so within a poll, not sit on
+        // "waiting for approval" for the remaining four minutes.
+        let _serialised = crate::browserpair::test_lock();
+        let opened = browser_pair_start_as("Chrome/120");
+        let id = opened["request_id"].as_str().unwrap().to_owned();
+        let secret = opened["desktop_secret"].as_str().unwrap().to_owned();
+
+        browser_pair_post(
+            "/api/browser-pair/deny",
+            &format!(r#"{{"request_id":"{id}"}}"#),
+        );
+
+        let (_, answer) = browser_pair_post(
+            crate::http::BROWSER_PAIR_REDEEM,
+            &format!(r#"{{"request_id":"{id}","desktop_secret":"{secret}"}}"#),
+        );
+        assert_eq!(answer["status"], "denied");
+        assert!(answer["session_token"].is_null());
+
+        // And a refusal cannot be turned into an approval afterwards.
+        let (status, _) = browser_pair_post(
+            "/api/browser-pair/approve",
+            &format!(r#"{{"request_id":"{id}"}}"#),
+        );
+        assert_eq!(status, 409);
+    }
+
+    #[test]
+    fn cancelling_needs_the_secret_so_a_passer_by_cannot_stop_somebody_pairing() {
+        // The id is on a monitor. If cancelling took only the id, anybody on the network
+        // who read one off a screen could stop that pairing, repeatedly.
+        let _serialised = crate::browserpair::test_lock();
+        let opened = browser_pair_start_as("Chrome/120");
+        let id = opened["request_id"].as_str().unwrap().to_owned();
+        let secret = opened["desktop_secret"].as_str().unwrap().to_owned();
+
+        let (_, answer) = browser_pair_post(
+            crate::http::BROWSER_PAIR_CANCEL,
+            &format!(r#"{{"request_id":"{id}","desktop_secret":"read-off-the-screen"}}"#),
+        );
+        assert_eq!(answer["cancelled"], serde_json::json!(false));
+
+        // Still there for the browser that owns it.
+        let (_, answer) = browser_pair_post(
+            crate::http::BROWSER_PAIR_CANCEL,
+            &format!(r#"{{"request_id":"{id}","desktop_secret":"{secret}"}}"#),
+        );
+        assert_eq!(answer["cancelled"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn an_administrator_is_shown_what_is_asking_and_the_number_to_compare() {
+        let _serialised = crate::browserpair::test_lock();
+        let opened =
+            browser_pair_start_as("Mozilla/5.0 (Windows NT 10.0; Win64) Chrome/120 Safari/537");
+        let id = opened["request_id"].as_str().unwrap().to_owned();
+
+        let (status, described) = browser_pair_post(
+            "/api/browser-pair/inspect",
+            &format!(r#"{{"request_id":"{id}"}}"#),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(described["browser"], "Chrome on Windows");
+        // The same four digits both screens show, derived from the request rather than
+        // reported by either of them.
+        assert_eq!(described["verification"], opened["verification"]);
+
+        // And nothing that could be mistaken for a credential.
+        let said = described.to_string();
+        assert!(!said.contains("secret"), "{said}");
+        assert!(!said.contains("session"), "{said}");
+    }
+
+    #[test]
+    fn inspecting_something_that_is_not_waiting_says_so_without_a_hint() {
+        let _serialised = crate::browserpair::test_lock();
+        let (status, _) = browser_pair_post(
+            "/api/browser-pair/inspect",
+            r#"{"request_id":"nothing-by-that-name"}"#,
+        );
+        assert_eq!(status, 404);
     }
 
     #[test]
@@ -1391,15 +2787,7 @@ mod tests {
                 headers: Vec::new(),
                 body: body.to_vec(),
             };
-            let response = respond(
-                &request,
-                &Fixture::new(),
-                &std::sync::Arc::new(crate::provision::Job::new()),
-                &std::sync::Arc::new(crate::plex::Handle::new()),
-                &std::sync::Arc::new(crate::update::Job::new()),
-                &std::sync::Arc::new(crate::install::Job::new()),
-                &std::sync::Arc::new(crate::wifi::Job::new()),
-            );
+            let response = respond(&request, &Fixture::new(), &Services::new());
             assert_eq!(response.status, 400, "{body:?}");
         }
     }
@@ -1712,10 +3100,47 @@ mod tests {
             "and must say when that chain ends in a key whose private half is on a build \
              host, because 'signed' alone would tell the reader something false"
         );
+        // The reassurance moved rather than went. It was a sentence under the lifecycle
+        // pills; it is the second arm of the branch in the A/B diagram now, which is where
+        // somebody looking at the mechanism actually meets the question. What is pinned is
+        // the promise -- that the machine returns to what worked, and that nobody has to be
+        // there -- and not the wording, because pinning a sentence is what made the old one
+        // survive as a duplicate of the diagram beside it.
         assert!(
-            PAGE.contains("comes back to this one by itself"),
-            "and must say what happens when an update is bad, which is the question \
+            PAGE.contains("comes back to the system that worked"),
+            "the page must say what happens when an update is bad, which is the question \
              anybody hesitating over that button is actually asking"
+        );
+        assert!(
+            PAGE.contains("nobody has to be at the machine"),
+            "and must say that it happens unattended, which is the half that makes it a \
+             guarantee rather than a procedure"
+        );
+    }
+
+    #[test]
+    fn no_refusal_sends_somebody_to_a_control_this_page_does_not_have() {
+        // Seven refusals told the reader to "Enter it in the Device token box at the top of
+        // this page". That was true until the console became an application shell, at which
+        // point the token moved behind the lock in the header -- and the sentence survived
+        // in seven places while being corrected in one. Reported from a machine by somebody
+        // who had just reinstalled, so `/var` was empty, the token was new, and every
+        // mutating route refused: the one moment the remedy is read is the one moment it
+        // pointed at nothing.
+        //
+        // A wrong remedy is worse than none. It is already in the trap list about `EACCES`
+        // and `EADDRINUSE`; this is the same rule applied to a control rather than an error.
+        assert!(
+            !PAGE.contains("Device token box"),
+            "the page has no box called that. The token is entered behind #admin-lock in \
+             the header, and a refusal naming somewhere else sends a reader looking for a \
+             control that was removed."
+        );
+        // Pinned to the control rather than to the sentence, because pinning wording is
+        // what let the old sentence survive a redesign that was about exactly it.
+        assert!(
+            PAGE.contains("id=\"admin-lock\""),
+            "and the control the refusals name has to be the one the page actually has"
         );
     }
 
@@ -1762,6 +3187,69 @@ mod tests {
     }
 
     #[test]
+    fn every_class_the_script_draws_with_is_a_class_the_stylesheet_defines() {
+        // The third member of the family above, and it was written because the first two
+        // could not see the defect that produced it. Renaming the activity card's helper
+        // functions with a word-boundary search-and-replace also renamed the class names
+        // sitting in their template literals -- `class="meter"` became `class="metricMeter"`
+        // and so on -- and the result was a card that rendered every element, addressed
+        // every id, parsed cleanly, and drew as unstyled text. `getElementById` was
+        // satisfied, `node --check` was satisfied, and nothing here was looking at the one
+        // channel that had broken.
+        //
+        // A class in the script with no rule for it is not always an error: some exist to be
+        // found rather than to be painted. So the rule is "styled, or selected on" rather
+        // than "styled", which is a property of the page instead of a list of exceptions
+        // that goes stale -- and the first run proved the difference by flagging
+        // `media-pick` and `share-drop`, both perfectly legitimate `querySelectorAll` hooks.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+        let style = PAGE
+            .split_once("<style>")
+            .and_then(|(_, rest)| rest.split_once("</style>"))
+            .map(|(body, _)| body)
+            .expect("the page has one style block");
+
+        // `hidden` is the HTML attribute rather than a rule of this sheet's own.
+        let behavioural = ["hidden"];
+
+        let mut unstyled = Vec::new();
+        for (index, _) in script.match_indices("class=\"") {
+            let rest = &script[index + "class=\"".len()..];
+            let Some((value, _)) = rest.split_once('"') else {
+                continue;
+            };
+            // A class list is interpolated as often as it is literal, so only the part
+            // before the first `${` is a name this can ask about. `class="step ${state}"`
+            // yields `step`; the interpolated half is a value, not a name.
+            let literal = value.split("${").next().unwrap_or_default();
+            for name in literal.split_whitespace() {
+                if behavioural.contains(&name) {
+                    continue;
+                }
+                let styled = style.contains(&format!(".{name}"));
+                // A selector hook: `querySelectorAll(".media-pick")` and friends, where the
+                // class is how the script finds the element again rather than how it looks.
+                let selected_on = script.contains(&format!(".{name}\""));
+                if !styled && !selected_on {
+                    unstyled.push(name);
+                }
+            }
+        }
+        unstyled.sort_unstable();
+        unstyled.dedup();
+        assert!(
+            unstyled.is_empty(),
+            "the script draws elements with classes the stylesheet never defines, so they \
+             render as unstyled text on a page where everything else looks right: \
+             {unstyled:?}"
+        );
+    }
+
+    #[test]
     fn a_running_plex_is_still_offered_a_way_to_install_a_newer_one() {
         // The defect this guards: the `report.running` branch of renderPlexInto rendered a
         // heading, a sentence and a link, then returned. Every control disappeared the
@@ -1771,19 +3259,28 @@ mod tests {
         //
         // Asserting on the source is weaker than driving a browser, and it is what catches
         // a `return` put back above the version controls.
+        //
+        // The two branches became one when the Plex view was built: running and
+        // installed-but-not-running differ by a word, a colour and a sentence, and writing
+        // that twice is how the running branch came to be missing every control in the first
+        // place. So this reads the merged branch, and the property it guards is unchanged.
         let branch = PAGE
-            .split("if (report.running)")
+            .split("if (report.running || report.installed)")
             .nth(1)
-            .expect("the running branch");
-        let branch = &branch[..branch.find("if (report.installed)").unwrap_or(branch.len())];
+            .expect("the branch that draws an installed Plex");
+        let branch = &branch[..branch.find("\n  const progress =").unwrap_or(branch.len())];
 
         assert!(
             branch.contains("plexVersionsMarkup"),
-            "a running Plex must still offer the version controls: {branch}"
+            "an installed Plex must still offer the version controls: {branch}"
         );
         assert!(
             branch.contains("progressMarkup"),
             "an upgrade that fails while Plex runs has to report it somewhere"
+        );
+        assert!(
+            branch.contains("wirePlexVersionControls"),
+            "and the controls it renders have to be wired to something"
         );
     }
 
@@ -1849,6 +3346,688 @@ mod tests {
         );
     }
 
+    /// The page's one script block, which most of these tests want.
+    fn page_script() -> &'static str {
+        PAGE.split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has exactly one script block")
+    }
+
+    /// The page's one style block.
+    fn page_style() -> &'static str {
+        PAGE.split_once("<style>")
+            .and_then(|(_, rest)| rest.split_once("</style>"))
+            .map(|(body, _)| body)
+            .expect("the page has exactly one style block")
+    }
+
+    #[test]
+    fn every_view_the_sidebar_offers_is_a_section_that_exists() {
+        // The console is seven views behind a sidebar, and the two halves are written in two
+        // places: `VIEWS` in the script, `data-view` on the buttons, and `data-view` on the
+        // sections. A name in one and not the others is a menu item that does nothing, or a
+        // section nothing can reach -- and neither throws, because the switch is a loop over
+        // elements that simply does not find one.
+        let script = page_script();
+        let declared = script
+            .split_once("const VIEWS = [")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(list, _)| list)
+            .expect("the views are declared in one place");
+        let views: Vec<&str> = declared
+            .split(',')
+            .map(|name| name.trim().trim_matches('"'))
+            .filter(|name| !name.is_empty())
+            .collect();
+        assert!(views.len() >= 7, "seven views were designed: {views:?}");
+
+        for view in &views {
+            assert!(
+                PAGE.contains(&format!("<section class=\"view\" data-view=\"{view}\"")),
+                "{view} is offered by the sidebar and there is no section for it"
+            );
+            assert!(
+                PAGE.contains(&format!("class=\"navitem\" data-view=\"{view}\"")),
+                "{view} is a section with nothing in the sidebar that reaches it"
+            );
+        }
+
+        // And the reverse: a button naming a view the script does not know about switches to
+        // nothing at all, silently.
+        for (index, _) in PAGE.match_indices("class=\"navitem\" data-view=\"") {
+            let rest = &PAGE[index + "class=\"navitem\" data-view=\"".len()..];
+            let (name, _) = rest.split_once('"').expect("a closed attribute");
+            assert!(
+                views.contains(&name),
+                "the sidebar offers {name:?}, which is not one of {views:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn switching_views_never_leaves_the_page() {
+        // The console is a page people leave open for hours on a second screen, and every
+        // poll, the terminal's scrollback and the typed token live in it. A navigation item
+        // that was an anchor with an href would throw all of that away on every click -- and
+        // would look to a keyboard and a screen reader like something that loads a document,
+        // which it must not, because nothing here does.
+        let script = page_script();
+        assert!(
+            !PAGE.contains("<a class=\"navitem\""),
+            "a view is switched, not navigated to"
+        );
+        assert!(
+            PAGE.contains("<button class=\"navitem\""),
+            "and the control is a button, which is what it behaves like"
+        );
+        // The address bar still moves, so a link to a view can be sent and the back button
+        // steps between them.
+        assert!(
+            script.contains("history.pushState"),
+            "the URL has to follow the view, or #network is not a link anybody can send"
+        );
+        assert!(
+            script.contains("popstate"),
+            "and the view has to follow the URL, or the back button does nothing"
+        );
+    }
+
+    #[test]
+    fn the_token_is_behind_a_lock_and_nothing_about_it_moved() {
+        // The device token card was the first and largest thing on this page. It is a
+        // popover behind a lock in the header now, and this is the test that the *redesign*
+        // did not quietly become a change to ADR-0013: the token is still typed into the
+        // same field, still kept in sessionStorage and nowhere else, and still sent as an
+        // Authorization header.
+        assert!(
+            PAGE.contains("id=\"token-card\" hidden"),
+            "the card starts hidden, so a dashboard does not open with a credential box on it"
+        );
+        assert!(
+            PAGE.contains("id=\"admin-lock\""),
+            "and there is a control in the header that opens it"
+        );
+
+        let script = page_script();
+        assert!(
+            script.contains("sessionStorage.getItem(TOKEN_KEY)")
+                && script.contains("sessionStorage.setItem(TOKEN_KEY"),
+            "the token lives in sessionStorage, which is cleared when the tab closes"
+        );
+        assert!(
+            !script.contains("localStorage.setItem(TOKEN_KEY")
+                && !script.contains("localStorage.getItem(TOKEN_KEY"),
+            "and never in localStorage, which outlives the tab"
+        );
+        // This assertion is the reverse of what it was, and the reversal is the point of
+        // ADR-0019 rather than a relaxation. Locking used to be a thing this browser did
+        // and nothing the appliance was told, which was exactly right while the only
+        // credential was the device token: there is no server-side state behind a device
+        // token, so there was nothing to end and a request would have been ceremony.
+        //
+        // A session is not like that. It is state on the appliance, and a "Sign out" that
+        // dropped the browser's copy and left the session live would leave a working
+        // credential behind -- the one thing somebody pressing that button is trying to
+        // prevent. So sign-out now reaches the machine, and what must stay true is that it
+        // reaches it *first* and then forgets locally whatever the answer was.
+        let lock = script
+            .split_once("async function lockAdmin()")
+            .map(|(_, rest)| rest)
+            .expect("signing out is a named function");
+        let lock = &lock[..lock.find("\n}\n").unwrap_or(lock.len())];
+        assert!(
+            lock.contains("sessionStorage.removeItem(TOKEN_KEY)")
+                && lock.contains("forgetSession()"),
+            "signing out forgets both credentials in this tab: {lock}"
+        );
+        assert!(
+            lock.contains("/api/session") && lock.contains("sign-out"),
+            "and tells the appliance, so the session it holds stops working: {lock}"
+        );
+        let (asked, forgot) = (
+            lock.find("fetch(").expect("it asks"),
+            lock.find("forgetSession()").expect("it forgets"),
+        );
+        assert!(
+            asked < forgot,
+            "the request goes first: a sign-out that gave up because the network was down \
+             would leave the credential in a tab somebody believes they closed: {lock}"
+        );
+    }
+
+    #[test]
+    fn every_request_that_carries_a_credential_asks_one_function_for_it() {
+        // ADR-0019's integration on the browser's side, and the one property that keeps it
+        // from becoming fifteen decisions: there is one function that answers "what does
+        // this tab send", it prefers the session, and nothing reaches for storage itself.
+        //
+        // Checked by reading every `Bearer` on the page rather than by counting call
+        // sites, because a request added tomorrow is the one that would get this wrong.
+        let script = page_script();
+        let marker = "\"Bearer \" + ";
+
+        let mut carried = Vec::new();
+        for (index, _) in script.match_indices(marker) {
+            let rest = &script[index + marker.len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            carried.push(name);
+        }
+
+        assert!(
+            carried.len() >= 15,
+            "the page sends a credential on many more routes than this: {carried:?}"
+        );
+        for name in &carried {
+            assert!(
+                matches!(name.as_str(), "value" | "held" | "typed"),
+                "a request built its own credential from {name:?} instead of asking \
+                 credential() for one"
+            );
+        }
+
+        // `typed` is the one exception and it is a narrow one: checking a recovery code as
+        // somebody enters it is asking about a credential that is *not yet* in force. Using
+        // credential() there would validate the session this browser already holds and
+        // report "Unlocked" about the wrong thing entirely -- so the exception exists
+        // because the rule, applied literally, would be wrong.
+        let checker = script
+            .split_once("async function checkTypedToken()")
+            .map(|(_, rest)| rest)
+            .expect("checking a typed code is a named function");
+        let checker = &checker[..checker.find("\n}\n").unwrap_or(checker.len())];
+        assert_eq!(
+            script.matches("\"Bearer \" + typed").count(),
+            1,
+            "only one request may present a code that is not the credential in force"
+        );
+        assert!(
+            checker.contains("\"Bearer \" + typed"),
+            "and it is the one that checks what was typed"
+        );
+
+        assert!(
+            !script.contains("const value = token();") && !script.contains("const held = token();"),
+            "and the two names those requests use are assigned from credential(), so a \
+             paired browser never sends the recovery code in front of its own session"
+        );
+        assert!(
+            script.contains("function credential() { return session() || token(); }"),
+            "the session wins, because it is the one the person just established and the \
+             one Sign out can end"
+        );
+    }
+
+    #[test]
+    fn running_the_pages_own_code_shows_the_fragment_gone_and_the_code_recovered() {
+        // An assertion about the page's text cannot see this, and the page's text has been
+        // right while its behaviour was wrong before -- the terminal cleaner destroyed
+        // sixty-one per cent of every session's output under tests that all passed. So
+        // this runs takePairingCode itself, under a real engine, against the four URLs it
+        // will actually meet.
+        //
+        // The case that matters most is the last: a hash that is not a pairing code must
+        // come through untouched, because that hash is how the console chooses which view
+        // to show. A function that cleared it unconditionally would send every link
+        // somebody sends -- `#network`, `#terminal` -- to the Overview instead.
+        let script = page_script();
+        let start = script
+            .find("function takePairingCode(")
+            .expect("taking the code out of the URL is a named function");
+        let end = script[start..]
+            .find("\n}\n")
+            .map(|at| start + at + "\n}".len())
+            .expect("and ends at a brace in the first column");
+        let function = &script[start..end];
+
+        // The prefix comes from the page too, rather than being written again here. A test
+        // that declared its own would agree with itself while the page looked for
+        // something else -- which is the fixture-you-imagined trap, and this is the one
+        // string that has to match what the appliance puts in the QR code.
+        let prefix = script
+            .lines()
+            .find(|line| line.starts_with("const PAIR_PREFIX = "))
+            .expect("the fragment prefix is declared on one line");
+
+        let Some(engine) = ["node", "deno", "qjs"].into_iter().find(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        }) else {
+            println!(
+                "skip: the pairing bootstrap was not run -- no node, deno or qjs on this \
+                 host. Install one, or a fragment left in the address bar will only be \
+                 found by scanning a QR code with a phone."
+            );
+            return;
+        };
+
+        // A window just real enough. `history.replaceState` records what it was given,
+        // which is the half of the behaviour that has no return value to inspect.
+        let harness = format!(
+            r##"
+{prefix}
+{function}
+
+const cases = [
+  ["#pair=ABC123", "", "ABC123"],
+  ["#pair=", "", ""],
+  ["", "", ""],
+  ["#network", "#network", ""],
+];
+
+for (const [hash, expectedHash, expectedCode] of cases) {{
+  let replaced = null;
+  globalThis.window = {{ location: {{ hash, pathname: "/", search: "" }} }};
+  globalThis.history = {{ replaceState: (_s, _t, url) => {{ replaced = url; }} }};
+
+  const got = takePairingCode();
+  if (got !== expectedCode) {{
+    console.log("FAIL code " + JSON.stringify(hash) + ": " + JSON.stringify(got));
+    process.exit(1);
+  }}
+  // A hash that is not a pairing code must be left where it is, hence "no replaceState".
+  const left = replaced === null ? hash : "";
+  if (left !== expectedHash) {{
+    console.log("FAIL hash " + JSON.stringify(hash) + ": left " + JSON.stringify(left)
+                + ", replaced with " + JSON.stringify(replaced));
+    process.exit(1);
+  }}
+}}
+console.log("OK");
+"##
+        );
+
+        let path = std::env::temp_dir().join("medialith-take-pairing-code-test.js");
+        std::fs::write(&path, harness).expect("write the harness");
+        let output = std::process::Command::new(engine)
+            .arg(&path)
+            .output()
+            .expect("run the harness");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("OK"),
+            "the page's own pairing bootstrap misbehaved:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn an_approval_request_leaves_the_url_the_same_way_a_pairing_code_does() {
+        // Run rather than asserted about, because this page has shipped correct text over
+        // wrong behaviour before. The case that matters most is the last one: a hash that is
+        // not an approval request must come through untouched, or every `#network` link
+        // somebody sends opens on the Overview instead.
+        let script = page_script();
+        let start = script
+            .find("function takeApprovalRequest(")
+            .expect("taking the request out of the URL is a named function");
+        let end = script[start..]
+            .find("\n}\n")
+            .map(|at| start + at + "\n}".len())
+            .expect("and ends at a brace in the first column");
+        let function = &script[start..end];
+        let prefix = script
+            .lines()
+            .find(|line| line.starts_with("const APPROVE_PREFIX = "))
+            .expect("the fragment prefix is declared on one line");
+
+        let Some(engine) = ["node", "deno", "qjs"].into_iter().find(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        }) else {
+            println!(
+                "skip: the approval bootstrap was not run -- no node, deno or qjs on this \
+                 host. Install one, or a request left in the address bar will only be found \
+                 by scanning a code with a phone."
+            );
+            return;
+        };
+
+        let harness = format!(
+            r##"
+{prefix}
+{function}
+
+const cases = [
+  ["#approve=abc123", "", "abc123"],
+  ["#approve=", "", ""],
+  ["", "", ""],
+  ["#network", "#network", ""],
+  ["#pair=SOMECODE", "#pair=SOMECODE", ""],
+];
+
+for (const [hash, expectedHash, expectedId] of cases) {{
+  let replaced = null;
+  globalThis.window = {{ location: {{ hash, pathname: "/", search: "" }} }};
+  globalThis.history = {{ replaceState: (_s, _t, url) => {{ replaced = url; }} }};
+
+  const got = takeApprovalRequest();
+  if (got !== expectedId) {{
+    console.log("FAIL id " + JSON.stringify(hash) + ": " + JSON.stringify(got));
+    process.exit(1);
+  }}
+  const left = replaced === null ? hash : "";
+  if (left !== expectedHash) {{
+    console.log("FAIL hash " + JSON.stringify(hash) + ": left " + JSON.stringify(left));
+    process.exit(1);
+  }}
+}}
+console.log("OK");
+"##
+        );
+
+        let path = std::env::temp_dir().join("medialith-take-approval-request-test.js");
+        std::fs::write(&path, harness).expect("write the harness");
+        let output = std::process::Command::new(engine)
+            .arg(&path)
+            .output()
+            .expect("run the harness");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("OK"),
+            "the page's own approval bootstrap misbehaved:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn the_desktop_secret_travels_in_a_body_and_is_never_drawn() {
+        // The half of the two-value design that lives in the browser. The id is in a QR on
+        // a monitor; the secret is what makes photographing that monitor useless, so it
+        // must never reach a URL, a QR or the screen.
+        let script = page_script();
+
+        for (function, marker) in [
+            ("async function bpPoll()", "/api/browser-pair/redeem"),
+            ("async function bpCancel()", "/api/browser-pair/cancel"),
+        ] {
+            let body = script
+                .split_once(function)
+                .map_or_else(|| panic!("{function} exists"), |(_, rest)| rest);
+            let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+            assert!(body.contains(marker), "{function} posts to {marker}");
+            assert!(
+                body.contains("body: JSON.stringify(held)"),
+                "{function} sends the request and its secret in the body: {body}"
+            );
+        }
+
+        // The QR the desktop paints comes from the appliance, and what it paints is a
+        // matrix of ones and zeros -- so there is no encoder in this page that could be
+        // handed a secret by mistake.
+        assert!(
+            script.contains("function qrSvg(rows)"),
+            "the page paints a matrix rather than encoding one"
+        );
+        assert!(
+            !script.contains("desktop_secret") || script.contains("opened.desktop_secret"),
+            "the secret is stored, never drawn"
+        );
+        let show = script
+            .split_once("function bpShow(opened)")
+            .map(|(_, rest)| rest)
+            .expect("bpShow exists");
+        let show = &show[..show.find("\n}\n").unwrap_or(show.len())];
+        assert!(
+            !show.contains("secret"),
+            "nothing about the secret is drawn on the desktop: {show}"
+        );
+    }
+
+    #[test]
+    fn approving_sends_a_sentence_about_a_request_and_never_a_session() {
+        // The principle, on the browser's side: the phone tells the appliance which request
+        // it approves. It does not hand anything over, and there is no code here that
+        // could -- the only thing it sends of its own is the Authorization header every
+        // other request on this page carries.
+        let script = page_script();
+        let decide = script
+            .split_once("async function decideApproval(approve)")
+            .map(|(_, rest)| rest)
+            .expect("deciding is a named function");
+        let decide = &decide[..decide.find("\n}\n").unwrap_or(decide.len())];
+
+        assert!(decide.contains("body: JSON.stringify({ request_id: id })"));
+        assert!(
+            !decide.contains("session_token") && !decide.contains("rememberSession"),
+            "the approver must not move a session anywhere: {decide}"
+        );
+    }
+
+    #[test]
+    fn the_pairing_code_leaves_the_url_before_anything_can_read_it() {
+        // The fragment is not sent to the server, which is why the QR uses one. What the
+        // fragment *is* exposed to is the address bar, the history, a screenshot and --
+        // on this page specifically -- the view router, which reads the hash to decide
+        // which section to show. All four are closed by taking it out immediately.
+        let script = page_script();
+
+        let take = script
+            .split_once("function takePairingCode()")
+            .map(|(_, rest)| rest)
+            .expect("taking the code out of the URL is a named function");
+        let take = &take[..take.find("\n}\n").unwrap_or(take.len())];
+        assert!(
+            take.contains("history.replaceState"),
+            "removed with replaceState: assigning location.hash adds a history entry, so \
+             Back would put the code straight back: {take}"
+        );
+        assert!(
+            !take.contains("await"),
+            "and removed synchronously, before anything can await and let the router run: \
+             {take}"
+        );
+
+        // Before the router reads the URL. This ordering is the whole reason the call sits
+        // where it does, and nothing else in the file would fail if it moved.
+        let bootstrap = script
+            .find("bootstrapPairing();")
+            .expect("the bootstrap runs at start-up");
+        let router = script
+            .find("showView(viewInUrl());")
+            .expect("the router reads the URL at start-up");
+        assert!(
+            bootstrap < router,
+            "the pairing code must be out of the hash before showView looks a view up by it"
+        );
+    }
+
+    #[test]
+    fn a_pairing_code_travels_in_a_body_and_never_in_a_url() {
+        // The rule the whole flow is arranged around. A query parameter would put the code
+        // in the request line -- and in a browser's history, and in anything that ever logs
+        // one -- which is what the fragment exists to avoid.
+        let script = page_script();
+
+        let bootstrap = script
+            .split_once("async function bootstrapPairing()")
+            .map(|(_, rest)| rest)
+            .expect("the bootstrap is a named function");
+        assert!(
+            bootstrap.contains("body: JSON.stringify({ code })"),
+            "the code goes in the body of the POST"
+        );
+
+        for forbidden in ["?pair=", "?token=", "?session=", "?code=", "?device-token="] {
+            assert!(
+                !PAGE.contains(forbidden),
+                "no credential may appear in a query string, and the page has {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_administrator_session_is_kept_where_it_dies_with_the_tab() {
+        // sessionStorage for the same reason the device token is there, and one more: this
+        // credential is meant to end. localStorage would quietly undo the first of the five
+        // ways it does.
+        let script = page_script();
+        assert!(
+            script.contains("sessionStorage.getItem(SESSION_KEY)")
+                && script.contains("sessionStorage.setItem(SESSION_KEY"),
+            "the session lives in sessionStorage"
+        );
+        assert!(
+            !script.contains("localStorage.getItem(SESSION_KEY)")
+                && !script.contains("localStorage.setItem(SESSION_KEY"),
+            "and never in localStorage, which outlives the tab"
+        );
+        assert!(
+            !script.contains("document.cookie"),
+            "and never in a cookie, which would be attached to requests automatically -- \
+             the thing ADR-0013 chose a bearer token to avoid"
+        );
+    }
+
+    #[test]
+    fn nothing_that_redraws_can_overwrite_a_session_that_was_just_stored() {
+        // This console has already shipped a redraw that closed what somebody had opened
+        // and a rename that broke every meter. A poll that wrote to the session key would
+        // be the same shape of fault with a credential in it -- the browser would appear
+        // to sign itself out at a rate of once every three seconds.
+        //
+        // The property that prevents it is that exactly one place writes the key, and it is
+        // the one that has just been handed a session by the appliance.
+        let script = page_script();
+
+        // One definition and exactly two callers. Both are functions the appliance has just
+        // handed a session to -- spending a pairing code from the machine's own screen, and
+        // collecting one that another browser approved. Anything else writing this key
+        // would be the redraw fault with a credential in it.
+        assert_eq!(
+            script.matches("rememberSession(").count(),
+            3,
+            "one definition and two callers"
+        );
+        for (owner, marker) in [
+            ("the pairing bootstrap", "async function bootstrapPairing()"),
+            ("the browser-approval poll", "async function bpPoll()"),
+        ] {
+            let body = script
+                .split_once(marker)
+                .map_or_else(|| panic!("{owner} is a named function"), |(_, rest)| rest);
+            let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+            assert!(
+                body.contains("rememberSession("),
+                "{owner} stores the session"
+            );
+        }
+    }
+
+    #[test]
+    fn a_click_is_attributed_to_the_button_and_not_to_whatever_is_inside_it() {
+        // Reported from a phone and from Edge as "sometimes it works". A click landing on
+        // the padding of a button has the button as its target; one landing on the label or
+        // the icon inside it has the child as its target. The dispatcher read
+        // `event.target.id`, so `admin-lock` — whose whole visible surface is a `<span>` —
+        // did nothing when you clicked the word, and `nav-toggle` did nothing when you
+        // clicked the icon.
+        //
+        // Nothing in this suite could see it. The page parsed, every id it addressed
+        // existed, no id named two elements, every class was defined. The *text* was right
+        // and the behaviour was wrong, which is the third time this file has produced that
+        // combination.
+        //
+        // So the property is asserted where it lives: the dispatcher resolves a click to
+        // the enclosing button before it looks at an id. Asserting instead that no
+        // dispatched button contains a child element would be a list that goes stale the
+        // next time somebody adds an icon.
+        let script = page_script();
+        let handler = script
+            .split_once("document.addEventListener(\"click\"")
+            .map(|(_, rest)| rest)
+            .expect("the page dispatches clicks in one place");
+        let handler = &handler[..handler.find("\n});").unwrap_or(handler.len())];
+
+        assert!(
+            handler.contains("closest(\"button\")"),
+            "the dispatcher must resolve a click to its button: {handler}"
+        );
+
+        let reads_target_directly = handler
+            .lines()
+            .filter(|line| line.contains("event.target.id"))
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .count();
+        assert!(
+            reads_target_directly <= 1,
+            "only the fallback may read event.target.id, and it is reached when the click \
+             was not on a button at all"
+        );
+
+        // And every button the dispatcher names is one the page can actually produce --
+        // either written in the markup or written by a template. A typo here is a control
+        // that silently does nothing, which is the same symptom by a different route.
+        let mut dispatched = Vec::new();
+        for (index, _) in handler.match_indices("id === \"") {
+            let rest = &handler[index + "id === \"".len()..];
+            if let Some(end) = rest.find('"') {
+                dispatched.push(&rest[..end]);
+            }
+        }
+        assert!(dispatched.len() >= 6, "found {dispatched:?}");
+        for name in dispatched {
+            // Written in the markup, or written by a template, or given an id in script --
+            // the same three ways `every_element_the_script_reaches_for_exists_in_the_markup`
+            // already accepts, because the terminal's take-over button is built that way.
+            let exists = PAGE.contains(&format!("id=\"{name}\""))
+                || script.contains(&format!(".id = \"{name}\""));
+            assert!(
+                exists,
+                "the dispatcher answers to {name:?}, which nothing on the page creates"
+            );
+        }
+    }
+
+    #[test]
+    fn the_theme_is_this_browsers_business_and_has_three_states() {
+        // Three, not two: light, dark, and the default -- no choice made, so the operating
+        // system decides. The third is the one that gets dropped, and dropping it means a
+        // machine set to dark shows a light console until somebody finds the control.
+        let style = page_style();
+        assert!(
+            style.contains("@media (prefers-color-scheme: dark)"),
+            "the system's preference has to be honoured when nobody has chosen"
+        );
+        assert!(
+            style.contains(":root:not([data-theme=\"light\"])"),
+            "and the media query must be guarded, or an explicit light choice loses to a \
+             dark operating system"
+        );
+        assert!(
+            style.contains(":root[data-theme=\"dark\"]"),
+            "and an explicit dark choice must win on a light one, which the media query \
+             cannot express"
+        );
+
+        // Stored in the browser and not on the appliance. Two people on two screens must not
+        // fight over it, and this console must not grow server state for a colour.
+        let script = page_script();
+        assert!(
+            script.contains("localStorage.setItem(THEME_KEY")
+                && script.contains("localStorage.removeItem(THEME_KEY"),
+            "the choice is kept locally, and choosing 'system' removes it rather than \
+             storing a third value that a future default could not change"
+        );
+        for value in ["\"system\"", "\"light\"", "\"dark\""] {
+            assert!(
+                PAGE.contains(&format!("<option value={value}")),
+                "the selector offers {value}"
+            );
+        }
+    }
+
     #[test]
     fn the_cards_that_fold_are_the_ones_a_running_appliance_rarely_opens() {
         // Six cards fold. Five start closed, and the terminal is the exception because it
@@ -1908,22 +4087,54 @@ mod tests {
         // The console is a page people leave open and come back to — a status console
         // that navigates away from itself is one they have to find again. And it is
         // served over TLS, so the link out of it is too.
-        let anchor = PAGE
-            .split_once("Open Plex")
-            .map(|(before, _)| before)
-            .and_then(|before| before.rfind("<a ").map(|at| &before[at..]))
-            .expect("the running-Plex card links to Plex");
-        assert!(
-            anchor.contains("target=\"_blank\""),
-            "Open Plex must open in a new tab: {anchor}"
+        //
+        // There are two of these now: the Overview's Plex card and the Plex view. So the
+        // check is over *every* anchor whose text is "Open Plex" rather than over the first
+        // one, which is the version that would have passed while a second link added later
+        // handed a new tab an opener on this one.
+        //
+        // The scheme moved into `plexUrl` when the second link arrived, because two copies
+        // of an absolute URL is exactly how two links come to disagree about it — and the
+        // page's other rule is that it may hold only one absolute URL at all. So the TLS
+        // half is asserted of the helper, and the anchors are asserted to use it.
+        let anchors: Vec<&str> = PAGE
+            .match_indices("Open Plex</a>")
+            .filter_map(|(at, _)| {
+                PAGE[..at]
+                    .rfind("<a ")
+                    .map(|start| &PAGE[start..at + "Open Plex</a>".len()])
+            })
+            .collect();
+        assert_eq!(
+            anchors.len(),
+            2,
+            "the Overview card and the Plex view each link to Plex"
         );
+
+        for anchor in &anchors {
+            assert!(
+                anchor.contains("target=\"_blank\""),
+                "Open Plex must open in a new tab: {anchor}"
+            );
+            assert!(
+                anchor.contains("rel=\"noopener"),
+                "and must not hand the new tab a handle on this one: {anchor}"
+            );
+            assert!(
+                anchor.contains("href=\"${plexUrl("),
+                "and must build its address through the one function that decides the \
+                 scheme, rather than spelling it again: {anchor}"
+            );
+        }
+
+        let helper = PAGE
+            .split_once("function plexUrl(")
+            .map(|(_, rest)| rest)
+            .expect("plexUrl is a named function so that this can be checked");
+        let body = &helper[..helper.find("\n}").unwrap_or(helper.len())];
         assert!(
-            anchor.contains("rel=\"noopener"),
-            "and must not hand the new tab a handle on this one: {anchor}"
-        );
-        assert!(
-            anchor.contains("href=\"https://"),
-            "and must not drop out of TLS on the way: {anchor}"
+            body.contains("https://"),
+            "and that function must not drop out of TLS on the way: {body}"
         );
     }
 
@@ -2023,6 +4234,115 @@ mod tests {
         assert_eq!(
             rendered, expected,
             "the terminal does not render what the shell printed"
+        );
+    }
+
+    #[test]
+    fn the_sparkline_spans_the_tile_whatever_it_has_to_draw() {
+        // Same shape as the terminal cleaner above, and for the same reason: the page was
+        // fine and the *drawing* was wrong. `metricSpark` shipped three times before it was
+        // right, and the first two were only found by rendering a picture and looking at it.
+        //
+        //   1. x scaled by the ring's capacity, so four samples drew a line five per cent of
+        //      the tile wide, tucked in the left corner.
+        //   2. "fixed" by anchoring at the right, which moved the same stub to the other
+        //      corner.
+        //   3. spread over the points there are, which is what this asserts.
+        //
+        // No assertion about the page's text could see any of it, and neither could
+        // `node --check`: every version was valid JavaScript that produced valid SVG.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+
+        let start = script
+            .find("const SPARK_POINTS")
+            .expect("the ring size is declared before the functions that use it");
+        let end = script
+            .find("function metricTile(")
+            .expect("and the drawing functions end where the tile begins");
+        let slice = &script[start..end];
+
+        let Some(engine) = ["node", "deno", "qjs"].into_iter().find(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        }) else {
+            println!(
+                "skip: the sparkline was not drawn -- no node, deno or qjs on this host. \
+                 Install one, or a sparkline that draws a stub in the corner will only be \
+                 found by looking at a rendered page."
+            );
+            return;
+        };
+
+        let driver = format!(
+            "{slice}\n\
+             const out = {{}};\n\
+             for (const n of [1, 2, 3, 8, 200]) {{\n\
+             \x20 const ring = [];\n\
+             \x20 for (let i = 0; i < n; i++) pushSample(ring, 10 + (i % 7) * 12);\n\
+             \x20 out[n] = {{ svg: metricSpark(ring, 100), kept: ring.length }};\n\
+             }}\n\
+             process.stdout.write(JSON.stringify(out));\n"
+        );
+
+        // Named for this test, because Rust runs tests as threads in one process and a fixed
+        // path is one test deleting what another is reading.
+        let file = std::env::temp_dir().join("plexos-sparkline-draw-test.js");
+        std::fs::write(&file, driver).expect("scratch is writable");
+        let run = std::process::Command::new(engine)
+            .arg(&file)
+            .output()
+            .expect("the engine runs");
+        let _ = std::fs::remove_file(&file);
+        assert!(
+            run.status.success(),
+            "the sparkline did not draw:\n{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+
+        let drawn: serde_json::Value =
+            serde_json::from_slice(&run.stdout).expect("the driver prints JSON");
+
+        for few in ["1", "2"] {
+            assert_eq!(
+                drawn[few]["svg"].as_str(),
+                Some(""),
+                "a line needs three points to be a line rather than a dash that reads as a \
+                 rendering fault"
+            );
+        }
+
+        for many in ["3", "8", "200"] {
+            let svg = drawn[many]["svg"].as_str().expect("an SVG");
+            assert!(
+                svg.contains("points=\"0.00,"),
+                "{many} points must start at the left edge: {svg}"
+            );
+            assert!(
+                svg.contains(" 100.00,"),
+                "and reach the right one, so the trend fills the tile instead of drawing a \
+                 stub in a corner: {svg}"
+            );
+            assert!(
+                svg.contains("class=\"now\""),
+                "the newest segment is marked, and by a stroke rather than a shape: a circle \
+                 here is squashed by the non-uniform scale and clipped at the edge: {svg}"
+            );
+            assert!(
+                !svg.contains("<circle"),
+                "and specifically not by a circle, which was tried and looked at: {svg}"
+            );
+        }
+
+        assert_eq!(
+            drawn["200"]["kept"].as_u64(),
+            Some(60),
+            "the ring is bounded, or a tab left open all day grows one point per two seconds"
         );
     }
 
@@ -2221,7 +4541,7 @@ mod tests {
 
     #[test]
     fn the_page_says_what_installing_destroys_before_it_offers_to_do_it() {
-        // The only control on this page that erases data which was never PlexOS's. The
+        // The only control on this page that erases data which was never MediaLith's. The
         // warning is part of the markup rather than something a render function might skip
         // in some state, and the confirmation is a text field because a checkbox is a
         // thing people tick.
@@ -2298,14 +4618,818 @@ mod tests {
             let response = respond(
                 &request,
                 &Fixture::new(),
-                &job,
-                &std::sync::Arc::new(crate::plex::Handle::new()),
-                &std::sync::Arc::new(crate::update::Job::new()),
-                &std::sync::Arc::new(crate::install::Job::new()),
-                &std::sync::Arc::new(crate::wifi::Job::new()),
+                &Services {
+                    provision: std::sync::Arc::clone(&job),
+                    ..Services::new()
+                },
             );
             assert_ne!(response.status, 404, "{method} {path}");
         }
+    }
+
+    #[test]
+    fn the_activity_card_polls_a_route_that_exists() {
+        assert!(
+            PAGE.contains("\"/api/metrics\""),
+            "the page must fetch the route respond() serves"
+        );
+
+        let response = respond_test(&get("/api/metrics"), &Fixture::new());
+        assert_eq!(response.status, 200);
+        let body = String::from_utf8(response.body).expect("utf-8");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+
+        // The fields the page reads by name. A rename here is a card full of "—" on a
+        // machine whose route answers perfectly, which is the failure mode that has cost
+        // this project the most time to spot.
+        for field in [
+            "cpu",
+            "memory",
+            "plex",
+            "storage",
+            "network",
+            "disks",
+            "temperatures",
+            "notes",
+            "window_ms",
+            "uptime_seconds",
+            "load",
+        ] {
+            assert!(
+                parsed.get(field).is_some(),
+                "the page reads `{field}` off this reply: {body}"
+            );
+        }
+        assert!(
+            parsed["cpu"].get("busy_percent").is_some(),
+            "including the nested ones"
+        );
+    }
+
+    #[test]
+    fn an_idle_graphics_clock_is_only_called_idle_when_the_gpu_is_well() {
+        // `0 MHz` is the normal state of this appliance -- a part with nothing to do parks
+        // its clock -- and printed plainly it reads as a broken GPU. Saying "Idle" instead
+        // fixes that and introduces a way to hide the one failure this whole project exists
+        // to make loud, because `0 MHz` on a machine whose transcoding stack is degraded or
+        // unavailable is exactly the reading somebody should be staring at.
+        //
+        // So the condition is the feature, and it is checked by running it rather than by
+        // reading it: the interesting cases are the ones where the answer must be *no*.
+        let script = page_script();
+        let start = script
+            .find("function gpuIsIdle(")
+            .expect("the rule is a named function so that it can be run");
+        let end = script[start..]
+            .find("\n}\n")
+            .map(|at| start + at + "\n}".len())
+            .expect("and ends at a brace in the first column");
+
+        let Some(engine) = ["node", "deno", "qjs"].into_iter().find(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        }) else {
+            println!(
+                "skip: the idle rule was not run -- no node, deno or qjs on this host. \
+                 Install one, or a GPU that has failed will only be found by somebody \
+                 noticing that a broken machine says it is idle."
+            );
+            return;
+        };
+
+        // health, clock, and whether "Idle" may be shown.
+        let cases: [(&str, &str, bool); 7] = [
+            ("\"ready\"", "0", true),
+            ("\"degraded\"", "0", false),
+            ("\"unavailable\"", "0", false),
+            ("undefined", "0", false),
+            ("\"unknown\"", "0", false),
+            ("\"ready\"", "450", false),
+            ("\"ready\"", "null", false),
+        ];
+        let calls = cases
+            .iter()
+            .map(|(health, clock, _)| format!("gpuIsIdle({health}, {clock})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let program = format!(
+            "{}\nconsole.log([{calls}].join(\",\"));",
+            &script[start..end]
+        );
+
+        let output = std::process::Command::new(engine)
+            .args(["-e", &program])
+            .output()
+            .expect("the engine runs");
+        assert!(
+            output.status.success(),
+            "the idle rule did not run: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let got = String::from_utf8_lossy(&output.stdout);
+        let answers: Vec<&str> = got.trim().split(',').collect();
+        assert_eq!(answers.len(), cases.len(), "one answer per case: {got}");
+        for ((health, clock, want), got) in cases.iter().zip(answers) {
+            assert_eq!(
+                got,
+                if *want { "true" } else { "false" },
+                "gpuIsIdle({health}, {clock}) must be {want}: a degraded or unavailable \
+                 stack reporting zero is the reading that matters, and calling it idle \
+                 hides it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_overview_puts_activity_beside_a_rail_that_has_room_to_grow() {
+        // The rail is where Now Playing and Recent Events go when there is something real to
+        // put in them, and it is sized for that now so their arrival is a card rather than a
+        // re-layout. This asserts the arrangement exists, because the alternative -- three
+        // sections stacked down one column -- is what it replaced and is one deleted
+        // wrapper away.
+        assert!(
+            PAGE.contains("class=\"ovgrid\" id=\"ovgrid\""),
+            "the Overview's composition below the summary row is one grid"
+        );
+        for id in ["metrics", "main", "snapshot"] {
+            assert!(
+                PAGE.contains(&format!("id=\"{id}\"")),
+                "{id} is one of the three regions that grid places"
+            );
+        }
+
+        let style = page_style();
+        assert!(
+            style.contains(".ovgrid {"),
+            "and the grid is laid out in the stylesheet rather than inline"
+        );
+        // The failure case: a list of findings and their remedies in a one-third column is a
+        // column of hyphens, so the health panel leaves the rail when it has something to
+        // say. Driven by a class the render sets from the data it just drew.
+        assert!(
+            style.contains(".ovgrid.alert > #main"),
+            "a health panel with findings in it must be able to take the full width"
+        );
+        assert!(
+            page_script().contains("classList.toggle(\"alert\""),
+            "and that state comes from the same data the panel was built from"
+        );
+    }
+
+    #[test]
+    fn every_severity_a_meter_can_reach_is_one_the_stylesheet_paints() {
+        // A meter's whole job is that 96% does not look like 6%, and for the entire life of
+        // the activity card it did. `metricLevel` returned `warn-metricLevel` and
+        // `bad-metricLevel` while the stylesheet defined `.meter.warn-level` and
+        // `.meter.bad-level`, so no meter ever left the accent colour: a /var about to fill
+        // drew exactly like an empty one. The rename that produced it was applied to the file
+        // rather than to the identifier and rewrote the two string literals along with the
+        // function name -- trap one in CLAUDE.md, in the form where the result still parses,
+        // still renders, and is wrong only in a colour nobody had a reference for.
+        //
+        // Nothing that reads the page as text could catch it: both halves were internally
+        // consistent. So the class names are taken from the function *by running it*, and
+        // each one is looked up in the stylesheet.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+        let style = PAGE
+            .split_once("<style>")
+            .and_then(|(_, rest)| rest.split_once("</style>"))
+            .map(|(body, _)| body)
+            .expect("the page has one style block");
+
+        let start = script
+            .find("function metricLevel(")
+            .expect("the severity of a reading is decided by a named function");
+        let end = script[start..]
+            .find("\n}\n")
+            .map(|at| start + at + "\n}".len())
+            .expect("and ends at a brace in the first column");
+
+        let Some(engine) = ["node", "deno", "qjs"].into_iter().find(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        }) else {
+            println!(
+                "skip: the meter's severity classes were not compared against the stylesheet \
+                 -- no node, deno or qjs on this host. Install one, or a meter that never \
+                 leaves the accent colour will only be found by somebody noticing that a full \
+                 disk looks like an empty one."
+            );
+            return;
+        };
+
+        // Below the warning, between the two, and above the failure threshold: the three
+        // answers this function has, asked for with the defaults the meters use.
+        let program = format!(
+            "{}\nconsole.log([10, 80, 97].map(p => metricLevel(p, 70, 90)).join(\"\\n\"));",
+            &script[start..end]
+        );
+        let output = std::process::Command::new(engine)
+            .args(["-e", &program])
+            .output()
+            .expect("the engine runs");
+        assert!(
+            output.status.success(),
+            "the page's severity function did not run: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let got = String::from_utf8_lossy(&output.stdout);
+        let classes: Vec<&str> = got.lines().map(str::trim).collect();
+        assert_eq!(
+            classes.len(),
+            3,
+            "three readings, three answers: {classes:?}"
+        );
+        assert_eq!(classes[0], "", "an unremarkable reading earns no class");
+        for class in &classes[1..] {
+            assert!(
+                !class.is_empty(),
+                "a reading over a threshold must earn a class: {classes:?}"
+            );
+            assert!(
+                style.contains(&format!(".meter.{class} ")),
+                "the script puts `{class}` on a meter and the stylesheet paints no such \
+                 thing, so that meter draws in the accent however bad the reading is. The \
+                 stylesheet is the definition; the script is what changes."
+            );
+        }
+    }
+
+    #[test]
+    fn the_process_list_cannot_be_read_without_a_credential() {
+        // The whole reason this is a second route. A GET on this console needs nothing, by
+        // design -- somebody diagnosing a machine that will not boot should not have to find
+        // a token first. A list of what is running with its command lines is not that: it is
+        // closer to what the terminal exposes, and the terminal is all POST for exactly this
+        // reason. The gate in http::route is method-based, so being a POST *is* the
+        // protection, and a GET arriving here must find nothing.
+        assert_eq!(
+            respond_test(&get("/api/metrics/processes"), &Fixture::new()).status,
+            404,
+            "a GET must not answer with the process list, or the token gate is bypassed by \
+             asking politely"
+        );
+
+        let post = Request {
+            method: "POST".to_owned(),
+            path: "/api/metrics/processes".to_owned(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        assert_eq!(
+            respond_test(&post, &Fixture::new()).status,
+            200,
+            "and the POST is the route that does exist"
+        );
+    }
+
+    #[test]
+    fn the_page_asks_for_the_process_list_with_the_token() {
+        // The companion to the test above, from the page's side: a POST route reached
+        // without the header is a 403 and a section that silently does nothing.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("one script block");
+        let request = script
+            .split_once("PROCESSES_ENDPOINT, {")
+            .map(|(_, rest)| rest)
+            .expect("the page posts to the processes route");
+        let call = &request[..request.find("})").unwrap_or(request.len())];
+
+        assert!(call.contains("method: \"POST\""), "as a POST: {call}");
+        assert!(
+            call.contains("Authorization"),
+            "and carrying the device token: {call}"
+        );
+    }
+
+    #[test]
+    fn the_page_calls_the_product_by_its_name() {
+        // The rename is only done when the artefact says so. This asserts the three places
+        // a person actually reads it — the tab, the header, and the terminal window — and
+        // then that the old name appears nowhere in the page at all.
+        assert!(PAGE.contains("<title>MediaLith</title>"), "the browser tab");
+        assert!(
+            PAGE.contains(r#"<h1 id="product">MediaLith</h1>"#),
+            "the header"
+        );
+        assert!(
+            PAGE.contains(r#"document.title = "MediaLith Terminal""#),
+            "the terminal window"
+        );
+
+        // Deliberately the whole file, comments included: a comment that still describes
+        // this as PlexOS is telling the next reader something untrue about the product.
+        // Internal *identifiers* are lower-case `plexos` and are not what this looks for.
+        assert!(
+            !PAGE.contains("PlexOS"),
+            "the page still calls the product PlexOS somewhere"
+        );
+    }
+
+    #[test]
+    fn the_page_says_what_it_is_told_rather_than_assuming_the_product_name() {
+        // The header shows `PRETTY_NAME` from the machine's own os-release, and falls back
+        // to the product name only when there is none. That matters more after a rename
+        // than before it: an appliance running an older release must be described by the
+        // name *it* reports, not by the name this page was built with, or the console would
+        // tell somebody they are running MediaLith while the machine is not.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("one script block");
+        assert!(
+            script.contains("p.name || \"MediaLith\""),
+            "the fallback is only reached when os-release said nothing"
+        );
+    }
+
+    #[test]
+    fn what_somebody_is_watching_cannot_be_read_without_a_credential() {
+        // The same argument as the process list, and the stronger case of the two. The open
+        // `GET` exists so a *broken* machine can be diagnosed; a film title, a username and a
+        // device name are not diagnostics, and a `GET` here would leave a household's viewing
+        // readable by anything on the LAN for as long as the appliance runs.
+        //
+        // Being a POST *is* the protection, because the gate in `http::route` is method-based
+        // — so a GET arriving here has to find nothing at all.
+        assert_eq!(
+            respond_test(&get("/api/plex/sessions"), &Fixture::new()).status,
+            404,
+            "a GET must not answer with what is playing, or the gate is bypassed by asking \
+             politely"
+        );
+
+        let post = Request {
+            method: "POST".to_owned(),
+            path: "/api/plex/sessions".to_owned(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let answered = respond_test(&post, &Fixture::new());
+        assert_eq!(
+            answered.status, 200,
+            "and the POST is the route that exists"
+        );
+
+        // On a build host with no Plex, the answer is a state with a remedy rather than an
+        // error — the whole point of the failure model. Whatever it says, it says nothing
+        // about anybody: there are no sessions to describe.
+        let body = String::from_utf8_lossy(&answered.body);
+        assert!(
+            body.contains("\"available\":false") || body.contains("\"sessions\":[]"),
+            "an appliance with no Plex has nothing to report: {body}"
+        );
+        assert!(body.contains("Remedy:"), "and it names one: {body}");
+    }
+
+    #[test]
+    fn the_page_never_asks_what_is_playing_without_the_token() {
+        // From the page's side, and this is the half that matters for privacy: the rule is
+        // not "fetch it and hide it", it is "do not ask". A page that downloaded the titles
+        // and then declined to draw them would have put them in a browser that was never
+        // entitled to them.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("one script block");
+
+        let request = script
+            .split_once("PLEX_SESSIONS_ENDPOINT, {")
+            .map(|(_, rest)| rest)
+            .expect("the page posts to the sessions route");
+        let call = &request[..request.find("})").unwrap_or(request.len())];
+        assert!(call.contains("method: \"POST\""), "as a POST: {call}");
+        assert!(
+            call.contains("Authorization"),
+            "and carrying the device token: {call}"
+        );
+
+        // And the guard in front of it: the poll returns before the fetch when the tab holds
+        // no token. Asserted on the shape rather than the wording, because this is the one
+        // control on the page whose absence is invisible -- everything would still work, and
+        // an unauthenticated browser would be told what somebody is watching.
+        let poll = script
+            .split_once("async function plexActivityTick()")
+            .map(|(_, rest)| rest)
+            .expect("the activity poll exists");
+        let head = &poll[..poll.find("PLEX_SESSIONS_ENDPOINT").unwrap_or(poll.len())];
+        assert!(
+            head.contains("const value = credential();") && head.contains("if (!value)"),
+            "the poll must decide on the credential before it reaches the fetch: {head}"
+        );
+    }
+
+    #[test]
+    fn the_progress_clock_advances_only_while_plex_says_it_is_playing() {
+        // The one place this console deliberately shows something the appliance did not say
+        // in so many words: between polls, the bar and the clock move on a local timer, or
+        // the numbers sit still for three seconds and then jump three, which reads as a page
+        // that has come unstuck from the machine.
+        //
+        // What makes that honest is entirely in this function, so it is a function and this
+        // runs it — the lesson from `termClean`, which was wrong for the whole life of the
+        // feature because the page's *text* was fine and its behaviour was not.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+
+        let start = script
+            .find("function npAdvance(")
+            .expect("the page advances the clock somewhere");
+        let end = script[start..]
+            .find("function npTick(")
+            .expect("and npTick is what uses it")
+            + start;
+        let slice = &script[start..end];
+
+        let Some(engine) = ["node", "deno", "qjs"].into_iter().find(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        }) else {
+            println!(
+                "skip: the progress clock was not run -- no node, deno or qjs on this host. \
+                 Install one, or a clock that counts through a pause will only be found by \
+                 watching a paused film advance on the page."
+            );
+            return;
+        };
+
+        // Ten minutes in, of a two-hour film, five seconds after the appliance answered.
+        let driver = format!(
+            "{slice}\n\
+             const film = {{ position_ms: 600000, duration_ms: 7200000 }};\n\
+             const out = {{\n\
+             \x20 playing: npAdvance({{ ...film, state: 'playing' }}, 5000),\n\
+             \x20 paused: npAdvance({{ ...film, state: 'paused' }}, 5000),\n\
+             \x20 buffering: npAdvance({{ ...film, state: 'buffering' }}, 5000),\n\
+             \x20 unstated: npAdvance(film, 5000),\n\
+             \x20 past_the_end: npAdvance({{ position_ms: 7199000, duration_ms: 7200000, \
+             state: 'playing' }}, 60000),\n\
+             \x20 no_duration: npAdvance({{ position_ms: 600000, state: 'playing' }}, 5000),\n\
+             \x20 backwards: npAdvance({{ ...film, state: 'playing' }}, -9000),\n\
+             }};\n\
+             console.log(JSON.stringify(out));"
+        );
+
+        let output = std::process::Command::new(engine)
+            .arg("-e")
+            .arg(&driver)
+            .output()
+            .expect("the engine runs");
+        assert!(
+            output.status.success(),
+            "{engine} refused the page's own function: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let answer: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("the driver prints JSON");
+
+        assert_eq!(
+            answer["playing"], 605_000,
+            "five seconds of wall clock is five seconds of film"
+        );
+        for still in ["paused", "buffering", "unstated"] {
+            assert_eq!(
+                answer[still], 600_000,
+                "{still}: a film that is not playing does not advance, and inventing progress \
+                 for one is the whole thing this must never do"
+            );
+        }
+        assert_eq!(
+            answer["past_the_end"], 7_200_000,
+            "a bar wider than its track breaks the card, and Plex does report a position past \
+             the end as an item finishes"
+        );
+        assert_eq!(
+            answer["no_duration"], 0,
+            "with nothing to be a fraction of, there is no position to draw"
+        );
+        assert_eq!(
+            answer["backwards"], 600_000,
+            "a clock that went backwards would be a machine whose clock had, and this one is \
+             the browser's"
+        );
+    }
+
+    #[test]
+    fn every_field_the_page_reads_off_a_session_is_one_the_server_sends() {
+        // The fourth question about this page, asked about a fifth pair of files. Three tests
+        // already check that the script parses, that every id it addresses exists and that
+        // every class it draws with is defined — and all three would pass while the page read
+        // `session.player_title` from a server that sends `player`. The symptom is a card
+        // that renders perfectly with one line quietly missing from it.
+        //
+        // So: build the document the route actually serialises, and look up every field the
+        // page reaches for. `session`, `video` and `audio` are names this page uses nowhere
+        // else, which is what makes the extraction exact rather than a guess.
+        let sample = crate::plexactivity::Report {
+            available: true,
+            state: crate::plexactivity::State::Playing,
+            detail: crate::plexactivity::State::Playing.detail().to_owned(),
+            active: 1,
+            sessions: vec![crate::plexactivity::Session {
+                id: Some("1".to_owned()),
+                rating_key: Some("118".to_owned()),
+                kind: Some("movie".to_owned()),
+                title: Some("Test Feature".to_owned()),
+                series: Some("Test Series".to_owned()),
+                episode: Some("S02E05".to_owned()),
+                user: Some("Sebastian".to_owned()),
+                player: Some("Living Room TV".to_owned()),
+                platform: Some("tvOS".to_owned()),
+                product: Some("Plex for Apple TV".to_owned()),
+                state: Some("playing".to_owned()),
+                local: Some(true),
+                position_ms: Some(5_538_000),
+                duration_ms: Some(10_143_000),
+                decision: crate::plexactivity::Decision::Transcode,
+                source_bitrate_kbps: Some(24_399),
+                stream_bitrate_kbps: Some(2798),
+                transcode: Some(crate::plexactivity::Transcode {
+                    progress: Some(1.3),
+                    speed: Some(0.0),
+                    throttled: Some(true),
+                    error: Some(false),
+                }),
+                video: crate::plexactivity::Video {
+                    decision: crate::plexactivity::Decision::Transcode,
+                    source_codec: Some("hevc".to_owned()),
+                    source_resolution: Some("4K".to_owned()),
+                    source_hdr: Some("HDR10".to_owned()),
+                    target_codec: Some("h264".to_owned()),
+                    target_resolution: Some("1080p".to_owned()),
+                    hardware: Some(true),
+                    hardware_detail: Some("Intel (VA API)".to_owned()),
+                    full_pipeline: Some(true),
+                },
+                audio: crate::plexactivity::Audio {
+                    decision: crate::plexactivity::Decision::Transcode,
+                    source_codec: Some("truehd".to_owned()),
+                    source_channels: Some(8),
+                    target_codec: Some("aac".to_owned()),
+                    target_channels: Some(2),
+                },
+            }],
+        };
+
+        let document: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&sample).expect("serialises"))
+                .expect("is JSON");
+        let session = &document["sessions"][0];
+
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("one script block");
+
+        let mut checked = 0;
+        for (holder, node) in [
+            ("session", session),
+            ("video", &session["video"]),
+            ("audio", &session["audio"]),
+        ] {
+            let prefix = format!("{holder}.");
+            for occurrence in script.match_indices(&prefix) {
+                let rest = &script[occurrence.0 + prefix.len()..];
+                let field: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || *c == '_')
+                    .collect();
+                // `session.` followed by nothing lowercase is a sentence in a comment, not a
+                // field access.
+                if field.is_empty() {
+                    continue;
+                }
+                assert!(
+                    node.get(&field).is_some(),
+                    "the page reads {holder}.{field}, which the server does not send. \
+                     What it does send: {node}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 20,
+            "only {checked} field accesses found — the extraction has stopped working, which \
+             would make this test pass by looking at nothing"
+        );
+    }
+
+    #[test]
+    fn nothing_a_person_opened_lives_inside_the_region_on_a_timer() {
+        // Reported from the machine: expanding the process list or the notes worked for up to
+        // two seconds and then shut itself. Both were rendered *into* `#metrics-body`, which
+        // the poll replaces wholesale twice a second — so the element holding the open state
+        // was destroyed and rebuilt closed. It reads as a control that refuses to stay open.
+        //
+        // The fix is structural rather than a saved-and-restored flag: the two stateful parts
+        // are written once, in the markup, as siblings of the redrawn region. This asserts
+        // that arrangement, because putting either one back inside is a one-line mistake that
+        // no other test here can see.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+
+        for id in [
+            "procs-panel",
+            "procs",
+            "metrics-notes",
+            "metrics-notes-list",
+            // Added by the redesign, and the third thing to need this arrangement. The
+            // per-core meters, the interface counters, the disk rates and the thermal zones
+            // moved off the front of the card into a `<details>` -- so the card leads with
+            // the five figures somebody opens it for instead of eleven at one weight. That
+            // disclosure has exactly the state the two above have, and putting it inside the
+            // redrawn region would have reproduced their defect a third time.
+            "metrics-detail",
+            "metrics-detail-body",
+        ] {
+            assert!(
+                PAGE.contains(&format!("id=\"{id}\"")),
+                "{id} must exist in the markup rather than be generated by the poll"
+            );
+        }
+
+        // What the poll writes, from the assignment to the end of that template literal.
+        let written = script
+            .split_once("document.getElementById(\"metrics-body\").innerHTML = `")
+            .map(|(_, rest)| rest)
+            .expect("the poll redraws the body");
+        let written = &written[..written.find("`;").unwrap_or(written.len())];
+
+        for forbidden in [
+            "id=\"procs",
+            "<details",
+            "metrics-notes",
+            "metrics-detail",
+            // The tables themselves. They are the *contents* of the disclosure now, written
+            // into it only when they have changed -- so their appearance inside the poll's
+            // own template would mean the move had been undone.
+            "<table",
+        ] {
+            assert!(
+                !written.contains(forbidden),
+                "the redrawn region must not contain {forbidden}: anything with state a \
+                 person set is destroyed twice a second there"
+            );
+        }
+    }
+
+    #[test]
+    fn every_view_that_can_be_opened_can_be_shut_again() {
+        // Asked for as a rule rather than as a bug: "every section that can be expanded must
+        // also be able to go back to collapsed". Two on this page could not.
+        //
+        // The process list, once fetched, had no control that put it away — and it is long.
+        // The network diagnosis was worse: its output sat under the network card for the rest
+        // of the session, and because that card is rebuilt from its template every ten
+        // seconds, the state had to move into a variable rather than the element.
+        //
+        // The folding cards and the notes `<details>` already satisfy this, which is why they
+        // are not listed here; what this guards is the two that were added without it.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+
+        assert!(
+            PAGE.contains("Show Processes") && PAGE.contains("Hide Processes"),
+            "the process list's control has to say both things, or it only ever opens"
+        );
+        assert!(
+            script.contains("function showProcesses("),
+            "and hiding is a function rather than a relabel, so both directions exist"
+        );
+
+        assert!(
+            PAGE.contains("id=\"netdiag-hide\""),
+            "the network diagnosis needs a way back to a page without it"
+        );
+        assert!(
+            script.contains("netdiagShown"),
+            "and it must be a variable, because that card is rebuilt every status poll and an \
+             element's own state does not survive being replaced"
+        );
+    }
+
+    #[test]
+    fn the_header_carries_what_is_wanted_without_scrolling() {
+        // The page is several screens long — the activity card, the terminal and the installer
+        // each take one — so the header is sticky and holds the three things worth having to
+        // hand: what this machine is, how long it has been up, and how to stop it. The power
+        // controls moved out of a card at the very bottom, which on a long page meant
+        // scrolling past everything to restart a machine.
+        let head = PAGE
+            .split_once("<header>")
+            .and_then(|(_, rest)| rest.split_once("</header>"))
+            .map(|(body, _)| body)
+            .expect("the page has one header");
+
+        for id in ["product", "version", "uptime", "restart", "shutdown"] {
+            assert!(
+                head.contains(&format!("id=\"{id}\"")),
+                "{id} belongs in the header: {head}"
+            );
+        }
+
+        let style = PAGE
+            .split_once("<style>")
+            .and_then(|(_, rest)| rest.split_once("</style>"))
+            .map(|(body, _)| body)
+            .expect("the page has one style block");
+        assert!(
+            style.contains("position: sticky"),
+            "and the header sticks, or none of the above is reachable from further down"
+        );
+
+        // The two controls that end the session they are pressed in are marked as such, since
+        // they now sit a centimetre from the pointer at all times.
+        assert!(
+            head.matches("danger").count() >= 2,
+            "both power controls are marked dangerous: {head}"
+        );
+        assert!(
+            !PAGE.contains("class=\"card power\""),
+            "and the card they came from is gone rather than left empty"
+        );
+    }
+
+    #[test]
+    fn buttons_are_styled_without_naming_where_they_are() {
+        // This has been narrowed by the same mistake twice. First the base rules were
+        // `.plex button`, `.form button` and `.power button`, so the network card — a plain
+        // `<div class="card">` — matched none of them and its button had *no* styling: a raw
+        // operating-system control in a designed page, which shipped and was reported by
+        // somebody looking at it. That was fixed to `.card button`, which then missed the next
+        // button added outside a card, in the header.
+        //
+        // So the assertion is not about which container is named. It is that **none is**: a
+        // rule about how a button looks should not know where buttons are.
+        let style = PAGE
+            .split_once("<style>")
+            .and_then(|(_, rest)| rest.split_once("</style>"))
+            .map(|(body, _)| body)
+            .expect("the page has one style block");
+
+        assert!(
+            style.contains("\n  button {"),
+            "the button base must be on the element, so a button added anywhere is styled"
+        );
+        for scoped in [
+            ".plex button {",
+            ".form button {",
+            ".power button {",
+            ".card button {",
+        ] {
+            assert!(
+                !style.contains(scoped),
+                "{scoped} scopes the base rule to a container, and every time that has been \
+                 done a button outside it has shipped unstyled"
+            );
+        }
+    }
+
+    #[test]
+    fn the_activity_card_does_not_poll_while_it_is_shut() {
+        // A card nobody is looking at is a request nobody needs, twice a second, on a
+        // machine whose job is to transcode video.
+        let script = PAGE
+            .split_once("async function metricsTick()")
+            .map(|(_, rest)| rest)
+            .expect("the activity card has a poll");
+        let body = &script[..script.find("\n}").unwrap_or(script.len())];
+
+        assert!(
+            body.contains("folded.has(\"metrics\")"),
+            "it checks whether the card is shut: {body}"
+        );
+        assert!(
+            body.contains("document.hidden"),
+            "and whether the tab is in the background: {body}"
+        );
     }
 
     #[test]
@@ -2324,9 +5448,20 @@ mod tests {
         // check for itself: whether Plex answers TLS on 32400, and under a certificate a
         // browser accepts for a bare address, is a question about Plex. If it turns out
         // not to, the remedy is the scheme in this one anchor.
+        // One exception, and it is not a loophole: an XML namespace. `xmlns='http://www.
+        // w3.org/2000/svg'` is an identifier and never a request -- no browser has ever
+        // dereferenced it -- and it is required for an inline SVG in a `data:` URI to parse
+        // at all, which is how this page draws the chevron on a `<select>` without an
+        // external asset. What this test exists to catch is a resource the page would go and
+        // *fetch*; a namespace is the opposite of one, and skipping it by the attribute that
+        // introduces it keeps a CDN or a font failing exactly as before.
         let mut absolute = Vec::new();
         for scheme in ["http://", "https://"] {
             for (index, _) in PAGE.match_indices(scheme) {
+                let before = &PAGE[..index];
+                if before.ends_with("xmlns='") || before.ends_with("xmlns=\"") {
+                    continue;
+                }
                 absolute.push(&PAGE[index + scheme.len()..]);
             }
         }
@@ -2402,7 +5537,7 @@ mod tests {
         let path = std::env::temp_dir().join(name);
         let _ = std::fs::remove_file(&path);
         let mut lines = Vec::new();
-        let credential = claim(&path, &mut |line| lines.push(line.to_owned()));
+        let (credential, _shown) = claim(&path, &mut |line| lines.push(line.to_owned()));
         (credential, lines, path)
     }
 
@@ -2452,11 +5587,10 @@ mod tests {
         let response = respond(
             &request,
             &Fixture::new(),
-            &job,
-            &std::sync::Arc::new(crate::plex::Handle::new()),
-            &std::sync::Arc::new(crate::update::Job::new()),
-            &std::sync::Arc::new(crate::install::Job::new()),
-            &std::sync::Arc::new(crate::wifi::Job::new()),
+            &Services {
+                provision: std::sync::Arc::clone(&job),
+                ..Services::new()
+            },
         );
         assert_eq!(response.status, 409);
         assert!(
@@ -2515,7 +5649,7 @@ mod tests {
         // down, and would do it silently at the next power cut.
         let (first, _, path) = claim_into("plexos-claim-twice");
         let mut lines = Vec::new();
-        let second = claim(&path, &mut |line| lines.push(line.to_owned()));
+        let (second, _shown) = claim(&path, &mut |line| lines.push(line.to_owned()));
 
         assert_eq!(first, second, "the same credential");
         assert_eq!(
@@ -2533,7 +5667,7 @@ mod tests {
         // harder to diagnose than one that plainly cannot be claimed.
         let unwritable = std::path::Path::new("/proc/plexos-claim-cannot-exist/token");
         let mut lines = Vec::new();
-        let credential = claim(unwritable, &mut |line| lines.push(line.to_owned()));
+        let (credential, _shown) = claim(unwritable, &mut |line| lines.push(line.to_owned()));
 
         assert_eq!(credential, crate::auth::Credential::Unset);
         let logged = lines.join("\n");

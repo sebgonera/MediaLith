@@ -1,6 +1,6 @@
 //! Deciding what to do about the persistent state layout (ADR-0009).
 //!
-//! `/var` is the only thing on a PlexOS device that cannot be recreated, and it is the
+//! `/var` is the only thing on a MediaLith device that cannot be recreated, and it is the
 //! one part of the system that **rollback does not revert**. The OS returns to the
 //! previous `/usr` and kernel; the Plex library, the config, and the update state all
 //! stay as the newer release left them.

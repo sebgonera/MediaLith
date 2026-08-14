@@ -8,7 +8,7 @@
 //!
 //! **Unknown keys are rejected.** On an appliance, a typo that is silently ignored
 //! produces a system that boots, reports itself healthy, and does not do what the user
-//! asked — the worst available failure. `transcod_dir` must be a startup error.
+//! asked — the worst available failure. `hostnam` must be a startup error.
 //!
 //! **Every value has a working default.** A file containing only `schema_version = 1`
 //! must produce a functioning Plex server. Configuration expresses deviation from sane
@@ -24,7 +24,6 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::paths;
 use crate::version::CONFIG_SCHEMA_VERSION;
 
 /// Reads `schema_version` and nothing else.
@@ -56,7 +55,7 @@ impl fmt::Display for ConfigError {
         match self {
             Self::UnsupportedVersion { found, supported } if *found > *supported => write!(
                 f,
-                "config schema version {found} was written by a newer PlexOS release \
+                "config schema version {found} was written by a newer MediaLith release \
                  (this one supports {supported})"
             ),
             Self::UnsupportedVersion { found, supported } => write!(
@@ -96,9 +95,16 @@ pub struct Config {
     /// Update policy.
     #[serde(default)]
     pub updates: Updates,
-    /// Plex Media Server settings owned by the OS rather than by Plex.
+    /// Where releases are looked for, and whether the appliance looks by itself.
+    ///
+    /// A section of its own rather than three more keys in `[updates]`, and the reason is
+    /// rollback rather than taste. [`Updates`] is `deny_unknown_fields`, so a key added
+    /// there makes the whole file unreadable to every release already in the field — and
+    /// the release you fall back to is by definition an older one. A whole section it has
+    /// never heard of is ignored, which is the property the struct above was given for
+    /// exactly this case and had never used.
     #[serde(default)]
-    pub plex: Plex,
+    pub update_service: UpdateService,
     /// Network file sharing.
     #[serde(default)]
     pub shares: Shares,
@@ -191,7 +197,7 @@ impl Default for Config {
             schema_version: CONFIG_SCHEMA_VERSION,
             system: System::default(),
             updates: Updates::default(),
-            plex: Plex::default(),
+            update_service: UpdateService::default(),
             shares: Shares::default(),
             network: NetworkConfig::default(),
         }
@@ -211,8 +217,19 @@ pub struct System {
 }
 
 impl System {
+    /// The name a machine takes when nobody has chosen one.
+    ///
+    /// Changed with the MediaLith rename, and it reaches **new installations only**: a
+    /// machine whose `/etc/plexos/config.toml` already names it keeps that name, because
+    /// this is a serde default and a file that has the field does not consult it. Nothing
+    /// rewrites a hostname somebody chose.
+    ///
+    /// Safe to change where the identifiers above are not, because a hostname is not a
+    /// contract: no update, boot or state path resolves anything by it, and the TLS
+    /// certificate carries the machine's *address* rather than its name — recorded in
+    /// ADR-0014 as the reason a DNS name is no use for a certificate here.
     fn default_hostname() -> String {
-        "plexos".into()
+        "medialith".into()
     }
     fn default_timezone() -> String {
         "UTC".into()
@@ -232,7 +249,13 @@ impl Default for System {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Updates {
-    /// Channel to track. A manifest from any other channel is ignored.
+    /// Channel to track. A manifest from any other channel is refused.
+    ///
+    /// A string rather than [`crate::manifest::Channel`], and it stays one: a word this
+    /// build cannot name must not make the file unreadable, or a config written by a
+    /// release that knows a fourth channel would strand the release you roll back to.
+    /// [`Updates::tracked`] is where the word becomes a decision, and it is allowed to
+    /// answer "I cannot name that".
     #[serde(default = "Updates::default_channel")]
     pub channel: String,
     /// Whether OS updates install without being asked.
@@ -240,6 +263,12 @@ pub struct Updates {
     /// Defaults to on. Rollback (ADR-0005) is what makes that defensible: an appliance
     /// nobody logs into is far more likely to be harmed by unpatched software than by
     /// an update that undoes itself.
+    ///
+    /// **Nothing implements this yet, and this release does not install anything without
+    /// being asked.** It is left exactly as written rather than quietly redefined: the
+    /// meaning above is the one it will have, and ADR-0020 defers it to the phase after
+    /// discovery has been shown to work. [`UpdateService::check`] is the switch that is
+    /// live, and it governs looking rather than installing.
     #[serde(default = "Updates::default_automatic")]
     pub automatic: bool,
     /// Local-time window in which a reboot for an update may happen.
@@ -249,10 +278,22 @@ pub struct Updates {
 
 impl Updates {
     fn default_channel() -> String {
-        "stable".into()
+        crate::manifest::Channel::Stable.as_str().into()
     }
     const fn default_automatic() -> bool {
         true
+    }
+
+    /// The channel this appliance tracks, or `None` if the word is not one this build has.
+    ///
+    /// The refusal is the useful half. An appliance configured to a channel it cannot name
+    /// must say so and check nothing, because every alternative is worse: guessing stable
+    /// would take releases the owner did not ask for, and treating it as unknown would
+    /// compare equal to no manifest ever published and look like a machine that is simply
+    /// never updated again.
+    #[must_use]
+    pub fn tracked(&self) -> Option<crate::manifest::Channel> {
+        crate::manifest::Channel::from_config(self.channel.trim())
     }
 }
 
@@ -262,6 +303,60 @@ impl Default for Updates {
             channel: Self::default_channel(),
             automatic: Self::default_automatic(),
             window: MaintenanceWindow::default(),
+        }
+    }
+}
+
+/// Where this appliance looks for MediaLith releases.
+///
+/// One base address and one switch. What it points at is a static tree — a channel file
+/// naming the current release, and release directories holding the signed manifests and
+/// the artefacts — so an update service is a web server with files on it and nothing else
+/// (ADR-0020). The trust is in the signature over the manifest, never in the address, which
+/// is what makes it safe for this to be a field somebody can type.
+///
+/// Empty means the appliance does not look. That is the shipped state and it is honest:
+/// there is no MediaLith update service yet, and an image that pointed at one would either
+/// name a host that does not exist or bake one developer's build host into every appliance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateService {
+    /// Base address of the update service, or empty for none.
+    ///
+    /// Carried as written rather than parsed, for the reason [`NetworkConfig::address`]
+    /// gives: this crate is the wire format, and a value that will not parse has to survive
+    /// a round trip to be reportable.
+    #[serde(default)]
+    pub url: String,
+    /// Whether the appliance checks for a release by itself, about once a day.
+    ///
+    /// Checking, never installing. Installing without being asked is a later decision and
+    /// deliberately not this one; see [`Updates::automatic`], which is the field that will
+    /// mean it and which nothing implements yet.
+    #[serde(default = "UpdateService::default_check")]
+    pub check: bool,
+}
+
+impl UpdateService {
+    const fn default_check() -> bool {
+        true
+    }
+
+    /// Whether this appliance has somewhere to look.
+    ///
+    /// Trimmed, because a field somebody pasted into and then cleared leaves a space, and
+    /// "a source consisting of one space" is not a state worth having.
+    #[must_use]
+    pub fn is_configured(&self) -> bool {
+        !self.url.trim().is_empty()
+    }
+}
+
+impl Default for UpdateService {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            check: Self::default_check(),
         }
     }
 }
@@ -340,42 +435,28 @@ impl<'de> Deserialize<'de> for MaintenanceWindow {
     }
 }
 
-/// Plex settings the OS owns. Everything else belongs to Plex's own configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Plex {
-    /// Directories exposed to Plex as libraries, mounted read-only.
-    #[serde(default)]
-    pub media: Vec<String>,
-    /// Scratch directory for transcoding.
-    #[serde(default = "Plex::default_transcode_dir")]
-    pub transcode_dir: String,
-    /// Whether to require a verified hardware transcode before reporting healthy.
-    ///
-    /// On by default: silent fallback to software transcoding is the failure PlexOS
-    /// exists to make visible.
-    #[serde(default = "Plex::default_require_hw_transcode")]
-    pub require_hardware_transcode: bool,
-}
-
-impl Plex {
-    fn default_transcode_dir() -> String {
-        paths::PLEX_TRANSCODE_DIR.into()
-    }
-    const fn default_require_hw_transcode() -> bool {
-        true
-    }
-}
-
-impl Default for Plex {
-    fn default() -> Self {
-        Self {
-            media: Vec::new(),
-            transcode_dir: Self::default_transcode_dir(),
-            require_hardware_transcode: Self::default_require_hw_transcode(),
-        }
-    }
-}
+// The `[plex]` section was removed on 2026-08-14. It had three fields, no reader
+// anywhere outside this file's own tests, and each had been superseded by something
+// that does the job better:
+//
+//   * `media` — a bare list of paths. `plexosd::shares` and `plexosd::disks` own this
+//     now, and both track what a list of strings cannot: whether the thing is actually
+//     mounted, and an identity that survives the kernel renumbering the drives.
+//   * `transcode_dir` — `/var/cache/plex-transcode` is not a preference. It is granted
+//     in Plex's Landlock policy and exported as `TMPDIR` by `plexos_plex::run`, so a
+//     configurable path is only correct if the grant follows it. A setting whose value
+//     the sandbox does not know about is the deny-by-default trap this project has
+//     already paid for four times.
+//   * `require_hardware_transcode` — the capability is real and lives elsewhere.
+//     `/api/gpu` reports the verdict unconditionally and ADR-0018's activity card flags
+//     a software transcode while it is happening. The only thing the field would have
+//     added is failing the *boot* gate, and that gate decides rollback: a machine with
+//     no working GPU would have handed back every good update for ever.
+//
+// Removing the whole section rather than the three fields is the only shape that is
+// compatible in both directions. `Config` is not `deny_unknown_fields`, so a file that
+// still carries `[plex]` is ignored by this release; `Plex` was, so deleting a key from
+// inside it would have made such a file unreadable. See ADR-0008, amended.
 
 /// Network file sharing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,6 +497,119 @@ mod tests {
         assert_eq!(config.system.hostname, "cinema");
     }
 
+    /// The configuration shape of a release that shipped before update discovery existed.
+    ///
+    /// Written out rather than referred to, because the thing being tested is that a file
+    /// this build writes stays readable by a parser that is *not* this one. A test that
+    /// asked the current structs would be comparing this crate to itself, which is the
+    /// failure mode already recorded about the partition GUIDs.
+    #[derive(Debug, Deserialize)]
+    struct ConfigAsShippedBeforeDiscovery {
+        #[allow(dead_code)]
+        schema_version: u32,
+        #[serde(default)]
+        updates: UpdatesAsShippedBeforeDiscovery,
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct UpdatesAsShippedBeforeDiscovery {
+        #[serde(default)]
+        channel: String,
+        #[serde(default)]
+        automatic: bool,
+        #[serde(default)]
+        window: Option<String>,
+    }
+
+    #[test]
+    fn the_release_you_roll_back_to_can_still_read_what_this_one_writes() {
+        // The whole reason [update_service] is a section and not two more keys in
+        // [updates]. Rollback reverts /usr and never /var, so the file stays and the parser
+        // goes backwards -- and the release it goes back to is one that has never heard of
+        // any of this.
+        let mut config = Config::default();
+        config.update_service.url = "https://updates.example/medialith".to_owned();
+        config.update_service.check = false;
+        config.updates.channel = "dev".to_owned();
+        let written = toml::to_string(&config).expect("serialises");
+
+        let old: ConfigAsShippedBeforeDiscovery =
+            toml::from_str(&written).expect("an older release must still read this file");
+        assert_eq!(old.updates.channel, "dev");
+        // Not just "it parsed": the settings the older release actually acts on have to
+        // arrive intact, which is the thing a tolerated section could have quietly cost.
+        assert!(old.updates.automatic);
+        assert_eq!(old.updates.window.as_deref(), Some("03:00-05:00"));
+        assert!(
+            !written.contains("[update_service]\n") || written.contains("url ="),
+            "the section has to carry the address, or this proves nothing"
+        );
+
+        // And the shape that was rejected, failing the way it would have failed in the
+        // field: one key in the wrong table, and the older release cannot read its own
+        // hostname either.
+        let inside_updates = "schema_version = 1\n\n[updates]\nchannel = \"dev\"\n\
+                              url = \"https://updates.example\"\n";
+        assert!(
+            toml::from_str::<ConfigAsShippedBeforeDiscovery>(inside_updates).is_err(),
+            "if this ever passes, the section could have gone in [updates] after all"
+        );
+    }
+
+    #[test]
+    fn an_appliance_with_no_update_service_is_configured_not_to_look() {
+        // The shipped state, and the one every machine in the field is in. There is no
+        // MediaLith update service, so the honest default is a field nobody has filled in.
+        let config = Config::parse("schema_version = 1").unwrap();
+        assert!(!config.update_service.is_configured());
+        assert_eq!(config.update_service.url, "");
+        assert!(
+            config.update_service.check,
+            "checking is on; it simply has nowhere to look, which is what the page says"
+        );
+
+        // A field somebody pasted into and then cleared.
+        let cleared =
+            Config::parse("schema_version = 1\n[update_service]\nurl = \"  \"\n").unwrap();
+        assert!(!cleared.update_service.is_configured());
+    }
+
+    #[test]
+    fn the_update_service_round_trips_and_refuses_a_misspelt_key() {
+        let text = "schema_version = 1\n\n[updates]\nchannel = \"dev\"\n\n\
+                    [update_service]\nurl = \"http://192.168.2.165:8080/medialith\"\ncheck = false\n";
+        let config = Config::parse(text).unwrap();
+        assert_eq!(
+            config.updates.tracked(),
+            Some(crate::manifest::Channel::Dev)
+        );
+        assert!(config.update_service.is_configured());
+        assert!(!config.update_service.check);
+        assert_eq!(
+            Config::parse(&toml::to_string(&config).unwrap()).unwrap(),
+            config
+        );
+
+        // Strictness stays where a person types, exactly as it does in every other section.
+        assert!(Config::parse("schema_version = 1\n[update_service]\nurl_ = \"x\"\n").is_err());
+    }
+
+    #[test]
+    fn a_channel_this_build_cannot_name_is_readable_and_not_trackable() {
+        // Both halves matter. The file must parse, or a release that knows a fourth channel
+        // strands the one you roll back to. And it must not resolve to something, or the
+        // appliance quietly tracks a feed nobody chose.
+        let config = Config::parse("schema_version = 1\n[updates]\nchannel = \"lts\"\n").unwrap();
+        assert_eq!(config.updates.channel, "lts");
+        assert_eq!(config.updates.tracked(), None);
+
+        for known in crate::manifest::Channel::ALL {
+            let text = format!("schema_version = 1\n[updates]\nchannel = \"{known}\"\n");
+            assert_eq!(Config::parse(&text).unwrap().updates.tracked(), Some(known));
+        }
+    }
+
     #[test]
     fn a_misspelt_key_inside_a_known_section_is_still_an_error() {
         // Strictness stays where a person types. A setting that silently does nothing is
@@ -442,9 +636,10 @@ mod tests {
     fn a_minimal_config_yields_a_working_system() {
         let config = Config::parse("schema_version = 1").unwrap();
         assert_eq!(config, Config::default());
-        assert_eq!(config.system.hostname, "plexos");
+        // The product default, which changed with the MediaLith rename. It reaches new
+        // installations only: a machine whose config already names it never asks for this.
+        assert_eq!(config.system.hostname, "medialith");
         assert!(config.updates.automatic);
-        assert!(config.plex.require_hardware_transcode);
         assert!(!config.shares.smb.enabled);
     }
 
@@ -463,9 +658,6 @@ mod tests {
             automatic = true
             window = "03:00-05:00"
 
-            [plex]
-            media = ["/var/media/movies", "/var/media/tv"]
-
             [shares.smb]
             enabled = true
         "#,
@@ -473,7 +665,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.system.hostname, "kino");
-        assert_eq!(config.plex.media.len(), 2);
         assert!(config.shares.smb.enabled);
         assert!(!config.shares.nfs.enabled);
         assert_eq!(config.updates.window.start_minute, 180);
@@ -481,11 +672,29 @@ mod tests {
 
     #[test]
     fn rejects_a_misspelled_key_rather_than_ignoring_it() {
-        let err = Config::parse("schema_version = 1\n[plex]\ntranscod_dir = \"/tmp\"").unwrap_err();
+        // The key was `transcod_dir` in `[plex]` until that section was removed, at which
+        // point this passed for the wrong reason for one commit: an unknown *section* is
+        // ignored by design, so the test was asserting the opposite of its own name. The
+        // property belongs to a section that still exists, and there is nothing special
+        // about which one.
+        let err = Config::parse("schema_version = 1\n[system]\nhostnam = \"kino\"").unwrap_err();
         assert!(
-            matches!(&err, ConfigError::Invalid(d) if d.contains("transcod_dir")),
+            matches!(&err, ConfigError::Invalid(d) if d.contains("hostnam")),
             "error should name the offending key, got: {err}"
         );
+    }
+
+    #[test]
+    fn a_section_this_build_has_never_heard_of_is_ignored_rather_than_refused() {
+        // The other half, and the half that makes removing `[plex]` safe: a file written
+        // by a release that still had it stays readable here. Without this, deleting a
+        // section would make every configuration carrying it unreadable — which is the
+        // rollback hazard the strictness split was designed around.
+        let config = Config::parse(
+            "schema_version = 1\n[plex]\nmedia = [\"/var/media/films\"]\n[system]\nhostname = \"kino\"",
+        )
+        .expect("an unknown section is a newer release talking, not an error");
+        assert_eq!(config.system.hostname, "kino");
     }
 
     #[test]
@@ -502,7 +711,7 @@ mod tests {
         assert_eq!(Config::probe_version(text).unwrap(), 7);
         let err = Config::parse(text).unwrap_err();
         assert!(
-            err.to_string().contains("newer PlexOS release"),
+            err.to_string().contains("newer MediaLith release"),
             "got: {err}"
         );
     }

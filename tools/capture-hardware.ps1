@@ -1,4 +1,4 @@
-# Capture what PlexOS needs to know about a candidate machine, from Windows.
+# Capture what MediaLith needs to know about a candidate machine, from Windows.
 #
 # The companion to capture-hardware.sh, for machines that have not been booted into
 # Linux yet. Read-only: it queries and prints, changes nothing.
@@ -39,7 +39,7 @@ function Try-Report($label, $block) {
     }
 }
 
-Write-Output "PlexOS hardware capture (Windows)"
+Write-Output "MediaLith hardware capture (Windows)"
 Write-Output "generated: $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -66,8 +66,8 @@ Try-Report "CPU info" {
 }
 
 Section "Firmware / UEFI"
-# PlexOS requires UEFI (ADR-0003). A machine reporting Legacy here needs its firmware
-# switched before it can run PlexOS at all.
+# MediaLith requires UEFI (ADR-0003). A machine reporting Legacy here needs its firmware
+# switched before it can run MediaLith at all.
 Try-Report "firmware type" {
     $fw = $env:firmware_type
     if (-not $fw) {
@@ -75,7 +75,7 @@ Try-Report "firmware type" {
     }
     Write-Output "firmware type: $fw"
     if ("$fw" -notmatch 'UEFI|Uefi') {
-        Write-Output "WARNING: not booted in UEFI mode. PlexOS requires UEFI."
+        Write-Output "WARNING: not booted in UEFI mode. MediaLith requires UEFI."
     }
 }
 Try-Report "secure boot state" {
@@ -120,7 +120,7 @@ Try-Report "storage controllers" {
 }
 
 Section "Disks"
-# PlexOS installs to a whole disk (ADR-0003). This is what would be overwritten.
+# MediaLith installs to a whole disk (ADR-0003). This is what would be overwritten.
 Try-Report "disks" {
     Get-Disk | ForEach-Object {
         Write-Output "--- disk $($_.Number): $($_.FriendlyName)"

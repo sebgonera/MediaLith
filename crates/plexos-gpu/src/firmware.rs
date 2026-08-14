@@ -4,7 +4,7 @@
 //! in particular is what gives QuickSync its quality at low bitrates, and when it fails
 //! to load — missing `linux-firmware`, a kernel built without it, a BIOS that hides the
 //! iGPU — **transcoding still works**. It is just slower and looks worse, with nothing
-//! anywhere saying why. That is precisely the class of silent degradation PlexOS exists
+//! anywhere saying why. That is precisely the class of silent degradation MediaLith exists
 //! to surface, so it is worth a module.
 //!
 //! The status lives in debugfs, which means two things this module takes seriously:
@@ -65,7 +65,7 @@ impl FirmwareStatus {
 /// debugfs locations that have carried this information, newest layout first.
 ///
 /// The `gt0/` and `gt/` forms came with multi-tile support; the flat `i915_*_load_status`
-/// files are the older layout. All are tried because PlexOS cannot assume a kernel
+/// files are the older layout. All are tried because MediaLith cannot assume a kernel
 /// version when diagnosing a machine it did not build.
 ///
 /// `tile0/gt0/` is first because under `xe` it is the only one of these that is a real

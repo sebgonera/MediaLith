@@ -18,7 +18,22 @@ pub const ETC_FACTORY: &str = "/usr/share/factory/etc";
 /// The only persistent partition.
 pub const VAR: &str = "/var";
 
-/// Root of state owned by PlexOS itself.
+/// Root of state owned by MediaLith itself.
+///
+/// # Legacy internal path, retained deliberately
+///
+/// The product is MediaLith; this path still says `plexos`, and every path below it does
+/// too. That is the point rather than an oversight.
+///
+/// `/var` is the one surface an update does not replace and a **rollback does not
+/// revert** — which is exactly why the device token, the TLS key, the anti-rollback floor
+/// and the revocation list live here. ADR-0005's whole mechanism assumes a release can
+/// fail its health gate and hand the machine back to the one before it — including one
+/// published before the rename, which must still find its own state where it left it.
+///
+/// Renaming this is therefore not a rename but a state migration, and it would have to
+/// leave the *previous* release able to read the result. Public branding does not need to
+/// match an on-disk namespace, and here it deliberately does not.
 pub const PLEXOS_STATE: &str = "/var/lib/plexos";
 
 /// Layout version of `/var`, read by `plexos-init` before any service starts.
@@ -28,6 +43,13 @@ pub const STATE_VERSION_FILE: &str = "/var/lib/plexos/STATE_VERSION";
 pub const PLEXOS_ETC: &str = "/var/lib/plexos/etc";
 
 /// The declarative configuration file, as seen through the overlay.
+///
+/// Legacy internal path retained for rollback compatibility after the MediaLith rename,
+/// and this one is sharper than it looks: `/etc` is an overlay whose upper layer is
+/// [`PLEXOS_ETC`] on `/var`, so this file is *persistent state wearing a `/etc` address*.
+/// Renaming it would leave an existing machine's hostname, timezone and static addressing
+/// sitting in a file nothing reads any more — the settings would revert to defaults with
+/// nothing reporting that they had.
 pub const CONFIG_FILE: &str = "/etc/plexos/config.toml";
 
 /// Plex app images, named by upstream version (ADR-0007).
@@ -72,7 +94,7 @@ pub const BACKUP: &str = "/var/lib/plexos/backup";
 /// Plex Media Server's data directory.
 ///
 /// Exported to Plex as `PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR`. Its internal
-/// structure belongs to Plex: PlexOS backs it up and never edits it.
+/// structure belongs to Plex: MediaLith backs it up and never edits it.
 pub const PLEX_DATA: &str = "/var/lib/plex";
 
 /// Transcoding scratch space. Safe to delete at any time.

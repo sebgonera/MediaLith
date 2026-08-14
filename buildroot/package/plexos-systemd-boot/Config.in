@@ -16,7 +16,7 @@ config BR2_PACKAGE_PLEXOS_SYSTEMD_BOOT
 	  Buildroot's own BR2_PACKAGE_SYSTEMD_BOOT lives inside
 	  "if BR2_PACKAGE_SYSTEMD", and that is only ever selected by the
 	  BR2_INIT_SYSTEMD choice — so taking it would pull systemd in as
-	  PID 1. PlexOS runs plexos-init as PID 1 and needs the bootloader
+	  PID 1. MediaLith runs plexos-init as PID 1 and needs the bootloader
 	  alone, which is what this package builds.
 
 	  Only the EFI binary is produced. It is placed in $(BINARIES_DIR)
@@ -24,7 +24,7 @@ config BR2_PACKAGE_PLEXOS_SYSTEMD_BOOT
 	  nothing into the target filesystem, since the bootloader never
 	  runs from there.
 
-	  PlexOS uses it for its boot-counting convention, which encodes a
+	  MediaLith uses it for its boot-counting convention, which encodes a
 	  try counter in the UKI filename on the ESP and decrements it by
 	  renaming before handing off to the kernel. A FAT rename is the
 	  closest thing to an atomic operation available that early, and it

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Assemble a bootable PlexOS disk image.
+# Assemble a bootable MediaLith disk image.
 #
 # All six stages run, and the image they produce boots: systemd-boot loads the UKI,
 # dm-verity opens, /usr mounts read-only from it, /var and the /etc overlay come up,
@@ -36,7 +36,7 @@ BOARD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${BOARD_DIR}/../../../.." && pwd)"
 
 WORK="${BINARIES_DIR}/plexos-work"
-IMAGE="${BINARIES_DIR}/plexos.img"
+IMAGE="${BINARIES_DIR}/medialith.img"
 
 # --------------------------------------------------------------------------
 # Knobs
@@ -287,9 +287,26 @@ check_factory_accounts() {
 #
 # SORT_KEY is what systemd-boot groups entries by before it compares versions; entries
 # with one and entries without sort by different rules, so every entry gets it.
+#
+# NAME and PRETTY_NAME are the product, and they are what a person reads: the console
+# header, the boot menu, and the vendor string Plex reports to its clients (plexos-plex
+# passes NAME through as PLEX_MEDIA_SERVER_INFO_VENDOR).
+#
+# ID and SORT_KEY deliberately still say `plexos`, and this is not an oversight:
+#
+#   * SORT_KEY is what systemd-boot groups by. An ESP holding one UKI keyed `plexos` and
+#     another keyed `medialith` is two groups, and ADR-0005 depends on the newest version
+#     being chosen. How the bootloader orders *between* groups has not been established
+#     here, and the moment to find out is not on a machine that has just been updated.
+#   * ID has no consumer in this tree -- checked -- so changing it would buy nothing and
+#     risk the same class of surprise.
+#
+# Legacy internal identifiers retained for update/rollback compatibility after the
+# MediaLith product rename. VERSION_ID is untouched for the sharper reason that the
+# updater's anti-rollback floor is read from it.
 stage_os_release() {
     msg "stamping the version into os-release"
-    printf 'NAME="PlexOS"\nID=plexos\nVERSION_ID=%s\nPRETTY_NAME="PlexOS %s"\nSORT_KEY=plexos\n' \
+    printf 'NAME="MediaLith"\nID=plexos\nVERSION_ID=%s\nPRETTY_NAME="MediaLith %s"\nSORT_KEY=plexos\n' \
         "${PLEXOS_VERSION}" "${PLEXOS_VERSION}" > "${WORK}/os-release"
     install -D -m 0644 "${WORK}/os-release" "${TARGET_DIR}/usr/lib/os-release"
     msg "  VERSION_ID=${PLEXOS_VERSION}"
@@ -492,14 +509,21 @@ install_xe_firmware() {
 # the size have to follow them: `install` does by default and `stat` does not.
 #
 # Only the newest API revision of each variant is carried, and that is what makes covering
-# more than one machine affordable. iwlwifi asks for one revision and counts down to its
-# minimum -- and for every family this image enables the kernel's IWL_*_UCODE_API_MIN is
-# equal to its _MAX (6.19.14: 46 for the 9000s, 77 for Qu, QuZ and cc-a0, 89 for the AX210
-# family), so exactly one file per variant is ever opened and every other revision is a
-# megabyte and a half riding in both UKIs and in every update bundle. linux-firmware ships
-# seven revisions of each Qu part and thirteen of ty-a0-gf-a0. Shipping all of them came to
-# 70 MiB and covered neither AX210 nor AX211; shipping the newest comes to 22 MiB and
-# covers both.
+# more than one machine affordable. iwlwifi asks for its IWL_*_UCODE_API_MAX first and
+# counts *down* to its _MIN, taking the first file it finds -- so one file per variant is
+# all any card ever opens, and every other revision is a megabyte and a half riding in both
+# UKIs and in every update bundle. linux-firmware ships seven revisions of each Qu part and
+# thirteen of ty-a0-gf-a0. Shipping all of them came to 70 MiB and covered neither AX210
+# nor AX211; shipping the newest comes to 22 MiB and covers both.
+#
+# The counting-down is the load-bearing half, and it stopped being obvious when the 7000
+# and 8000 families were added. For every family carried before them, _MIN equalled _MAX
+# (6.19.14: 46 for the 9000s, 77 for Qu, QuZ and cc-a0, 89 for the AX210 family), so
+# "newest" and "the only one it will ask for" were the same file and the rule could not be
+# read wrongly. They are not equal for the older parts -- 8000C and 8265 accept 22 to 36,
+# 7265D and 3168 accept 22 to 29 -- and the rule survives that unchanged, because a file
+# below _MAX is still reached on the way down. What it cannot survive is a file *above*
+# _MAX, which is what the assertion below checks.
 #
 # "Newest available" is the right file only for as long as linux-firmware does not run
 # ahead of the kernel. If it ever does -- a revision shipped that this kernel will not ask
@@ -706,8 +730,23 @@ build_uki() {
     # QEMU could never have shown it -- there ttyS0 is the port being captured.
     #
     # tty0 last. The screen is the console an appliance actually has.
-    # fbcon=font:TER16x32 -- see linux.fragment. Overridable at the boot menu by
-    # pressing 'e', which is why the smaller fonts are compiled in too.
+    # No fbcon=font: here, and its absence is the decision.
+    #
+    # It used to say TER16x32, and for months that did nothing at all: CONFIG_FONTS was
+    # unset, so the font had never been compiled in and find_font returned NULL. Turning
+    # CONFIG_FONTS on made the line start working -- from the first second of boot, on every
+    # machine -- and the reference laptop's 2880x1620 panel is the only one it flatters. On
+    # a smaller monitor the boot messages came out, in the owner's word, colossal.
+    #
+    # A command line cannot know what it is plugged into. It is inside a signed UKI, it is
+    # the same on every appliance, and it applies before anything has measured anything.
+    # The dashboard measures: it asks for the largest font whose grid still fits what it
+    # draws, and drops a size when it does not. So the choice belongs there, and boot runs
+    # at the kernel's own default -- which is small, and small is the right way round for
+    # text that scrolls and for a boot that fails.
+    #
+    # The fonts stay compiled in, so `fbcon=font:TER10x18` can still be typed at the boot
+    # menu by pressing 'e'.
     # i915.enable_guc=2 -- HuC load, without GuC submission. Not a tuning knob: on this
     # hardware it is the difference between HuC running and not, and nothing else turns
     # it on.
@@ -728,15 +767,24 @@ build_uki() {
     # GuC submission, which is a scheduling change with its own history on Gen9 and
     # buys a transcoding appliance nothing. HuC is what affects encode quality, and
     # loading it pulls in GuC anyway, because GuC is what authenticates it.
-    # video=1280x720 -- the console has to be readable, and TER16x32 is the largest font
-    # the kernel has. On a 2160x1440 panel that is still 135 columns of very small text,
-    # which is how an `ls -la` came to be unreadable and a diagnosis had to go round by
-    # experiment. Shrinking the framebuffer is the only lever left: at 1280x720 the same
-    # font gives 80 columns at roughly three times the physical size.
+    # No video= here either, and this one is a retraction.
     #
-    # No connector name, so it applies to whichever output exists. A mode the panel
-    # cannot do is not fatal -- DRM falls back to the preferred mode, which is today's
-    # behaviour, so the worst case is no improvement rather than no picture.
+    # It said `video=1280x720`, and the reasoning was sound at the time: the console had to
+    # be readable, TER16x32 was the largest font available, and shrinking the framebuffer
+    # was "the only lever left". It was not the only lever -- it was the only lever *then*,
+    # because the font it wanted had never actually been compiled in. With CONFIG_FONTS set
+    # and the dashboard choosing a font by measuring the grid it produces, the readable
+    # console arrives without touching the mode at all.
+    #
+    # What the line costs is the picture. Where it takes effect, 1280x720 is scaled up to
+    # whatever the panel is, and a scaled console is a soft one -- reported from a machine
+    # as the boot being "in such a poor resolution". Where it does not take effect it was
+    # doing nothing: the reference laptop runs 2880x1620 with this line present, because
+    # i915 drives the panel at its native mode once it takes the console over.
+    #
+    # So it was inert on the machine it was written for and blurry on the machines it was
+    # not. Without it the driver picks the display's preferred mode, which is the sharpest
+    # thing that panel can do.
     #
     # panic=20 -- without it ADR-0005 does not work, and this was missing for the whole
     # life of the project. A boot that cannot verify /usr ends in plexos-init's fail(),
@@ -752,7 +800,7 @@ build_uki() {
     # machine the only way to capture a panic is to photograph it. Three failed boots
     # then cost about four minutes end to end, which is the right side of the trade for
     # a path that runs when an update was already broken.
-    printf 'plexos.slot=%s plexos.roothash=%s i915.enable_guc=2 panic=20 earlycon=efifb console=ttyS0,115200 console=tty0 video=1280x720 fbcon=font:TER16x32\n' \
+    printf 'plexos.slot=%s plexos.roothash=%s i915.enable_guc=2 panic=20 earlycon=efifb console=ttyS0,115200 console=tty0\n' \
         "${slot}" "${ROOT_HASH}" > "${WORK}/cmdline"
 
     # Written by stage_os_release, before the /usr image was built. See there for why
@@ -807,7 +855,13 @@ build_esp() {
 
     rm -f "${esp}"
     truncate -s "${esp_mib}M" "${esp}"
-    "${HOST_DIR}/sbin/mkfs.vfat" -F 32 -n PLEXOS_ESP "${esp}" >/dev/null
+    # The FAT volume label, which nothing in this system reads: the ESP is found by its
+    # *GPT partition* label (`esp`, ADR-0003) everywhere. This string exists for the one
+    # case where somebody plugs the disk into another computer and a file manager names it,
+    # so it is product branding with no compatibility weight, and it reaches newly built
+    # images only — an installed machine's ESP is copied byte for byte and keeps whatever
+    # it had. Eleven characters is the FAT limit.
+    "${HOST_DIR}/sbin/mkfs.vfat" -F 32 -n MEDIALITH "${esp}" >/dev/null
 
     local -r mcopy="${HOST_DIR}/bin/mcopy"
     local -r mmd="${HOST_DIR}/bin/mmd"
@@ -957,7 +1011,7 @@ write_partition() {
 # every host with a Buildroot tree, and a manifest must be written exactly once -- the
 # signature covers its bytes, so a second tool that reformats it breaks it.
 build_bundle() {
-    local bundle="${BINARIES_DIR}/plexos-update"
+    local bundle="${BINARIES_DIR}/medialith-update"
     msg "building update bundle"
 
     rm -rf "${bundle}"

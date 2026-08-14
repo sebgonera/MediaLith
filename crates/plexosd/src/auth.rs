@@ -177,8 +177,23 @@ pub fn normalise(input: &str) -> String {
 /// is what keeps that true rather than merely intended.
 #[must_use]
 pub fn fingerprint(token: &str) -> String {
+    digest(&normalise(token))
+}
+
+/// SHA-256 of a string, as hex, with nothing done to it first.
+///
+/// [`fingerprint`] is this applied to a *normalised* token, and the difference matters:
+/// normalising is a kindness to somebody transcribing sixteen characters off a panel, and
+/// it is wrong for anything a machine produced and a machine returns. A session token is
+/// hex from `/dev/urandom` and travels by copy; folding `O` onto `0` in one would be
+/// changing a value nobody mistyped.
+///
+/// Which is also why the two are separate functions rather than a flag: a boolean argument
+/// at the call site is a decision that gets made by whichever value was already there.
+#[must_use]
+pub fn digest(value: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(normalise(token).as_bytes());
+    hasher.update(value.as_bytes());
     hex(&hasher.finalize())
 }
 
@@ -205,15 +220,32 @@ pub fn generate() -> std::io::Result<String> {
 /// digest is not a secret.
 #[must_use]
 pub fn matches(presented: &str, stored_fingerprint: &str) -> bool {
-    let candidate = fingerprint(presented);
-    let expected = stored_fingerprint.trim();
-    if candidate.len() != expected.len() {
+    constant_time_eq(&fingerprint(presented), stored_fingerprint.trim())
+}
+
+/// Compares two strings without leaking where they first differ.
+///
+/// The obvious `==` returns as soon as two bytes differ, and the time it takes is
+/// therefore a measurement of how much of the secret the caller already has. Over a LAN
+/// that is a slow attack and a real one. This looks at every byte whatever happens.
+///
+/// Lengths are compared first and short-circuit, which is safe for every caller here: the
+/// length of a SHA-256 digest, of a session token and of a pairing code are all fixed by
+/// the format and none of them is a secret.
+///
+/// Shared rather than written once per credential. Three modules now compare a presented
+/// string against a held one — [`matches`] for the device token, [`crate::session`] for an
+/// administrator session, [`crate::pairing`] for a pairing code — and three hand-rolled
+/// loops is three chances for one of them to be an `==` that nobody noticed.
+#[must_use]
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
         return false;
     }
-    let differences = candidate
+    let differences = a
         .bytes()
-        .zip(expected.bytes())
-        .fold(0_u8, |acc, (a, b)| acc | (a ^ b));
+        .zip(b.bytes())
+        .fold(0_u8, |acc, (x, y)| acc | (x ^ y));
     differences == 0
 }
 
@@ -326,6 +358,73 @@ pub fn bearer(header_value: &str) -> Option<&str> {
     let rest = header_value.strip_prefix("Bearer ")?;
     let token = rest.trim();
     (!token.is_empty()).then_some(token)
+}
+
+/// How a request proved it is the administrator.
+///
+/// Two ways in and one authority. Routes are not given this — [`crate::http::refusal`]
+/// consumes it and hands the handler nothing — because a route that could tell the
+/// difference would eventually be written to care about it, and then there would be two
+/// security models to keep in agreement instead of one.
+///
+/// It exists as a value rather than a `bool` for the log: "administrator browser paired"
+/// and "the device token was used" are different events to somebody reading a machine's
+/// history, and collapsing them at the point of decision means neither can be reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Principal {
+    /// The persistent device token — the Recovery Device Code (ADR-0013).
+    RecoveryDeviceCode,
+    /// A browser session established by pairing at the machine's own screen (ADR-0019).
+    AdminSession,
+}
+
+impl std::fmt::Display for Principal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RecoveryDeviceCode => write!(f, "the recovery device code"),
+            Self::AdminSession => write!(f, "an administrator session"),
+        }
+    }
+}
+
+/// Whether `presented` authenticates an administrator, and how.
+///
+/// **The one question.** Every route that changes the machine is behind this, and none of
+/// them asks it: [`crate::http::refusal`] does, once, in front of the handler, so a route
+/// added tomorrow is authenticated by construction rather than by its author remembering
+/// to be. That property predates sessions — it is what `http`'s module documentation
+/// promises — and adding a second way to authenticate is exactly the change that would
+/// have broken it, had it been made by adding `if session { … }` to each handler.
+///
+/// The device token is tried first. Not for speed — both are one SHA-256 and a comparison
+/// — but because it is the credential that must keep working whatever else is true of this
+/// machine: it is the recovery path, and a session store that somehow refused everything
+/// must not be able to take it away.
+///
+/// Marking a session used is a side effect of asking, and it belongs here rather than in
+/// the caller. The idle deadline exists to measure "is anybody using this", and the only
+/// honest measurement of that is a request that authenticated.
+#[must_use]
+pub fn authenticate(presented: &str, credential: &Credential) -> Option<Principal> {
+    // An unclaimed device authenticates nothing, including a session. ADR-0013's rule is
+    // that "no credential is set" must never become "no credential is needed", and a
+    // session is a credential this device issued — so honouring one here would be the
+    // machine trusting its own earlier self while unable to say who it is.
+    //
+    // `http::refusal` answers 503 before reaching this in that state, so today this arm is
+    // belt and braces. It is written anyway because the value of a single authority is
+    // that it can be read on its own and be right; a function that is only safe because of
+    // where it happens to be called is one that becomes wrong when somebody calls it
+    // somewhere else.
+    let Credential::Set(fingerprint) = credential else {
+        return None;
+    };
+
+    if matches(presented, fingerprint) {
+        return Some(Principal::RecoveryDeviceCode);
+    }
+
+    crate::session::validate(presented).then_some(Principal::AdminSession)
 }
 
 #[cfg(test)]
@@ -557,6 +656,96 @@ mod tests {
             "a readable fingerprint permits offline guessing"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn either_credential_authenticates_and_the_caller_is_told_which() {
+        // Told which for the log only. No route sees this -- http::refusal consumes it --
+        // because a route that could tell the difference would eventually be written to
+        // care, and then there would be two security models to keep in agreement.
+        let credential = Credential::Set(fingerprint(SAMPLE));
+        assert_eq!(
+            authenticate(SAMPLE, &credential),
+            Some(Principal::RecoveryDeviceCode)
+        );
+
+        let session = crate::session::issue().expect("/dev/urandom");
+        assert_eq!(
+            authenticate(&session, &credential),
+            Some(Principal::AdminSession)
+        );
+
+        assert_eq!(authenticate("neither-of-them", &credential), None);
+        assert!(
+            crate::session::revoke(&session),
+            "cleanup: the session was live"
+        );
+    }
+
+    #[test]
+    fn a_revoked_session_authenticates_nothing_while_the_device_token_still_does() {
+        // The direction that matters after a rotation, and the reason the device token is
+        // tried first: it is the recovery path, and nothing about the session store may be
+        // able to take it away.
+        let credential = Credential::Set(fingerprint(SAMPLE));
+        let session = crate::session::issue().expect("/dev/urandom");
+        assert!(authenticate(&session, &credential).is_some());
+
+        assert!(
+            crate::session::revoke(&session),
+            "cleanup: the session was live"
+        );
+        assert_eq!(authenticate(&session, &credential), None);
+        assert_eq!(
+            authenticate(SAMPLE, &credential),
+            Some(Principal::RecoveryDeviceCode),
+            "the anchor credential is untouched by anything sessions do"
+        );
+    }
+
+    #[test]
+    fn an_unclaimed_device_authenticates_nothing_at_all() {
+        // Including a session token. "No credential is set" must never become "no
+        // credential is needed", which is how appliances ship with an open management
+        // interface.
+        let session = crate::session::issue().expect("/dev/urandom");
+        assert_eq!(authenticate(&session, &Credential::Unset), None);
+        assert_eq!(authenticate(SAMPLE, &Credential::Unset), None);
+        assert!(
+            crate::session::revoke(&session),
+            "cleanup: the session was live"
+        );
+    }
+
+    #[test]
+    fn a_digest_is_not_a_fingerprint_and_the_difference_is_normalisation() {
+        // fingerprint folds O onto 0 for somebody transcribing a token off a panel.
+        // digest does not, because a session token is machine-made and travels by copy,
+        // and folding a character in one would be changing a value nobody mistyped.
+        assert_eq!(fingerprint("abc"), digest("ABC"));
+        assert_ne!(digest("abc"), digest("ABC"));
+        assert_eq!(
+            digest("ABC"),
+            "b5d4045c3f466fa91fe2cc6abe79232a1a57cdf104f7a26e716e0a1e2789df78",
+            "SHA-256 of \"ABC\", computed by sha256sum"
+        );
+    }
+
+    #[test]
+    fn constant_time_comparison_answers_the_same_as_the_obvious_one() {
+        // The property being bought is timing, which cannot be asserted here. What can be
+        // asserted is that buying it did not change the answer -- which is the mistake a
+        // hand-rolled comparison actually makes.
+        for (a, b) in [
+            ("", ""),
+            ("a", "a"),
+            ("a", "b"),
+            ("abc", "abd"),
+            ("abc", "abcd"),
+            ("abcd", "abc"),
+        ] {
+            assert_eq!(constant_time_eq(a, b), a == b, "{a:?} vs {b:?}");
+        }
     }
 
     #[test]

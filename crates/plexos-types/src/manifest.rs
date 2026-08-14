@@ -23,7 +23,7 @@
 //! delta transport can be introduced later with no `manifest_version` bump: a device
 //! that does not implement it simply skips it and takes the full image.
 //!
-//! **The schema describes the artefacts PlexOS actually builds.** Two of its fields were
+//! **The schema describes the artefacts MediaLith actually builds.** Two of its fields were
 //! written before anything had been built and did not survive contact with the images:
 //! there is one UKI *per slot*, because `plexos.slot=` is on the kernel command line
 //! inside it and the appliance cannot build one (that needs `objcopy`); and the version
@@ -132,7 +132,7 @@ impl fmt::Display for ManifestError {
             Self::UnsupportedVersion { found, supported } => write!(
                 f,
                 "manifest version {found} is not supported by this release \
-                 (supports {supported}); update to a newer PlexOS release first"
+                 (supports {supported}); update to a newer MediaLith release first"
             ),
             Self::Malformed(detail) => write!(f, "malformed manifest: {detail}"),
             Self::Inconsistent(detail) => write!(
@@ -185,6 +185,25 @@ pub struct Manifest {
     /// Set when an intermediate release performs a migration that cannot be skipped.
     #[serde(default)]
     pub min_sequence: Option<u64>,
+    /// One line saying what this release is, for a person.
+    ///
+    /// The three fields below are the only ones here that no decision reads. They exist so
+    /// an owner is told *what* an update is before being asked to take it, and they are
+    /// added to v1 rather than to a v2 because this format ignores what it does not know:
+    /// a release carrying them installs unchanged on every appliance ever shipped. That is
+    /// the whole reason [`Manifest`] tolerates unknown fields, used for the first time.
+    ///
+    /// Nothing about eligibility or safety may ever consult them. A publisher who forgets
+    /// them is publishing a plain release, not a broken one — which is what makes it safe
+    /// to leave them out of an emergency security release written at three in the morning.
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// What changed, one entry per line, in the publisher's order.
+    #[serde(default)]
+    pub notes: Vec<String>,
+    /// How much this release matters, for the wording of a notification.
+    #[serde(default)]
+    pub importance: Importance,
     /// The `/usr` image and its verity data.
     pub usr: UsrPayload,
     /// The Unified Kernel Images, one per slot.
@@ -268,6 +287,67 @@ pub enum Channel {
     Unknown,
 }
 
+impl Channel {
+    /// The three channels this build can be configured to track.
+    pub const ALL: [Self; 3] = [Self::Stable, Self::Beta, Self::Dev];
+
+    /// The word this channel is written as, in a manifest and in a configuration file.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Beta => "beta",
+            Self::Dev => "dev",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// The channel a configuration file names, or `None` if this build cannot name it.
+    ///
+    /// Never returns [`Channel::Unknown`], and that is the point. Reading an unrecognised
+    /// word out of a *manifest* into `Unknown` is how an old device parses a new
+    /// publisher's document; doing the same to a *configured* channel would leave the
+    /// appliance tracking a feed it cannot name, and `Unknown` compares equal to nothing —
+    /// so it would silently never see an update again. The caller has to handle not
+    /// knowing, which is why this is an `Option`.
+    #[must_use]
+    pub fn from_config(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.as_str() == word)
+    }
+}
+
+impl fmt::Display for Channel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// How much a release matters, for the wording of a notification and nothing else.
+///
+/// Deliberately three words and not a vulnerability database. The only thing this changes
+/// is whether an owner reads "update available" or "security update available", and the
+/// difference between those two sentences is worth one enum. Anything finer — which CVEs,
+/// which component, how exploitable — is a publishing problem that does not belong in the
+/// document a device parses before it can be told anything.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Importance {
+    /// An ordinary release.
+    #[default]
+    Normal,
+    /// Worth taking sooner: reliability fixes, hardware support.
+    Recommended,
+    /// Contains security fixes.
+    Security,
+    /// A word introduced after this build. Read as [`Importance::Normal`].
+    ///
+    /// Understating is the only safe direction for a field that decides nothing: a device
+    /// that cannot read the word must not invent urgency, and must not refuse the update
+    /// either — the release is installable regardless of what this says.
+    #[serde(other)]
+    Unknown,
+}
+
 /// The `/usr` image payload and the verity data that authenticates it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsrPayload {
@@ -337,7 +417,7 @@ pub enum Source {
         /// Location of the artifact: an absolute `http`/`https` URL, or a bare file name
         /// beside the manifest.
         ///
-        /// A bare name is what PlexOS publishes, and the reason is that the signature
+        /// A bare name is what MediaLith publishes, and the reason is that the signature
         /// covers these bytes. An absolute URL fixed at build time would tie a signed
         /// manifest to the one address it was built for, so moving a bundle to another
         /// host — which is every publish this project has ever done — would mean
@@ -561,6 +641,44 @@ mod tests {
             }],
         };
         assert!(artifact.first_supported_source().is_none());
+    }
+
+    #[test]
+    fn a_release_published_without_notes_is_a_plain_release_and_not_a_broken_one() {
+        // The fixture predates these fields entirely, which is the case that matters: every
+        // manifest ever signed by this project is one of these. A security release written
+        // in a hurry with no notes must install exactly like any other.
+        let m = fixture().parse().unwrap();
+        assert_eq!(m.summary, None);
+        assert!(m.notes.is_empty());
+        assert_eq!(m.importance, Importance::Normal);
+    }
+
+    #[test]
+    fn release_notes_survive_the_journey_they_are_for() {
+        let mut json: serde_json::Value = serde_json::from_slice(fixture().signed_bytes()).unwrap();
+        json["summary"] = serde_json::json!("Security and reliability update");
+        json["notes"] = serde_json::json!(["Linux kernel security fixes", "Intel GPU firmware"]);
+        json["importance"] = serde_json::json!("security");
+        let m = RawManifest::new(serde_json::to_vec(&json).unwrap())
+            .parse()
+            .unwrap();
+        assert_eq!(
+            m.summary.as_deref(),
+            Some("Security and reliability update")
+        );
+        assert_eq!(m.notes.len(), 2);
+        assert_eq!(m.importance, Importance::Security);
+    }
+
+    #[test]
+    fn a_word_for_urgency_this_build_does_not_know_understates_rather_than_refuses() {
+        // The one direction that is safe. Inventing urgency from a word nobody can read
+        // would put a security banner on an ordinary release; refusing would make a device
+        // decline an installable update over a display string.
+        let importance: Importance = serde_json::from_str(r#""catastrophic""#).unwrap();
+        assert_eq!(importance, Importance::Unknown);
+        assert_ne!(importance, Importance::Security);
     }
 
     #[test]

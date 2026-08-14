@@ -1,4 +1,4 @@
-//! Putting PlexOS on a disk (ADR-0016).
+//! Putting MediaLith on a disk (ADR-0016).
 //!
 //! The appliance boots from a USB stick, prints a URL, and from a browser somebody chooses
 //! a disk. What gets written is **the system that is running** — its `/usr`, its verity
@@ -8,7 +8,7 @@
 //!
 //! # This is the most destructive thing in the repository
 //!
-//! Everything else here writes to a partition PlexOS owns. This erases a whole disk that
+//! Everything else here writes to a partition MediaLith owns. This erases a whole disk that
 //! may belong to somebody's computer, and the machine it was written for has Windows on its
 //! internal drive. So the shape of this module is refusals: [`candidates`] reads, [`vet`]
 //! decides, and only [`install`] writes.
@@ -78,8 +78,14 @@ pub struct Candidate {
 /// Why a disk will not be installed onto.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    /// It is the disk PlexOS is running from.
+    /// It is the disk MediaLith is running from.
     IsSource(String),
+    /// Which disk this system is running from could not be established, so no disk can be
+    /// ruled out and therefore none can be offered.
+    ///
+    /// Not a property of the disk it is attached to. It is attached to *every* disk,
+    /// because the thing that is unknown is which of them must be protected.
+    SourceUnknown,
     /// There is no such disk.
     Unknown(String),
     /// It cannot hold the layout.
@@ -98,10 +104,18 @@ impl std::fmt::Display for Refusal {
         match self {
             Self::IsSource(name) => write!(
                 f,
-                "{name} is the disk PlexOS is running from, so it cannot be installed \
-                 onto. Remedy: choose the disk you want PlexOS to live on. This one is \
+                "{name} is the disk MediaLith is running from, so it cannot be installed \
+                 onto. Remedy: choose the disk you want MediaLith to live on. This one is \
                  the installer, and erasing it half way through would leave a machine \
                  with neither system."
+            ),
+            Self::SourceUnknown => write!(
+                f,
+                "MediaLith cannot identify the disk it booted from, so no disk can be \
+                 offered: the one that must be protected is the one that cannot be named. \
+                 Remedy: none from the console. This disk is not refused for anything \
+                 about itself, and installing onto the wrong one erases the running \
+                 system."
             ),
             Self::Unknown(name) => write!(
                 f,
@@ -114,7 +128,7 @@ impl std::fmt::Display for Refusal {
                 f,
                 "this would erase everything on {wanted}, and the confirmation said \
                  {typed:?}. Remedy: type {wanted} exactly. The confirmation is typed \
-                 rather than clicked because this is the one thing PlexOS does that \
+                 rather than clicked because this is the one thing MediaLith does that \
                  destroys data which was never its own."
             ),
         }
@@ -123,7 +137,7 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
-/// Every disk on this machine, with the one PlexOS is running from marked.
+/// Every disk on this machine, with the one MediaLith is running from marked.
 ///
 /// Partitions, device-mapper devices and loop devices are not disks and are skipped. What
 /// remains is what somebody could install onto, whether or not they should.
@@ -150,7 +164,19 @@ pub fn candidates(env: &impl Environment, source: Option<&str>) -> io::Result<Ve
             continue;
         };
         disk.is_source = source.is_some_and(|s| s == disk.name);
-        disk.refusal = refusal_for(&disk).map(|r| r.to_string());
+        // `source` being `None` is the case this whole module's safety turns on, and it is
+        // handled here rather than left to callers because there is exactly one safe
+        // reading of it and it is not the one that falls out naturally. With no source
+        // known, `is_source` is false for every disk, `refusal_for` finds nothing to say
+        // about any of them, and the list comes back describing a machine where every disk
+        // is free to erase -- which is "nothing is excluded" standing in for "I do not
+        // know", the two values this project has already written down as the same value
+        // with opposite meanings. `POST /api/install` refused this case from the day it was
+        // written; `GET` did not, so the page offered disks the POST would then refuse.
+        disk.refusal = match source {
+            Some(_) => refusal_for(&disk).map(|r| r.to_string()),
+            None => Some(Refusal::SourceUnknown.to_string()),
+        };
         disks.push(disk);
     }
 
@@ -355,7 +381,7 @@ impl Source {
     /// already-installed machine, would otherwise be able to copy the wrong system.
     ///
     /// # Errors
-    /// If any of the three cannot be found, which means this is not a PlexOS disk and
+    /// If any of the three cannot be found, which means this is not a MediaLith disk and
     /// there is nothing to copy.
     pub fn resolve(disk: &str, slot: plexos_types::Slot) -> io::Result<Self> {
         Ok(Self {
@@ -381,7 +407,7 @@ const VERITY_MAPPER_NAME: &str = "plexos-usr";
 /// first successful install. Labels are not unique across disks: the moment a target's
 /// table is written the machine has two partitions called `esp`, and
 /// `by_partlabel` returns whichever the kernel enumerated first — which was the disk that
-/// had just been installed onto. The console then reported that PlexOS was running from the
+/// had just been installed onto. The console then reported that MediaLith was running from the
 /// *target*, and would have offered the disk it was actually running from as somewhere to
 /// install. That is not a cosmetic error: accepting it erases the running system.
 ///
@@ -705,6 +731,13 @@ pub struct Progress {
     pub error: Option<String>,
     /// The disks on this machine, refreshed on every read.
     pub disks: Vec<Candidate>,
+    /// The disk MediaLith is running from, if that could be established.
+    ///
+    /// `None` is why every disk in `disks` carries a refusal, and the page needs to be able
+    /// to tell that apart from a machine with no usable disks: both show nothing to install
+    /// onto, and they call for opposite sentences. Reported as well as acted on, because a
+    /// person told "no disk can be used" deserves to know it is not about their disks.
+    pub source: Option<String>,
     /// Everything said so far.
     pub log: Vec<String>,
 }
@@ -716,6 +749,7 @@ impl Default for Progress {
             detail: "nothing has been installed".to_owned(),
             error: None,
             disks: Vec::new(),
+            source: None,
             log: Vec::new(),
         }
     }
@@ -739,6 +773,9 @@ impl Job {
         // looking at the page should appear, and a cached list is one that offers a disk
         // that has been unplugged.
         state.disks = candidates(env, source).unwrap_or_default();
+        // Set here rather than at `begin`, so it is refreshed with the disks it explains
+        // and cannot be left over from a snapshot taken under different conditions.
+        state.source = source.map(str::to_owned);
         state.clone()
     }
 
@@ -829,7 +866,7 @@ mod tests {
     use plexos_gpu::env::Fixture;
 
     /// A machine shaped like the reference laptop: an internal `NVMe` with Windows on it,
-    /// and the USB stick PlexOS booted from.
+    /// and the USB stick MediaLith booted from.
     ///
     /// Built from the sizes and models read off that machine rather than invented, because
     /// a fixture somebody imagined is a test that agrees with the code and not with the
@@ -898,6 +935,63 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_running_disk_refuses_every_disk_rather_than_excluding_none() {
+        // The defect this closes: `GET /api/install` passed `None` straight through, so
+        // `is_source` was false everywhere, no disk collected a refusal, and the page drew
+        // a radio button and an install button beside every disk on the machine -- while
+        // `POST` refused the request outright. The backend was right and the page invited
+        // somebody to make a request that could not succeed, which is the worst of both:
+        // it reads as a bug in the appliance, and the one time it is not is the time
+        // somebody finds a way to force it through.
+        let disks = candidates(&laptop(), None).unwrap();
+        assert!(!disks.is_empty(), "the fixture has disks to refuse");
+
+        for disk in &disks {
+            let refusal = disk
+                .refusal
+                .as_deref()
+                .unwrap_or_else(|| panic!("{} was offered with no source known", disk.name));
+            assert!(
+                refusal.contains("cannot identify the disk it booted from"),
+                "{refusal}"
+            );
+            assert!(refusal.contains("Remedy:"), "{refusal}");
+            // Not about the disk. Somebody reading this must not go looking for a fault in
+            // a drive that has nothing wrong with it.
+            assert!(
+                refusal.contains("not refused for anything about itself"),
+                "{refusal}"
+            );
+        }
+
+        // And the flag is still false, because none of them *is* the source -- which is
+        // precisely why the refusal cannot be carried by `is_source`.
+        assert!(disks.iter().all(|d| !d.is_source));
+    }
+
+    #[test]
+    fn the_snapshot_says_which_disk_it_booted_from_so_the_page_can_tell_the_states_apart() {
+        // "Every disk is refused" is reached by two roads: nothing here is big enough, and
+        // the boot disk could not be named. They need opposite sentences, and the disk list
+        // alone cannot distinguish them.
+        let job = Job::new();
+
+        let known = job.snapshot(&laptop(), Some("sda"));
+        assert_eq!(known.source.as_deref(), Some("sda"));
+        assert!(
+            known.disks.iter().any(|d| d.refusal.is_none()),
+            "with the source known, something is installable"
+        );
+
+        let unknown = job.snapshot(&laptop(), None);
+        assert_eq!(unknown.source, None);
+        assert!(
+            unknown.disks.iter().all(|d| d.refusal.is_some()),
+            "with the source unknown, nothing is"
+        );
+    }
+
+    #[test]
     fn a_disk_is_described_the_way_its_owner_would_recognise_it() {
         // `/dev/nvme0n1` is a device name. "KINGSTON, 465.8 GiB, nvme0n1p1: 100.0 MiB
         // (SYSTEM)" is somebody's computer, and this is the one decision where being able
@@ -919,7 +1013,7 @@ mod tests {
     #[test]
     fn this_systems_own_machinery_is_not_offered_as_a_disk() {
         // loop0 is the mounted Plex app image and dm-0 is the verified /usr. Offering
-        // either would be offering to install PlexOS onto PlexOS.
+        // either would be offering to install MediaLith onto MediaLith.
         let names: Vec<String> = candidates(&laptop(), Some("sda"))
             .unwrap()
             .into_iter()
@@ -1077,7 +1171,7 @@ mod tests {
         // Found on hardware within a minute of the first successful install. The first
         // implementation resolved the ESP by partition label -- and the moment a target's
         // table is written there are two partitions called `esp`, so it returned the disk
-        // that had just been installed onto. The console then reported PlexOS as running
+        // that had just been installed onto. The console then reported MediaLith as running
         // from the target, and would have offered the disk it was really running from.
         // Accepting that erases the running system.
         let fixture = laptop()

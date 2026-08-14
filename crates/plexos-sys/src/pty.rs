@@ -291,6 +291,53 @@ mod tests {
     use std::io::{Read as _, Write as _};
     use std::os::fd::AsRawFd as _;
 
+    /// Holds the child-process lock, and collects this test's child before letting go.
+    ///
+    /// Both halves are needed and only the first was here. The lock keeps another test's
+    /// `waitpid(-1)` from running while this one has a child — that much was already
+    /// recorded. What was missing is that a *finished* child is still there after the lock
+    /// is released, so the next test to call `reap()` collects a shell that exited 0 and is
+    /// told that the process it killed with SIGKILL reported a status. That is exactly how
+    /// `process::tests::a_child_that_is_killed_reports_the_signal_rather_than_a_status`
+    /// failed on a twelve-core host and passed on a two-core one: more tests in flight,
+    /// more chances for somebody else's zombie to be the one reaped.
+    ///
+    /// Every test in this module that forks must hold one of these. Four of the five did
+    /// not.
+    struct OwnChildren(
+        // Held rather than read: what it does happens when it is dropped.
+        #[expect(
+            dead_code,
+            reason = "the guard's value is its lifetime, not its contents"
+        )]
+        std::sync::MutexGuard<'static, ()>,
+    );
+
+    impl OwnChildren {
+        fn claim() -> Self {
+            Self(
+                crate::CHILD_PROCESS_TESTS
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+        }
+    }
+
+    /// Waits for this terminal's child and collects it.
+    ///
+    /// By pid, through [`try_reap`], rather than with `waitpid(-1)`: a test that reaped
+    /// indiscriminately would be the same hazard pointing the other way. Bounded, because a
+    /// child that never exits should fail the assertion it is about rather than hang here.
+    fn collect(terminal: &Terminal) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if try_reap(terminal).is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     fn read_some(terminal: &Terminal, wait: std::time::Duration) -> String {
         // The master stays readable while the child lives, so a plain read would block
         // forever once output stops. A deadline plus a non-blocking descriptor is the
@@ -318,6 +365,7 @@ mod tests {
 
     #[test]
     fn a_program_runs_under_the_terminal_and_its_output_comes_back() {
+        let _serialised = OwnChildren::claim();
         let terminal = spawn(
             "/bin/sh",
             &["sh", "-c", "echo hello-from-the-pty"],
@@ -327,6 +375,7 @@ mod tests {
 
         let output = read_some(&terminal, std::time::Duration::from_secs(3));
         assert!(output.contains("hello-from-the-pty"), "got {output:?}");
+        collect(&terminal);
     }
 
     #[test]
@@ -334,6 +383,7 @@ mod tests {
         // The property the whole module exists for. Over a pipe this prints "pipe", and
         // everything that makes a shell usable -- prompts, job control, colour -- keys
         // off exactly this answer.
+        let _serialised = OwnChildren::claim();
         let terminal = spawn(
             "/bin/sh",
             &[
@@ -347,12 +397,14 @@ mod tests {
 
         let output = read_some(&terminal, std::time::Duration::from_secs(3));
         assert!(output.contains("IS-A-TTY"), "got {output:?}");
+        collect(&terminal);
     }
 
     #[test]
     fn the_window_size_reaches_the_child() {
         // A resize that never reaches the kernel leaves full-screen programs drawing 24
         // rows in whatever the browser actually is, for as long as they run.
+        let _serialised = OwnChildren::claim();
         let terminal = spawn(
             "/bin/sh",
             &["sh", "-c", "stty size 2>/dev/null || echo no-stty"],
@@ -368,10 +420,12 @@ mod tests {
             output.contains("40 132") || output.contains("no-stty"),
             "got {output:?}"
         );
+        collect(&terminal);
     }
 
     #[test]
     fn input_written_to_the_master_reaches_the_shell() {
+        let _serialised = OwnChildren::claim();
         let terminal = spawn("/bin/sh", &["sh"], WindowSize::default()).expect("spawns");
 
         let mut file = std::fs::File::from(terminal.master.try_clone().unwrap());
@@ -380,15 +434,14 @@ mod tests {
 
         let output = read_some(&terminal, std::time::Duration::from_secs(3));
         assert!(output.contains("round-trip-works"), "got {output:?}");
+        collect(&terminal);
     }
 
     #[test]
     fn a_finished_child_is_reaped_exactly_once() {
         // plexosd never exits, so a session that is not reaped is a zombie for the life
         // of the daemon.
-        let _serialised = crate::CHILD_PROCESS_TESTS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _serialised = OwnChildren::claim();
         let terminal =
             spawn("/bin/sh", &["sh", "-c", "exit 3"], WindowSize::default()).expect("spawns");
 

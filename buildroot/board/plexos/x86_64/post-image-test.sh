@@ -2,7 +2,7 @@
 #
 # Tests for post-image.sh.
 #
-# Image assembly is the one part of PlexOS whose mistakes are both silent and
+# Image assembly is the one part of MediaLith whose mistakes are both silent and
 # expensive: a wrong section offset, a non-reproducible filesystem, or a partition
 # written at the wrong sector all produce an artifact that looks entirely normal and
 # fails only on a machine that will not boot. Waiting for a four-hour Buildroot build
@@ -104,14 +104,14 @@ done
 # A /usr with enough content that the verity tree spans more than one block.
 cp /bin/sh "${MOCK}/target/usr/bin/" 2>/dev/null || true
 head -c 4000000 /dev/urandom > "${MOCK}/target/usr/lib/filler.bin"
-printf 'NAME="PlexOS"\nID=plexos\nVERSION_ID=0.1.0\n' > "${MOCK}/target/usr/lib/os-release"
+printf 'NAME="MediaLith"\nID=plexos\nVERSION_ID=0.1.0\n' > "${MOCK}/target/usr/lib/os-release"
 
 # shellcheck source=post-image.sh disable=SC1091
 source "${BOARD_DIR}/post-image.sh" "${MOCK}/images"
 set +e   # post-image.sh sets -e; the checks below must be allowed to fail
 
 WORK="${MOCK}/images/plexos-work"
-IMAGE="${MOCK}/images/plexos.img"
+IMAGE="${MOCK}/images/medialith.img"
 mkdir -p "${WORK}"
 
 # --------------------------------------------------------------------------
@@ -338,28 +338,183 @@ else
             | sed 's/-[0-9]\+\.ucode$//' | sort | uniq -d | tr '\n' ' ')
     check "one API revision of each variant is carried" "${dupes:-none}" "none"
 
-    # And the half that pruning can get wrong. iwlwifi asks for revisions from its
-    # UCODE_API_MAX downwards, so a blob numbered above every MAX this kernel defines is
-    # one it will never open -- and keeping only that one puts the card back to having no
+    # And the half that pruning can get wrong. iwlwifi asks for revisions from its family's
+    # UCODE_API_MAX downwards to that family's _MIN, so a blob outside that window is one
+    # the card will never open -- and keeping only that one puts it back to having no
     # firmware, on an image whose firmware directory is visibly not empty. The code that
-    # changes when this fails is install_wifi_firmware: keep the newest revision the
-    # kernel still asks for, not the newest that exists.
+    # changes when this fails is install_wifi_firmware: keep the newest revision the kernel
+    # still asks for, not the newest that exists.
     #
-    # The bound is the highest MAX across all families rather than the one belonging to
-    # each variant, so what it catches is linux-firmware outrunning the kernel outright.
-    # A single family running ahead while another lags would pass. Pinning per family
-    # needs a variant-to-cfg table, and a hardcoded table that drifts is the failure this
-    # is trying to prevent rather than a stricter version of it.
+    # This was written against the highest MAX in the whole tree, which is a bound that
+    # cannot see the failure worth catching. The AX210 family accepts 89 and the 8000s
+    # accept up to 36, so an `iwlwifi-8265-37.ucode` appearing in linux-firmware would sit
+    # far below the global maximum, pass, and be the only 8265 file shipped -- an 8265 with
+    # no firmware, reported as fine.
+    #
+    # The mapping is derived, not written down. Each family declares its filename prefix as
+    # <TOKEN>_FW_PRE, its window as <TOKEN>_UCODE_API_MAX/_MIN, and then ties the two
+    # together itself:
+    #
+    #   MODULE_FIRMWARE(IWL3160_MODULE_FIRMWARE(IWL7260_UCODE_API_MAX));
+    #
+    # which is the kernel saying that the 3160's files are requested in the 7260's window --
+    # a fact no table assembled by hand would have got right, and the same shape as the 3165
+    # asking for 7265D files.
     if [ -z "${KCFG}" ]; then
         skipped "revisions are ones this kernel asks for" "no kernel source under ${OUTPUT}/build"
     else
-        api_max=$(grep -h 'UCODE_API_MAX' "${KCFG}"/*.c 2>/dev/null | grep -oE '[0-9]+$' | sort -n | tail -1)
-        too_new=$(for f in "${GOT}"/iwlwifi-*.ucode; do
-                      r=$(basename "${f}" | sed -n 's/.*-\([0-9]\+\)\.ucode$/\1/p')
-                      [ -n "${r}" ] && [ "${r}" -gt "${api_max:-0}" ] && basename "${f}"
-                  done | tr '\n' ' ')
-        check "no blob is numbered above any API this kernel asks for (max ${api_max:-?})" \
-              "${too_new:-none}" "none"
+        declare -A FW_PRE_OF=() PRE_FILE_OF=() API_MAX_OF=() API_MIN_OF=() \
+                   FILE_APIS=() RANGE_OF=()
+
+        # Which token declares which filename prefix, and in which file -- the file
+        # matters, for the reason the intersection below explains.
+        while IFS=: read -r file token value; do
+            [ -n "${token}" ] || continue
+            FW_PRE_OF["${token}"]="${value}"
+            PRE_FILE_OF["${value}"]="${file}"
+        done < <(grep -HE '^#define[[:space:]]+[A-Za-z0-9_]+_FW_PRE[[:space:]]+"' "${KCFG}"/*.c 2>/dev/null \
+                 | sed -E 's|^([^:]+):#define[[:space:]]+([A-Za-z0-9_]+)_FW_PRE[[:space:]]+"([^"]+)".*|\1:\2:\3|')
+
+        while IFS=: read -r file token value; do
+            [ -n "${token}" ] || continue
+            API_MAX_OF["${token}"]="${value}"
+            FILE_APIS["${file}"]="${FILE_APIS[${file}]:-}${token} "
+        done < <(grep -HE '^#define[[:space:]]+[A-Za-z0-9_]+_UCODE_API_MAX[[:space:]]+[0-9]+' "${KCFG}"/*.c 2>/dev/null \
+                 | sed -E 's|^([^:]+):#define[[:space:]]+([A-Za-z0-9_]+)_UCODE_API_MAX[[:space:]]+([0-9]+).*|\1:\2:\3|')
+
+        while IFS=: read -r file token value; do
+            [ -n "${token}" ] && API_MIN_OF["${token}"]="${value}"
+        done < <(grep -HE '^#define[[:space:]]+[A-Za-z0-9_]+_UCODE_API_MIN[[:space:]]+[0-9]+' "${KCFG}"/*.c 2>/dev/null \
+                 | sed -E 's|^([^:]+):#define[[:space:]]+([A-Za-z0-9_]+)_UCODE_API_MIN[[:space:]]+([0-9]+).*|\1:\2:\3|')
+
+        # The join, and how much of the window it is entitled to enforce.
+        #
+        # `iwl_get_ucode_api_versions()` builds the window a device actually asks for from
+        # **two** declarations: the MAC family's and the RF module's, intersected, with
+        # fallbacks when they do not overlap. Which of the two a firmware prefix is declared
+        # beside decides how much this test can say about it, and the kernel's own file
+        # layout is what separates them:
+        #
+        #   7000.c, 8000.c, 9000.c, 22000.c   declare a prefix and the family window it
+        #                                     belongs to. Self-contained -- enforce both ends.
+        #
+        #   rf-hr.c, rf-jf.c, rf-gf.c         declare a prefix beside the *RF* window only.
+        #                                     The MAC half is in a struct this cannot read.
+        #
+        # That second case is not academic. `IWL_QU_B_HR_B_FW_PRE` sits in rf-hr.c whose
+        # window is 100..100, while a Qu's MAC family is 22000 at 77..77 -- so the device
+        # asks for 77, which is exactly what linux-firmware ships. The first version of this
+        # check enforced the RF window on its own and reported three perfectly good blobs as
+        # sixteen revisions too old.
+        #
+        # What is still sound for those is the **upper** bound: the effective maximum is
+        # min(MAC, RF), so it can never exceed the RF's. A blob above it is one no device
+        # can request whatever its MAC says. The lower bound is not knowable here, and is
+        # not guessed at.
+        note_family() {
+            local pre="$1" api="$2" file="$3"
+            [ -n "${pre}" ] || return 0
+            [ -n "${API_MAX_OF[${api}]:-}" ] || return 0
+            case "$(basename "${file}")" in
+                rf-*) RANGE_OF["${pre}"]="0 ${API_MAX_OF[${api}]} upper" ;;
+                *)    RANGE_OF["${pre}"]="${API_MIN_OF[${api}]:-0} ${API_MAX_OF[${api}]} full" ;;
+            esac
+        }
+
+        # `${call%_FW}` covers the families whose macro is spelled
+        # <TOKEN>_FW_MODULE_FIRMWARE against a <TOKEN>_FW_PRE define.
+        while IFS=: read -r file call api; do
+            pre="${FW_PRE_OF[${call}]:-}"
+            [ -n "${pre}" ] || pre="${FW_PRE_OF[${call%_FW}]:-}"
+            note_family "${pre}" "${api}" "${file}"
+        done < <(grep -HE '^MODULE_FIRMWARE\([A-Za-z0-9_]+_MODULE_FIRMWARE\([A-Za-z0-9_]+_UCODE_API_MAX\)\)' "${KCFG}"/*.c 2>/dev/null \
+                 | sed -E 's|^([^:]+):MODULE_FIRMWARE\(([A-Za-z0-9_]+)_MODULE_FIRMWARE\(([A-Za-z0-9_]+)_UCODE_API_MAX\)\).*|\1:\2:\3|')
+
+        # The AX210-era parts advertise firmware *and* their platform NVM through a second
+        # macro, so a reader that knows only MODULE_FIRMWARE misses them entirely -- which
+        # is how so-a0-gf-a0 and ty-a0-gf-a0 came to be checked against nothing but the
+        # whole-tree maximum.
+        while IFS=: read -r file token api; do
+            note_family "${FW_PRE_OF[${token%_FW_PRE}]:-}" "${api}" "${file}"
+        done < <(grep -HE '^IWL_FW_AND_PNVM\([A-Za-z0-9_]+,[[:space:]]*[A-Za-z0-9_]+_UCODE_API_MAX\)' "${KCFG}"/*.c 2>/dev/null \
+                 | sed -E 's|^([^:]+):IWL_FW_AND_PNVM\(([A-Za-z0-9_]+),[[:space:]]*([A-Za-z0-9_]+)_UCODE_API_MAX\).*|\1:\2:\3|')
+
+        assert "the kernel's own family-to-API mapping was derived (${#RANGE_OF[@]} families)" \
+               "[ '${#RANGE_OF[@]}' -gt 10 ]" \
+               "the parse found almost nothing, so every variant would fall through to the weak check and this stage would go quiet"
+
+        # The parse has to still cover the families this image actually carries, or it
+        # degrades to the old global bound without anybody noticing. Named ones, because a
+        # count cannot tell which family stopped resolving.
+        unmapped=""
+        for want in iwlwifi-7260 iwlwifi-3160 iwlwifi-7265 iwlwifi-7265D iwlwifi-3168 \
+                    iwlwifi-8000C iwlwifi-8265 iwlwifi-cc-a0 \
+                    iwlwifi-9000-pu-b0-jf-b0 iwlwifi-9260-th-b0-jf-b0 \
+                    iwlwifi-Qu-b0-hr-b0 iwlwifi-Qu-c0-hr-b0 iwlwifi-QuZ-a0-hr-b0 \
+                    iwlwifi-Qu-b0-jf-b0 iwlwifi-Qu-c0-jf-b0 iwlwifi-QuZ-a0-jf-b0 \
+                    iwlwifi-so-a0-jf-b0; do
+            [ -n "${RANGE_OF[${want}]:-}" ] || unmapped="${unmapped} ${want}"
+        done
+        check "every family this image carries resolved to its own window" "${unmapped:-none}" "none"
+
+        # A window for the variants the kernel names at runtime rather than declaring: the
+        # AX210 and later parts build `iwlwifi-<mac>-<step>-<rf>-<step>` from hardware IDs
+        # in iwl_drv_get_fwname_pre(), so no static prefix exists to join against. They fall
+        # back to the whole-tree maximum, and the stage says which ones did rather than
+        # letting a weaker check look like the strong one.
+        global_max=$(grep -h 'UCODE_API_MAX' "${KCFG}"/*.c 2>/dev/null | grep -oE '[0-9]+$' | sort -n | tail -1)
+
+        out_of_range=""
+        fell_back=""
+        upper_only=""
+        for f in "${GOT}"/iwlwifi-*.ucode; do
+            [ -e "${f}" ] || continue
+            base=$(basename "${f}")
+            rev="${base##*-}"; rev="${rev%.ucode}"
+            case "${rev}" in ''|*[!0-9]*) continue ;; esac
+            variant="${base%-*}"
+
+            if [ -z "${RANGE_OF[${variant}]:-}" ]; then
+                fell_back="${fell_back} ${variant}"
+                [ "${rev}" -gt "${global_max:-0}" ] \
+                    && out_of_range="${out_of_range} ${base}[above every API in the tree, ${global_max}]"
+                continue
+            fi
+
+            read -r fmin fmax fkind <<< "${RANGE_OF[${variant}]}"
+            if [ "${rev}" -gt "${fmax}" ]; then
+                out_of_range="${out_of_range} ${base}[this family tops out at ${fmax}, too new]"
+            elif [ "${fkind}" = "full" ] && [ "${fmin}" -gt 0 ] && [ "${rev}" -lt "${fmin}" ]; then
+                out_of_range="${out_of_range} ${base}[this family asks ${fmin}..${fmax}, too old]"
+            fi
+            [ "${fkind}" = "upper" ] && upper_only="${upper_only} ${variant}"
+        done
+
+        check "every retained revision is inside its own family's window" \
+              "${out_of_range:-none}" "none"
+
+        # And the failure it exists for, exercised rather than assumed -- a check nobody has
+        # seen fail is a check nobody knows works. This is the exact case the whole-tree
+        # bound could not see: the 8000s top out at 36 while the tree's maximum is 100, so a
+        # revision 37 appearing in linux-firmware would be kept as the newest 8265 file,
+        # never requested by any 8265, and sail past a global comparison.
+        read -r _ eight_max _ <<< "${RANGE_OF[iwlwifi-8265]:-0 0 full}"
+        assert "a revision above the 8265's own maximum would be caught (${eight_max})" \
+               "[ '${eight_max}' -gt 0 ] && [ 37 -gt '${eight_max}' ]" \
+               "either the 8265 window stopped resolving, or this kernel moved and the example needs rechoosing"
+        assert "while the one actually shipped is not" \
+               "[ 36 -le '${eight_max}' ]"
+
+        # What each variant was actually held to, because a check that covers two thirds of
+        # a set and prints one green line reads as covering all of it.
+        if [ -n "${upper_only}" ]; then
+            printf '  %-6s %s\n' "info" \
+                   "upper bound only, the MAC half of their window being in a struct rather than a define:$(printf '%s' "${upper_only}" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+        fi
+        if [ -n "${fell_back}" ]; then
+            printf '  %-6s %s\n' "info" \
+                   "checked against the whole-tree maximum only, the kernel naming these at probe time:$(printf '%s' "${fell_back}" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+        fi
     fi
 
     # The families themselves. 6E is the one that is easy to leave out and the one an
@@ -370,6 +525,21 @@ else
            "set BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_6E; without it those laptops have no wlan0"
     assert "and the PNVM those parts need" "ls '${GOT}'/*.pnvm >/dev/null 2>&1" \
            "not a .ucode, so a glob written for ucode alone drops it and the card associates with nothing"
+
+    # The older families, which are most of the second-hand and mini-PC hardware this gets
+    # installed on. 7265D is the entry worth asserting by name: a 3165 does not ask for a
+    # file called 3165 -- iwl3165_2ac_cfg sets .fw_name_pre = IWL7265D_FW_PRE -- so the
+    # card is covered by this symbol and by nothing else, and the mapping is invisible in
+    # both the filename and the Buildroot symbol.
+    assert "the 7000 series is covered (7260, 7265)" \
+           "ls '${GOT}'/iwlwifi-7260-*.ucode >/dev/null 2>&1 && ls '${GOT}'/iwlwifi-7265-*.ucode >/dev/null 2>&1" \
+           "set BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_7260 and _7265; a Haswell or Broadwell machine has no wlan0 without them"
+    assert "and 7265D, which is what a 3165 actually asks for" \
+           "ls '${GOT}'/iwlwifi-7265D-*.ucode >/dev/null 2>&1" \
+           "set BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_7265D; the 3165 is covered by this file and by nothing named 3165"
+    assert "the 8000 series is covered (8260, 8265)" \
+           "ls '${GOT}'/iwlwifi-8000C-*.ucode >/dev/null 2>&1 && ls '${GOT}'/iwlwifi-8265-*.ucode >/dev/null 2>&1" \
+           "set BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_8000C and _8265; the 8260 is 8000C, which is not a name anybody would guess"
 
     # Both files or neither: the signature is what the kernel checks the database by.
     assert "the regulatory database is carried whole" \
@@ -393,7 +563,7 @@ stage "stage 0b — the version stamp"
 # boot entry said something else. The test has to follow the same order the build does.
 stage_os_release >/dev/null
 assert "an os-release is written" "[ -s '${WORK}/os-release' ]"
-check "it carries the PlexOS version rather than Buildroot's" \
+check "it carries the MediaLith version rather than Buildroot's" \
       "$(sed -n 's/^VERSION_ID=//p' "${WORK}/os-release")" \
       "${PLEXOS_VERSION}"
 assert "and the same file reaches the image tree" \
@@ -401,6 +571,27 @@ assert "and the same file reaches the image tree" \
 check "with the same version in it" \
       "$(sed -n 's/^VERSION_ID=//p' "${MOCK}/target/usr/lib/os-release")" \
       "${PLEXOS_VERSION}"
+
+# The product name, which is what a person reads: the console header, the boot menu, and
+# the vendor string Plex reports to its clients.
+check "the product names itself MediaLith" \
+      "$(sed -n 's/^NAME=//p' "${WORK}/os-release" | tr -d '\"')" \
+      "MediaLith"
+check "and says so with its version" \
+      "$(sed -n 's/^PRETTY_NAME=//p' "${WORK}/os-release" | tr -d '\"')" \
+      "MediaLith ${PLEXOS_VERSION}"
+
+# And the two that did NOT change, asserted so that a later tidy-up cannot quietly take
+# them. SORT_KEY is what systemd-boot groups entries by: an ESP holding one UKI keyed
+# `plexos` and another keyed `medialith` is two groups, and how the bootloader orders
+# between groups is not established here. ID has no consumer at all, so changing it buys
+# nothing and risks the same surprise.
+check "the boot sort key is still the legacy one" \
+      "$(sed -n 's/^SORT_KEY=//p' "${WORK}/os-release")" \
+      "plexos"
+check "and so is the os-release ID" \
+      "$(sed -n 's/^ID=//p' "${WORK}/os-release")" \
+      "plexos"
 
 # The stamp is not cosmetic any more. It is the manifest's anti-rollback sequence
 # (ADR-0006) and the string systemd-boot orders entries by, so an image built without one
@@ -550,6 +741,388 @@ else
     start4=$(partition_start 4)
     empty=$(od -An -tx1 -j$(( start4 * 512 )) -N16 "${IMAGE}" | tr -d ' ')
     check "slot B is left empty" "${empty}" "00000000000000000000000000000000"
+fi
+
+# --------------------------------------------------------------------------
+stage "stage 7 — every shipped kernel module is one something loads"
+#
+# CONFIG_MODULES=y exists for exactly one reason: NVIDIA's open kernel modules are
+# out-of-tree and cannot be built in. Everything else in this image is `=y`, and there is
+# no udev, no kmod and no modprobe -- so a `.ko` that arrives for any other reason is a
+# feature that is silently gone. It compiles, it installs, it passes every test, and the
+# thing it does never happens on a machine.
+#
+# That is not hypothetical. Turning MODULES on handed kconfig a third answer for every
+# tristate symbol and it took it eleven times: `efivarfs` was caught and pinned, and the
+# other eight modules shipped for a further release. One of them was
+# `x86_pkg_temp_thermal`, which publishes the only thermal zone that reports the processor
+# die -- so the activity card fell back to a chassis sensor and reported a real temperature
+# of the wrong thing, with nothing failing and nothing logged.
+#
+# The allow-list is not a list. It is `plexos_init::nvidia::MODULES` -- the names PID 1
+# actually passes to `finit_module` -- read out of the source. A hand-kept list would be a
+# second place to update and therefore a place to forget; taking it from the loader makes
+# "shipped but never loaded" impossible to express rather than merely tested for.
+NVIDIA_RS="${BOARD_DIR}/../../../../crates/plexos-init/src/nvidia.rs"
+MODULES_DIR="${OUTPUT}/target/usr/lib/modules"
+
+# Is the driver that needs modules actually in this build? Read from the *effective*
+# Buildroot config where there is one, because that is what the build used; the defconfig
+# is the fallback for a tree that has not been configured yet.
+BR_CONFIG="${OUTPUT}/.config"
+[ -r "${BR_CONFIG}" ] || BR_CONFIG="${BOARD_DIR}/../../../configs/plexos_x86_64_defconfig"
+NVIDIA_WANTED=0
+grep -q '^BR2_PACKAGE_PLEXOS_NVIDIA=y' "${BR_CONFIG}" 2>/dev/null && NVIDIA_WANTED=1
+
+# The audit itself, as a function, for one reason: the interesting case is a modules
+# directory that is not there at all, and the only honest way to test that is to call this
+# with a path that does not exist. Leaving it inline meant the absent case could only be
+# reached by breaking a real build, so it was never exercised -- and what it did was skip
+# the whole stage, silently, including on a build where NVIDIA is enabled and every
+# expected module is therefore missing. A skip reads as a pass.
+#
+#   $1  the modules directory to audit
+#   $2  1 if BR2_PACKAGE_PLEXOS_NVIDIA is enabled for this build
+#
+# Prints one line per problem and returns non-zero if there were any.
+module_audit() {
+    local dir="$1" nvidia="$2" problems="" module
+    local loaded shipped
+
+    loaded=$(awk '/pub const MODULES/,/;/' "${NVIDIA_RS}" \
+             | grep -oE '"[a-z0-9_-]+"' | tr -d '"' | sort -u)
+
+    if [ ! -d "${dir}" ]; then
+        # No directory is the correct and expected state for an Intel-only image: nothing
+        # is out of tree, so nothing needs a loader. It is a defect only when something is
+        # supposed to be in there.
+        if [ "${nvidia}" = "1" ]; then
+            printf 'no modules directory at %s, but BR2_PACKAGE_PLEXOS_NVIDIA is enabled: %s\n' \
+                   "${dir}" "$(printf '%s' "${loaded}" | tr '\n' ' ')is what plexos-init will try to load"
+            return 1
+        fi
+        return 0
+    fi
+
+    shipped=$(find "${dir}" -name '*.ko' -printf '%f\n' 2>/dev/null | sed 's/\.ko$//' | sort -u)
+
+    # Every shipped module must be one the loader names.
+    for module in ${shipped}; do
+        printf '%s\n' "${loaded}" | grep -qx "${module}" \
+            || problems="${problems}ships but nothing loads it: ${module}"$'\n'
+    done
+
+    # And the other direction, which only matters when the package that provides them is in.
+    if [ "${nvidia}" = "1" ]; then
+        for module in ${loaded}; do
+            printf '%s\n' "${shipped}" | grep -qx "${module}" \
+                || problems="${problems}the loader names it and it is not shipped: ${module}"$'\n'
+        done
+    fi
+
+    [ -z "${problems}" ] && return 0
+    printf '%s' "${problems}"
+    return 1
+}
+
+if [ ! -r "${NVIDIA_RS}" ]; then
+    skipped "the whole stage" "needs ${NVIDIA_RS} to read the loader's own module list"
+else
+    # The names between the brackets of `pub const MODULES: [&str; N] = [...]`, one per
+    # line. Parsed rather than duplicated, for the reason in the comment above.
+    #
+    # awk's range and not sed's: sed looks for the closing pattern from the *next* line, so
+    # a declaration that opens and closes on one line runs on to the next `];` in the file
+    # and sweeps up every quoted string in between. That is not a hypothetical either --
+    # this stage was written with sed and reported ten modules missing, with names like
+    # `blkext` and `vendor` taken from unrelated code further down.
+    LOADED=$(awk '/pub const MODULES/,/;/' "${NVIDIA_RS}" \
+             | grep -oE '"[a-z0-9_-]+"' | tr -d '"' | sort -u)
+    assert "the loader's module list can be read" "[ -n '${LOADED}' ]" \
+           "pub const MODULES in nvidia.rs did not parse; this stage cannot check anything without it"
+
+    # And that it was read *whole*. The declaration states its own length, so comparing the
+    # count against it turns a parser that quietly matched too much or too little into a
+    # failed build -- which is the mistake this stage has already made once.
+    DECLARED=$(grep -oE 'pub const MODULES: \[&str; [0-9]+\]' "${NVIDIA_RS}" \
+               | grep -oE '[0-9]+')
+    check "the list is read whole, against the length it declares" \
+          "$(printf '%s\n' "${LOADED}" | grep -c .)" "${DECLARED:-?}"
+
+    printf '  %-6s %s\n' "info" \
+           "BR2_PACKAGE_PLEXOS_NVIDIA is $([ "${NVIDIA_WANTED}" = 1 ] && echo enabled || echo 'not set'), per ${BR_CONFIG##*/}"
+
+    # The real audit. Its output is the list of problems, so the failure names them.
+    audit_problems="$(module_audit "${MODULES_DIR}" "${NVIDIA_WANTED}")" && audit_ok=1 || audit_ok=0
+    if [ "${audit_ok}" = "1" ]; then
+        ok "every shipped module is one the loader names, and nothing is missing"
+    else
+        bad "the shipped module set does not match the loader's" \
+            "$(printf '%s' "${audit_problems}" | tr '\n' ';') -- pin an unexpected module's CONFIG_* to =y in linux.fragment (or =n if MediaLith does not want it); a missing one means the plexos-nvidia package did not build"
+    fi
+
+    # The edge case this stage used to get wrong, exercised rather than reasoned about.
+    #
+    # A build with NVIDIA enabled and no modules directory at all is the worst version of
+    # this failure: plexos-init calls finit_module on four paths that do not exist, an RTX
+    # machine comes up with no NVDEC, and the old code answered by skipping the stage --
+    # which prints "skip" and counts as not-failed. Both directions are checked, because a
+    # rule that fails an Intel-only image would be its own defect.
+    absent="${TMP}/no-such-modules-dir"
+    rm -rf "${absent}"
+    assert "a missing modules directory FAILS when NVIDIA is enabled" \
+           "! module_audit '${absent}' 1 >/dev/null" \
+           "this is the case the stage used to skip; a skip reads as a pass"
+    assert "and is accepted when NVIDIA is not" \
+           "module_audit '${absent}' 0 >/dev/null" \
+           "an Intel-only image ships no modules at all and that is correct, not a fault"
+
+    # Named on its own because it is the one that was actually wrong, and because a
+    # regression here is invisible: the page keeps showing a temperature.
+    assert "the processor die thermal driver is built in, not shipped as a module" \
+           "! find '${MODULES_DIR}' -name 'x86_pkg_temp_thermal.ko' 2>/dev/null | grep -q ." \
+           "CONFIG_X86_PKG_TEMP_THERMAL went back to =m: nothing loads it, the x86_pkg_temp zone never appears, and metrics falls back to acpitz -- a chassis sensor reported as the processor"
+fi
+
+# --------------------------------------------------------------------------
+stage "stage 7b — the kernel config contract"
+#
+# Read from the *effective* .config the kernel was built with, not from
+# linux.fragment. A fragment states a request; kconfig decides, and it drops an option
+# whose dependency is unmet **without erroring** -- the trap that cost this project four
+# months of an unreadable console, and again the reason three USB Ethernet drivers were
+# absent from .config without ever appearing as refused.
+#
+# Only options whose absence loses something a person would notice, each with what it
+# loses. A list of every symbol MediaLith sets would be linux.fragment written twice, and
+# the second copy is the one that goes stale.
+KCONFIG="$(ls -d "${OUTPUT}"/build/linux-*/.config 2>/dev/null | head -1)"
+if [ -z "${KCONFIG}" ] || [ ! -r "${KCONFIG}" ]; then
+    skipped "the whole stage" "no built kernel .config under ${OUTPUT}/build/linux-*"
+else
+    builtin_or_bad() {
+        local symbol="$1" loses="$2" got
+        got=$(grep -E "^(CONFIG_${symbol}=|# CONFIG_${symbol} is not set)" "${KCONFIG}" \
+              || printf '(absent from .config)')
+        if [ "${got}" = "CONFIG_${symbol}=y" ]; then
+            ok "CONFIG_${symbol}=y"
+        else
+            bad "CONFIG_${symbol}=y" "got '${got}' -- ${loses}"
+        fi
+    }
+
+    # Storage. Anything on this path that is not built in is a kernel that cannot reach
+    # its own root, and there is no initramfs module to rescue it.
+    builtin_or_bad BLK_DEV_NVME "no NVMe disk at all"
+    builtin_or_bad SATA_AHCI    "no SATA disk at all"
+    builtin_or_bad VMD          "NVMe behind Intel VMD/RST disappears entirely: no slow disk and no degraded disk, no disk, on a machine whose firmware lists the drive by model"
+
+    # Network. The appliance brings links up during boot; a driver that is not there when
+    # plexosd looks is an appliance with no address and a page nobody can reach.
+    builtin_or_bad USB_RTL8152           "no Realtek USB Ethernet -- the reference laptop's only wired link"
+    builtin_or_bad USB_USBNET            "the framework the three below sit on; without it they vanish from .config entirely rather than being refused"
+    builtin_or_bad USB_NET_AX88179_178A  "no ASIX USB Ethernet, which is most USB 3 gigabit adapters sold"
+    builtin_or_bad USB_NET_CDCETHER      "no CDC Ethernet, which is what docks and tethered phones speak"
+    builtin_or_bad USB_NET_CDC_NCM       "no CDC NCM, the successor most current CDC devices actually use"
+
+    # Virtual machines. A virtio disk that became a module is a guest that does not boot.
+    builtin_or_bad VIRTIO_PCI  "no virtio devices are discovered at all"
+    builtin_or_bad VIRTIO_BLK  "no virtio-blk disk -- the default in plain QEMU invocations"
+    builtin_or_bad SCSI_VIRTIO "no virtio-scsi disk -- the default in Proxmox"
+    builtin_or_bad VIRTIO_NET  "no network in a VM"
+
+    # Features whose absence is silent, which is what makes them worth asserting.
+    builtin_or_bad CIFS "plexosd::shares mounts smb3 and the kernel has never heard of it, so every SMB mount fails with ENODEV on an appliance whose console offers an SMB form"
+    builtin_or_bad X86_PKG_TEMP_THERMAL "no x86_pkg_temp zone, so metrics falls back to acpitz -- a chassis sensor reported as the processor die, with nothing failing and nothing logged"
+    builtin_or_bad EFIVAR_FS "PID 1 cannot read LoaderDevicePartUUID, so a machine with two MediaLith disks goes back to resolving partitions by label, which is a coin toss"
+
+    # The filesystems a library actually arrives on. Each of these is a tristate, and
+    # CONFIG_MODULES is on -- so kconfig has a third answer available for every one of
+    # them, and =m here is a filesystem that is silently gone in an image with no
+    # modprobe. That is the eleven-options-became-=m trap, pointed at the feature a
+    # person notices immediately.
+    builtin_or_bad NTFS3_FS "the Windows partition on the internal disk cannot be opened at all, which is where the library is on any machine MediaLith is booted from a stick beside"
+    builtin_or_bad EXFAT_FS "no exFAT, which is how Windows formats every USB drive above 32 GB"
+    builtin_or_bad EXT4_FS  "no ext4, so a drive formatted on a Linux machine cannot be read"
+    builtin_or_bad MSDOS_PARTITION "a USB drive with an MBR partition table enumerates as a whole disk with no partitions on it -- so the library is invisible on a disk the machine can see. It is default y and nothing in linux.fragment asks for it, which is exactly why it is asserted here rather than assumed"
+
+    # And the wireless driver, which is why the firmware stage above has anything to do.
+    builtin_or_bad IWLWIFI "no Intel wireless"
+    builtin_or_bad IWLMVM  "no Intel wireless on anything from the 7000 series onwards, which is all of it here"
+fi
+
+stage "stage 8 — the CPU baseline contract"
+#
+# MediaLith targets generic x86-64. That is a product decision, and it is one that is
+# very easy to undo by accident: `BR2_x86_corei7` sat in the defconfig for the whole
+# life of the project without anybody choosing it, and what it bought was a userspace
+# that dies of SIGILL on any processor below Nehalem — *after* the kernel has booted
+# and after PID 1 has run, so the machine looks like it got much further than it did.
+#
+# Nothing in the image needs anything above the baseline: the workspace's own binaries
+# are built for x86_64-unknown-linux-gnu with no -C target-cpu, and Plex carries its
+# own musl runtime and dispatches on CPUID. So the floor can only ever come back by
+# mistake, and this is where the mistake is caught — at the configuration decision,
+# not on somebody's Core 2.
+BRCONFIG="${OUTPUT}/.config"
+if [ ! -r "${BRCONFIG}" ]; then
+    skipped "the effective Buildroot config" "no .config at ${BRCONFIG}"
+else
+    check "BR2_GCC_TARGET_ARCH is generic x86-64" \
+          "$(grep -E '^BR2_GCC_TARGET_ARCH=' "${BRCONFIG}" || echo '(absent)')" \
+          'BR2_GCC_TARGET_ARCH="x86-64"'
+    assert "BR2_x86_x86_64=y is the selected variant" \
+           "grep -qx 'BR2_x86_x86_64=y' '${BRCONFIG}'" \
+           "the generic x86-64 architecture variant is not selected"
+
+    # Every variant above the baseline, by the feature symbols they select rather than
+    # by name. A list of CPU names would need extending every time Buildroot adds a
+    # part; these four are what the baseline is *defined* by not having, so a variant
+    # nobody has heard of yet still trips this.
+    for sym in SSE3 SSSE3 SSE4 SSE42 AVX AVX2 AVX512; do
+        assert "BR2_X86_CPU_HAS_${sym} is not set" \
+               "! grep -qx 'BR2_X86_CPU_HAS_${sym}=y' '${BRCONFIG}'" \
+               "something selected a CPU variant above the x86-64 baseline; \
+grep '^BR2_x86_.*=y' ${BRCONFIG} to see which"
+    done
+fi
+
+# And what the compiler was actually configured with, which is the half the defconfig
+# cannot promise. BR2_GCC_TARGET_ARCH reaches gcc as --with-arch=, baked in as the
+# default -march for every target compilation, so this is the artefact rather than the
+# request — the same distinction stage 7b draws for the kernel.
+CROSS_GCC="$(ls "${BR_HOST}"/bin/*-linux-gnu*-gcc 2>/dev/null | head -1)"
+if [ -z "${CROSS_GCC}" ] || [ ! -x "${CROSS_GCC}" ]; then
+    skipped "the cross compiler's own --with-arch" "no cross gcc under ${BR_HOST}/bin"
+else
+    check "the cross compiler defaults to -march=x86-64" \
+          "$("${CROSS_GCC}" -v 2>&1 | grep -o -- '--with-arch=[^ ]*' | head -1)" \
+          "--with-arch=x86-64"
+fi
+
+# And the artefacts themselves — by running them, not by disassembling them.
+#
+# The obvious check is to grep a binary for instructions the baseline does not have.
+# **That check is unsound, and it was written here and failed on its first honest
+# test.** Scanning the generic busybox finds `pshufb`, `palignr` and `sha256rnds2`
+# after the toolchain was moved to -march=x86-64 — because busybox ships hand-written
+# SHA-1 and SHA-256 assembly in libbb/hash_sha*_hwaccel_x86-64.S and reaches it only
+# through `get_shaNI()`, which asks CPUID first. glibc does the same thing through
+# IFUNC. So the presence of a post-baseline instruction says nothing at all about the
+# floor: what matters is whether anything *executes* it on a processor that lacks it,
+# and only running the binary can answer that.
+#
+# qemu-user is what turns that into a test. It decodes every instruction against the
+# named model, so a binary that reaches its exit on an Opteron_G1 model has taken a
+# path containing nothing above the x86-64 baseline. Not a proof about every path —
+# a program has many — but a direct reading of the one that matters, which is startup.
+QEMU_USER="$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)"
+[ -z "${QEMU_USER}" ] && [ -x "${PLEXOS_QEMU_USER:-}" ] && QEMU_USER="${PLEXOS_QEMU_USER}"
+LOADER="${OUTPUT}/target/lib/ld-linux-x86-64.so.2"
+if [ -z "${QEMU_USER}" ]; then
+    skipped "target binaries start on a baseline CPU" \
+            "no qemu-x86_64 on this host; install qemu-user-static or set PLEXOS_QEMU_USER"
+elif [ ! -x "${LOADER}" ]; then
+    skipped "target binaries start on a baseline CPU" "no ${LOADER}"
+else
+    for entry in "busybox:bin/busybox:--help" \
+                 "curl:usr/bin/curl:--version" \
+                 "gpgv:usr/bin/gpgv:--version" \
+                 "veritysetup:usr/sbin/veritysetup:--version" \
+                 "wpa_supplicant:usr/sbin/wpa_supplicant:-v"; do
+        name="${entry%%:*}"; rest="${entry#*:}"
+        rel="${rest%%:*}"; args="${rest#*:}"
+        bin="${OUTPUT}/target/${rel}"
+        if [ ! -x "${bin}" ]; then
+            skipped "${name} starts on an Opteron_G1 CPU model" "no ${bin}"
+            continue
+        fi
+        # Opteron_G1 is the oldest AMD64 model QEMU offers: measured here to have no
+        # SSSE3, no SSE4, no POPCNT and no CMPXCHG16B. If it runs there it runs on
+        # anything that can execute the 64-bit ABI at all.
+        out="$( { timeout 90 "${QEMU_USER}" -cpu Opteron_G1 "${LOADER}" \
+                    --library-path "${OUTPUT}/target/lib:${OUTPUT}/target/usr/lib" \
+                    "${bin}" "${args}"; } 2>&1 )"
+        rc=$?
+        if [ ${rc} -eq 132 ] || grep -qi "illegal instruction" <<<"${out}"; then
+            bad "${name} starts on an Opteron_G1 CPU model" \
+                "SIGILL: something in the startup path is above the x86-64 baseline"
+        elif [ ${rc} -eq 124 ]; then
+            bad "${name} starts on an Opteron_G1 CPU model" "timed out"
+        else
+            ok "${name} starts on an Opteron_G1 CPU model"
+        fi
+    done
+fi
+
+stage "stage 9 — no package sync can recurse into an output tree"
+#
+# The three plexos-* packages are built with OVERRIDE_SRCDIR pointing at this
+# repository, so Buildroot rsyncs the whole tree into `output*/build/<pkg>/`. The
+# destination is therefore *inside* the source, and any root-level build tree the
+# exclude list forgets is copied into itself.
+#
+# That failure has no error and no bad exit status. It is a recursion: rsync keeps
+# finding more to copy, the build appears to sit on "Syncing from source dir", and the
+# disk fills. It happened here — `--exclude=output` covered the default tree and not the
+# `output-corei7` and `output-generic` trees the CPU-baseline work added, and one sync
+# took the filesystem from 20 GiB to 698 GiB before anybody looked at `df`.
+#
+# So this tests the property rather than the spelling. It pulls each package's real
+# exclusion list out of its .mk, runs an actual rsync with it over a tree containing all
+# the traps, and asks what arrived. A different but equivalent set of patterns passes; a
+# clever rewrite that stops excluding something does not.
+#
+# It also checks the other half, which is the one a blunt fix breaks: a *nested*
+# directory that merely has "output" in its name must still be copied, because excluding
+# it would silently ship a package missing a directory nobody thought to look for.
+if ! command -v rsync >/dev/null 2>&1; then
+    skipped "the whole stage" "no rsync on this host"
+else
+    SYNCSRC="${TMP}/syncsrc"
+    mkdir -p "${SYNCSRC}"/{output,output-corei7,output-generic,target,.git} \
+             "${SYNCSRC}/crates/plexos-init/src" \
+             "${SYNCSRC}/docs/output"
+    # One file in each, so an empty directory cannot be mistaken for an excluded one.
+    for d in output output-corei7 output-generic target .git crates/plexos-init/src \
+             docs/output; do
+        echo marker > "${SYNCSRC}/${d}/marker"
+    done
+    echo marker > "${SYNCSRC}/Cargo.toml"
+
+    for pkg in plexos-init plexosd plexos-gpu; do
+        mk="${BOARD_DIR}/../../../package/${pkg}/${pkg}.mk"
+        if [ ! -r "${mk}" ]; then
+            bad "${pkg}: exclusions" "no ${mk}"
+            continue
+        fi
+        # Every --exclude= token in the file. Reading the whole file rather than one
+        # variable keeps this working if the list is ever split or renamed.
+        mapfile -t excludes < <(grep -oE -- '--exclude=[^ \\]+' "${mk}")
+        if [ "${#excludes[@]}" -eq 0 ]; then
+            bad "${pkg}: exclusions" "no --exclude= patterns found in ${mk}"
+            continue
+        fi
+
+        dest="${TMP}/syncdest-${pkg}"
+        rm -rf "${dest}"; mkdir -p "${dest}"
+        rsync -a "${excludes[@]}" "${SYNCSRC}/" "${dest}" >/dev/null 2>&1
+
+        # The invariant. Each of these is a directory that must not have been copied.
+        for forbidden in output output-corei7 output-generic target .git; do
+            assert "${pkg}: does not copy /${forbidden}" \
+                   "[ ! -e '${dest}/${forbidden}' ]" \
+                   "a root-level ${forbidden} reached the package build directory; \
+with OVERRIDE_SRCDIR that is a recursion, not a wasted copy"
+        done
+        # And the two that must have been.
+        assert "${pkg}: still copies nested docs/output" \
+               "[ -e '${dest}/docs/output/marker' ]" \
+               "an unanchored exclude removed a nested directory that only shares the name"
+        assert "${pkg}: still copies the sources" \
+               "[ -e '${dest}/crates/plexos-init/src/marker' ] && [ -e '${dest}/Cargo.toml' ]" \
+               "the exclusion list removed something the package needs to build"
+    done
 fi
 
 printf '\npassed %d, failed %d, skipped %d\n' "${pass}" "${fail}" "${skip}"

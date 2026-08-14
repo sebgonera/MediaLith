@@ -1,4 +1,4 @@
-# PlexOS — x86-64 UEFI appliance target.
+# MediaLith — x86-64 UEFI appliance target.
 #
 # Every option here was resolved by actually running Buildroot's kconfig against this
 # file, not by reading option names out of the tree. That distinction earned its keep:
@@ -18,7 +18,33 @@
 #   make -C <buildroot> BR2_EXTERNAL=$(pwd) O=$(pwd)/output plexos_x86_64_defconfig
 
 BR2_x86_64=y
-BR2_x86_corei7=y
+# Generic x86-64: -march=x86-64, which permits MMX, SSE and SSE2 and nothing else.
+#
+# This was BR2_x86_corei7 from the first day of the project, and nobody chose it. What
+# it bought was a userspace the compiler could put SSE4.2, POPCNT and CMPXCHG16B
+# anywhere in, which makes Nehalem the oldest processor the image will run on — a floor
+# no component asked for. Measured rather than assumed, one component at a time:
+#
+#   kernel            arch/x86/Kconfig.cpufeatures in 6.19 requires FXSR, XMM, XMM2, LM
+#                     and the other x86-64 architectural bits, and nothing above them
+#   plexos-init,      built by host cargo for x86_64-unknown-linux-gnu with no
+#   plexosd,          -C target-cpu, whose enabled features are exactly fxsr,sse,sse2
+#   plexos-gpu
+#   Plex Media Server carries its own musl loader and 61 libraries of its own and
+#                     dispatches on CPUID; it served on an Opteron_G1 CPU model, which
+#                     has no SSSE3, no SSE4, no POPCNT and no CMPXCHG16B
+#
+# So the floor was an accident of Buildroot build policy and not a requirement of
+# anything, and it cost every pre-2009 machine for nothing. Note that corei7 is also
+# deprecated upstream: arch/Config.in.x86 says so in the symbol's own help text and
+# points at BR2_x86_nehalem. Renaming it that way would have kept the floor while
+# making it look deliberate, which is the opposite of what was wanted.
+#
+# Raising this again is a product decision, not an edit: it makes every machine below
+# the new floor die of SIGILL in the first Buildroot binary the boot executes, long
+# after the kernel and PID 1 have made the machine look healthy. post-image-test.sh
+# stage 8 and plexos_sys::cpu::REQUIRED both guard it.
+BR2_x86_x86_64=y
 
 # glibc is not a preference. Plex Media Server is a closed-source binary linked
 # against it, so musl and uClibc are not options (ADR-0002).
@@ -61,7 +87,7 @@ BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_LATEST_VERSION=y
 
 # A fragment rather than a full linux.config. Carrying thousands of lines of
-# architecture defaults obscures the handful of options PlexOS actually requires, and
+# architecture defaults obscures the handful of options MediaLith actually requires, and
 # makes every kernel bump a merge conflict. The fragment states our requirements and
 # nothing else.
 BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
@@ -146,6 +172,45 @@ BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_9XXX=y
 BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_22000=y
 BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_22260=y
 BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_6E=y
+# And everything older than the reference laptop, which is most of the second-hand and
+# mini-PC hardware an appliance like this actually gets installed on. The list above starts
+# at Wireless-AC 9560 because that is what was in the room; a Haswell or Skylake machine
+# with a 7260 or an 8265 in it came up with no wlan0 and nothing to say why.
+#
+#   7260   iwlwifi-7260-*                       Wireless-AC 7260
+#   3160   iwlwifi-3160-*                       Wireless-N 3160
+#   7265   iwlwifi-7265-*                       Wireless-AC 7265
+#   7265D  iwlwifi-7265D-*                      7265D **and 3165** -- see below
+#   3168   iwlwifi-3168-*                       Wireless-AC 3168
+#   8000C  iwlwifi-8000C-*                      Wireless-AC 8260
+#   8265   iwlwifi-8265-*                       Wireless-AC 8265
+#
+# 7265D is the entry that is not guessable and the reason this table exists twice now. A
+# 3165 does not ask for a file named after itself: `iwl3165_2ac_cfg` in the kernel's
+# cfg/7000.c sets `.fw_name_pre = IWL7265D_FW_PRE`, so the card is covered by the 7265D
+# symbol and by nothing else. Read out of the kernel source, not inferred from the number.
+#
+# Cost, measured rather than estimated: 9.6 MiB after install_wifi_firmware prunes to the
+# newest revision of each variant, taking the wireless set from 16.7 MiB to 26.3 MiB
+# against the 32 MiB bound post-image-test.sh asserts. That bound is unchanged and still
+# has room; it is charged four times over (initrd, both UKIs, every bundle), which is why
+# it is worth writing the number down rather than adding families until something fails.
+#
+# One property of these families is new here and the pruning rule now leans on it. For
+# every family previously carried, the kernel's IWL_*_UCODE_API_MIN equals its _MAX, so
+# "keep the newest" and "keep the only one it will ask for" were the same sentence. These
+# are not: 8000C and 8265 accept 22 through 36, 7265D and 3168 accept 22 through 29. Keeping
+# the newest is still right -- the driver requests _MAX and counts *down* to _MIN -- and
+# what has to hold is that the newest file shipped is not above _MAX. Checked against this
+# kernel and this linux-firmware: 7260 and 7265 and 3160 ship revision 17 only, 7265D and
+# 3168 ship 29, 8000C and 8265 ship 34 and 36 and the newest of each is exactly _MAX.
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_7260=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_3160=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_7265=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_7265D=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_3168=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_8000C=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_8265=y
 # Realtek USB Gigabit adapters (r8152). The reference laptop has no built-in Ethernet,
 # and a media server on wireless is not a serious configuration — see the note below.
 BR2_PACKAGE_LINUX_FIRMWARE_RTL_815X=y

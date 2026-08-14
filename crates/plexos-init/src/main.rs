@@ -21,12 +21,25 @@ use std::process::ExitCode;
 use plexos_init::cmdline::BootArgs;
 use plexos_init::execute::Log as _;
 use plexos_init::supervise::{self, Service};
-use plexos_init::{execute, plan, state};
+use plexos_init::{execute, plan, screen, state};
 use plexos_types::paths;
 use plexos_types::version::STATE_LAYOUT_VERSION;
 
 /// The health gate. Nothing else may declare a boot good (ADR-0005).
 const PLEXOSD: &str = "/usr/bin/plexosd";
+
+/// The terminal the log and the shell share.
+///
+/// The second one, and the first is left to the dashboard (ADR-0019). Before that existed,
+/// both of these inherited PID 1's `/dev/console` — the foreground virtual terminal — which
+/// was right while everything this machine put on a screen was a line of text.
+///
+/// A dashboard is not a line of text, and the two cannot share: a daemon's log written over
+/// a drawing wins, and the result is a designed screen with sentences through it. So they
+/// move one terminal along, where **Alt+F2** finds them and **Alt+F1** comes back. Nothing
+/// is hidden by this and nothing is harder to reach; the shell that was on the screen is
+/// still there, still with no password, exactly as it has always been.
+const LOG_AND_SHELL: &str = "/dev/tty2";
 
 /// What PID 1 keeps running, in the order it starts them.
 ///
@@ -48,17 +61,21 @@ static SERVICES: &[Service] = &[
         // the shell works. plexosd resolves those two by absolute path and no longer
         // depends on this; anything added later would walk into it again.
         env: &[("PATH", "/sbin:/usr/sbin:/bin:/usr/bin")],
+        // Its log goes here; the dashboard it runs draws on tty1 by opening that terminal
+        // itself. One process, two screens, and the one somebody is looking at stays clean.
+        tty: Some(LOG_AND_SHELL),
     },
     Service {
         name: "the console shell",
         program: "/bin/sh",
         args: &[],
         env: &[("PATH", "/sbin:/usr/sbin:/bin:/usr/bin"), ("HOME", "/root")],
+        tty: Some(LOG_AND_SHELL),
     },
 ];
 
 const USAGE: &str = "\
-plexos-init — PlexOS PID 1
+plexos-init — MediaLith PID 1
 
 USAGE:
     plexos-init [--dry-run] [--cmdline <string>] [--state-version <n>] [--force]
@@ -198,6 +215,12 @@ fn supervise_system() -> ExitCode {
     // boots, and still has a console on the screen saying so.
     log.line("supervising: the status console, then a shell on this screen");
 
+    // And then let that screen go dark. Last, because everything above may have had
+    // something to say on it and the timer is reset by output anyway; and here rather than
+    // inside the supervisor because it is one write that persists for the life of the
+    // terminal, not something to keep doing. Never fatal — see `screen::arrange`.
+    screen::arrange(&mut |line| log.line(line));
+
     // Never returns. PID 1 exiting is a kernel panic, so the only two acceptable ends for
     // this function are looping forever and `fail`.
     //
@@ -251,6 +274,30 @@ fn main() -> ExitCode {
         }
     }
 
+    // The processor, before anything is asked of it that it might not be able to do.
+    //
+    // This is placed here rather than anywhere later for one reason: every program
+    // this image runs after this point is a *Buildroot* binary, compiled by a
+    // different toolchain against a CPU baseline chosen in the defconfig. If that
+    // baseline is ever above what the machine has, the first such program dies of
+    // SIGILL — and the kernel then reports `Attempted to kill init` about a program
+    // that was perfectly fine, which is a sentence that sends whoever reads it in
+    // entirely the wrong direction. Nothing external has run yet, so this is the last
+    // moment at which a diagnostic can still be printed by something that is known to
+    // execute.
+    //
+    // It refuses nothing today: `plexos_sys::cpu::REQUIRED` is empty, because the
+    // image genuinely needs nothing above the x86-64 baseline. The summary is printed
+    // anyway, so a machine that fails for some *other* reason is still a machine whose
+    // processor is named in the log.
+    let cpu = plexos_sys::cpu::detect();
+    if let Some(refusal) = cpu.refusal() {
+        return fail(&refusal);
+    }
+    if execute::is_pid_one() || dry_run {
+        eprintln!("plexos-init: cpu: {}", cpu.summary());
+    }
+
     // /proc has to exist before the command line can be read, and mounting it is a
     // step in the plan the command line produces. The first real boot panicked here
     // with "could not read /proc/cmdline: No such file or directory". So bootstrap it
@@ -284,7 +331,7 @@ fn main() -> ExitCode {
     };
 
     // Absent on a fresh /var, and unreadable when running as an ordinary user on a
-    // machine that is not PlexOS. Both are treated as "no state yet", which is the
+    // machine that is not MediaLith. Both are treated as "no state yet", which is the
     // right answer in each case.
     let found = state_version.unwrap_or_else(|| {
         std::fs::read_to_string(paths::STATE_VERSION_FILE)

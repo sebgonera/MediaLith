@@ -1,4 +1,4 @@
-//! Definitions of every PlexOS format that outlives a single release.
+//! Definitions of every MediaLith format that outlives a single release.
 //!
 //! This crate exists because of an asymmetry: code can be rewritten in an afternoon,
 //! but a partition GUID, an update manifest schema, or a configuration key that has

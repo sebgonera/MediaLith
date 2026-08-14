@@ -2,7 +2,7 @@
 //!
 //! This crate exists to eliminate one specific failure, the one every Plex user has
 //! met: transcoding silently falls back to software, the CPU pins at 100%, playback
-//! stutters, and nothing anywhere says why. On PlexOS a GPU that cannot transcode is a
+//! stutters, and nothing anywhere says why. On MediaLith a GPU that cannot transcode is a
 //! **reported failure with a named remedy**, not a silent degradation.
 //!
 //! ```no_run

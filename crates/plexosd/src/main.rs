@@ -13,7 +13,7 @@ use std::process::ExitCode;
 use plexosd::console;
 
 const USAGE: &str = "\
-plexosd — PlexOS management daemon
+plexosd — MediaLith management daemon
 
 USAGE:
     plexosd [--check] [--esp <device>]

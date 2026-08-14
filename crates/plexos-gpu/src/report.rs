@@ -308,7 +308,7 @@ fn render_node_reachable_finding(env: &impl Environment, primary: &Gpu) -> Optio
         "Everything above this line is true and Plex will still transcode on the CPU: \
          these capabilities were probed as root, and Plex runs unprivileged. DRM leaves \
          render nodes at 0600 and every ordinary distribution relaxes them with a udev \
-         rule; PlexOS has no udev, so plexosd does it before starting Plex. Seeing this \
+         rule; MediaLith has no udev, so plexosd does it before starting Plex. Seeing this \
          means that step did not run or did not work — check the boot log for the line \
          about the render node.",
     ))
@@ -328,7 +328,7 @@ fn no_usable_gpu_finding(gpus: &[Gpu], present: &[crate::gpu::DisplayDevice]) ->
             "Graphics devices found, but none supported for hardware transcoding: {}",
             vendors.join(", ")
         ),
-        "PlexOS supports Intel iGPUs and AMD through VA-API, and NVIDIA through NVDEC \
+        "MediaLith supports Intel iGPUs and AMD through VA-API, and NVIDIA through NVDEC \
          and NVENC. A card listed here is one no driver bound to, so there is nothing to \
          probe: check that the kernel builds a driver for it.",
     )
@@ -342,7 +342,7 @@ fn firmware_findings(status: FirmwareStatus) -> Vec<Finding> {
             Severity::Warning,
             "Intel HuC firmware is not running",
             "Transcoding works and produces noticeably worse quality at a given bitrate. \
-             On PlexOS the blob has to be in the *initramfs*, not in /usr: i915 is built \
+             On MediaLith the blob has to be in the *initramfs*, not in /usr: i915 is built \
              into the kernel and fetches firmware while it probes, a second before /usr \
              is mounted, and it carries on without it rather than failing. \
              post-image.sh's install_gpu_firmware puts every GuC and HuC blob there, so \
@@ -356,7 +356,7 @@ fn firmware_findings(status: FirmwareStatus) -> Vec<Finding> {
             Severity::Warning,
             "Intel GuC firmware is not running",
             "HuC cannot be authenticated without GuC, so this takes the quality of every \
-             transcode with it. On PlexOS the blob belongs in the initramfs for the \
+             transcode with it. On MediaLith the blob belongs in the initramfs for the \
              reason given above; the debugfs file says which file i915 wanted and did \
              not find.",
         ));
@@ -368,7 +368,7 @@ fn firmware_findings(status: FirmwareStatus) -> Vec<Finding> {
     // There is no transcode test, here or anywhere in this crate, and there never has
     // been. Pointing a reader at a check that does not exist is the trap already in
     // CLAUDE.md about `could not bind :80`: a wrong remedy costs more than none,
-    // because it is followed. On PlexOS this state now means something has gone wrong
+    // because it is followed. On MediaLith this state now means something has gone wrong
     // with the mount, since plexos-init mounts debugfs before anything reads this.
     if status.huc == LoadState::Unknown && status.guc == LoadState::Unknown {
         findings.push(Finding::new(
@@ -388,8 +388,8 @@ fn firmware_findings(status: FirmwareStatus) -> Vec<Finding> {
 fn probe_failure_finding(error: &ProbeError) -> Finding {
     let remedy = match error {
         ProbeError::ToolMissing => {
-            "Install vainfo (the libva-utils package). PlexOS images include it; this \
-             usually means the probe is running on a system that is not PlexOS."
+            "Install vainfo (the libva-utils package). MediaLith images include it; this \
+             usually means the probe is running on a system that is not MediaLith."
         }
         ProbeError::DriverFailed(_) => {
             "The VA-API driver could not be loaded. On Intel, install the \
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn a_card_with_no_driver_is_not_reported_as_no_card() {
-        // Found on hardware: PlexOS was moved to a machine with an RTX card and no
+        // Found on hardware: MediaLith was moved to a machine with an RTX card and no
         // integrated graphics. No kernel driver bound, so no render node, so the report
         // said "No graphics device found" and advised enabling the integrated GPU in
         // firmware -- on a machine that has none. A remedy for the wrong machine sends

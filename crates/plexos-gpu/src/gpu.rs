@@ -53,7 +53,7 @@ impl Vendor {
 pub enum VaapiDriver {
     /// `iHD`, the Intel media driver. Skylake and newer.
     IntelMedia,
-    /// `i965`, the legacy Intel driver. Pre-Skylake, outside PlexOS's target.
+    /// `i965`, the legacy Intel driver. Pre-Skylake, outside MediaLith's target.
     IntelLegacy,
     /// `radeonsi`, via Mesa.
     RadeonSi,
@@ -98,7 +98,7 @@ impl Gpu {
     ///
     /// A starting point to be verified by probing, not a conclusion. `xe` only ever
     /// binds to hardware new enough for the Intel media driver; `i915` spans both, and
-    /// the modern driver is the right first guess for anything PlexOS targets.
+    /// the modern driver is the right first guess for anything MediaLith targets.
     #[must_use]
     pub fn preferred_driver(&self) -> VaapiDriver {
         match self.vendor {
@@ -108,7 +108,7 @@ impl Gpu {
         }
     }
 
-    /// Whether this device is one PlexOS supports for hardware transcoding.
+    /// Whether this device is one MediaLith supports for hardware transcoding.
     #[must_use]
     pub fn is_supported_target(&self) -> bool {
         matches!(self.vendor, Vendor::Intel | Vendor::Amd)
@@ -121,7 +121,7 @@ impl Gpu {
 /// Provenance is recorded per entry, because these are exactly the sort of constant
 /// that gets copied from a forum post and never checked. `confirmed` means a capture
 /// from that machine is in the repository; `documented` means it came from a vendor
-/// list and nobody has run PlexOS on one.
+/// list and nobody has run MediaLith on one.
 const KNOWN_MODELS: &[(u16, u16, &str)] = &[
     // confirmed — tools/captures/huawei-wrt-wx9.txt
     (0x8086, 0x3ea0, "Intel UHD Graphics 620 (Whiskey Lake-U)"),
@@ -249,7 +249,7 @@ pub fn discover(env: &impl Environment) -> Vec<Gpu> {
 /// Picks the device to transcode on.
 ///
 /// Intel first, then AMD. Not a claim that Intel is faster in general — it is that
-/// QuickSync on an Intel iGPU is the configuration PlexOS targets and tests, and on a
+/// QuickSync on an Intel iGPU is the configuration MediaLith targets and tests, and on a
 /// machine with both, that is the one more likely to work unattended.
 #[must_use]
 pub fn select_primary(gpus: &[Gpu]) -> Option<&Gpu> {

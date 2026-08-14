@@ -1,6 +1,6 @@
 //! Parsing the kernel command line.
 //!
-//! PlexOS gets two things from the command line that it cannot get anywhere else: which
+//! MediaLith gets two things from the command line that it cannot get anywhere else: which
 //! `/usr` slot to boot, and the dm-verity root hash to verify it against. Both live
 //! inside the signed Unified Kernel Image, so the Secure Boot signature covers them
 //! (ADR-0004) — which is precisely why they arrive this way rather than from a config
@@ -16,11 +16,21 @@ use std::fmt;
 
 use plexos_types::Slot;
 
-/// Command line key naming the slot to boot.
+/// Legacy internal namespace, retained after the MediaLith product rename.
+///
+/// These three keys still say `plexos.`, and renaming them would break the one thing this
+/// appliance must never break. The command line lives *inside the signed UKI*, so each
+/// release carries its own — including the previous release a rollback lands on, whose
+/// UKI was built when these were the names. A MediaLith `plexos-init` that only understood
+/// `medialith.slot` would boot its own image and refuse the one behind it, which is the
+/// image ADR-0005 exists to fall back to.
+///
+/// The parser is what would have to accept both for a change here to be safe, and the
+/// value of doing so is a string nobody reads unless something has already gone wrong.
 const KEY_SLOT: &str = "plexos.slot";
-/// Command line key carrying the dm-verity root hash.
+/// Command line key carrying the dm-verity root hash. Legacy namespace; see [`KEY_SLOT`].
 const KEY_ROOTHASH: &str = "plexos.roothash";
-/// Command line key requesting a debug shell instead of normal startup.
+/// Command line key requesting a debug shell instead of normal startup. Legacy namespace.
 const KEY_DEBUG_SHELL: &str = "plexos.debug_shell";
 
 /// What the kernel told us about this boot.
@@ -54,7 +64,7 @@ impl fmt::Display for CmdlineError {
         match self {
             Self::MissingSlot => write!(
                 f,
-                "kernel command line has no {KEY_SLOT}; this UKI was not built by PlexOS \
+                "kernel command line has no {KEY_SLOT}; this UKI was not built by MediaLith \
                  image tooling"
             ),
             Self::UnknownSlot(value) => write!(

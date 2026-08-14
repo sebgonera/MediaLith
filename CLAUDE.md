@@ -1,4 +1,4 @@
-# PlexOS — working notes
+# MediaLith — working notes
 
 An immutable, atomically-updated Linux appliance distribution built to run Plex Media
 Server well. Read `docs/ARCHITECTURE.md` first, then `docs/adr/` for why anything is
@@ -37,15 +37,24 @@ Everything else is cheap to revise. Prefer revising it.
 
 ## Rules for the work itself
 
-Not about PlexOS. About mistakes made *while building* it, every one of which happened
+Not about MediaLith. About mistakes made *while building* it, every one of which happened
 more than once, and none of which the "Known traps" list could have prevented because that
 list is about the system. Check against this before committing; it is short on purpose.
 
-1. **After a scripted edit, prove the edit landed.** Every `str.replace` that silently
-   matched nothing has cost something: the first-boot section shipped with its markup never
-   inserted, because the anchor `<main class="grid" id="cards">` did not exist and nothing
-   said so. `grep` for the new text, or diff, before moving on. A replacement that matched
-   nothing is not an error in any tool that will tell you.
+1. **After a scripted edit, prove the edit landed — and prove it landed nowhere else.**
+   Every `str.replace` that silently matched nothing has cost something: the first-boot
+   section shipped with its markup never inserted, because the anchor
+   `<main class="grid" id="cards">` did not exist and nothing said so. `grep` for the new
+   text, or diff, before moving on. A replacement that matched nothing is not an error in any
+   tool that will tell you.
+   The other half cost an evening too, and is worse because it *looks* like it worked. A
+   word-boundary rename over the activity card's helpers — `tile` → `metricTile` and six
+   others — also rewrote `ring.push(value)` into `ring.pushSample(value)`, five CSS class
+   names inside template literals, and five doc comments. Every one was a silent break: the
+   page still parsed, still addressed every id, and would have rendered as unstyled text.
+   **A rename is over identifiers, so a rename that also hits strings, class attributes and
+   prose was applied with the wrong tool.** Diff the whole hunk and read it, or bound the
+   replacement to declarations and call sites.
 2. **A change to `ui/console.html` is not done until the *served* page has been checked.**
    Twice in one day a page change reached the appliance broken — a duplicate `const`, which
    is a parse error that blanks every section, and a section whose markup was missing, whose
@@ -70,20 +79,74 @@ list is about the system. Check against this before committing; it is short on p
 
 ## Where things stand
 
+**The reference laptop, as of 2026-08-14 15:05.** Running `0.1.0.202608141231` on **slot b**,
+healthy, reached at `192.168.2.190` over **wireless on WPA3** (`GTFO`, 6 GHz). It boots from
+the USB-enclosed Kingston; **the internal disk was removed** after a two-disk boot mounted
+the other installation's `/usr` and failed dm-verity — see the label-ambiguity traps. Plex is
+provisioned, signed in, and has transcoded two streams.
+
+`0.1.0.202608141256` is built, signed (`plexos-signing-dev-2`, channel `stable`) and being
+served from the build host at `http://192.168.2.123:8080/medialith-update`. It is the first
+image whose kernel can read NTFS, and it carries all of ADR-0021. **That server does not
+survive the build host rebooting**, so re-serve it with
+`tools/publish-update.sh output-generic 8080` before pointing the appliance at it again.
+Root hash `0a65e5b9290617d80a2867ce41442952040dc4cae62e365660a2bed82a3cd1dc`; verified
+against the built artefacts rather than the build log — `ntfs_fs_type` and `init_ntfs_fs`
+are symbols in `vmlinux` and there is no `.ko`, and the shipped `/usr` erofs was extracted
+and its `plexosd` grepped for strings the code actually uses.
+
+**What ADR-0021 has and has not done on hardware.** The scan runs: the appliance enumerated
+every partition on both attached disks, refused the six belonging to MediaLith itself, and
+offered the one that did not. **No NTFS volume has been opened** — the only non-MediaLith
+drive to hand is a blank 1 TB WD SN560 whose single MBR partition holds no filesystem, and
+all six filesystems correctly refused it. Browsing a drive and binding a folder under
+`/var/media` are still unrun.
+
+That first scan earned its keep anyway: it found that the refusal was being computed,
+logged, and then thrown away by a page that asked again with a `GET` — see the trap about
+deriving an event from a state. `...141256` is the fix.
+
+Also from the wireless work of 2026-08-13, still unrun: switching networks from the console
+page, and the return to the previous network after a join fails.
+
+**There is no way to put films on the appliance's own disk**, and somebody asked on the
+first day the drives card existed. No SSH, no Samba, no `nfs-utils`; `curl` and `wget` are
+clients; every library mount is read-only by design. ADR-0021 assumes a drive is filled by
+the computer that owns it and then attached. Whatever changes that needs its own decision —
+a writable library is the rule ADR-0021 is built on.
+
+**A library can now live on a disk in the machine (ADR-0021), and none of it has run on
+hardware.** `CONFIG_NTFS3_FS` was never set, so until this the Windows partition of the
+machine MediaLith is booted on was an unreadable block — which is where the library is for
+anybody who is not the person who built this. `plexosd::disks` scans, mounts read-only,
+lets somebody look through the folders from the console and binds the chosen one under
+`/var/media` before Plex starts; `POST /api/plex/restart` means adding one no longer costs
+a reboot. 30 tests, and **no built image has yet carried a kernel that can open an NTFS
+volume** — the first thing to try is a scan on a machine with Windows on its internal disk.
+
+The outstanding console design work is Terminal, the responsive audit at 1920/1440/1280 and
+narrow, and a written report — Network, Plex and Storage are done. The narrow measurement
+that came out of the Storage work is worth carrying into the audit: at 390 px the page
+itself does not scroll, and the Media shares table (392 px) and the Disks table (552 px)
+are both wider than the card holding them.
+`tools/preview-console.py` renders the page against the live appliance, with canned replies
+for states it is not in; a change to `console.html` is not finished until that render has
+been looked at.
+
 | Component | State |
 | --- | --- |
-| `crates/plexos-types` | Done. Formats and the layout emitter and the GPT writer, 65 tests. The ADR-0006 manifest schema was reconciled with the artefacts PlexOS actually builds — one UKI per slot, and a `release` string `OsVersion` cannot express — which was the last moment that was an edit rather than a migration. |
+| `crates/plexos-types` | Done. Formats and the layout emitter and the GPT writer, 65 tests. The ADR-0006 manifest schema was reconciled with the artefacts MediaLith actually builds — one UKI per slot, and a `release` string `OsVersion` cannot express — which was the last moment that was an edit rather than a migration. |
 | `crates/plexos-update` | Which slot an update goes to, writing a partition and reading it back, the ADR-0006 trust chain, the anti-rollback sequence, root-signed revocation, boot-entry/slot agreement, and `plexos-sign` as the publisher's half. 65 tests. **Has updated the reference laptop four times, alternating slots — and one of those updates was deliberately unbootable and was rolled back.** All four were unsigned, through an improvised `update.json` this crate no longer parses. **Nothing signed has yet reached a machine.** |
 | `crates/plexos-gpu` | 46 tests, and it has now answered the question it was written for — on four machines, three of which it was wrong about until they were tried. On the reference laptop: UHD 620, iHD 26.1.2, VA-API 1.23, GuC and HuC both running, verdict `ready`. |
-| `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, `reboot(2)`, `sethostname(2)`, PTY allocation for the console terminal, reaping children for PID 1, and resolving partitions on a *named disk* rather than by label alone. 89 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
-| `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. The supervisor role mounts the Plex app image, then keeps the console and a shell running: it reaps orphans, restarts what dies with a widening delay, and never exits. It also asks the boot loader which disk the firmware started, so a two-disk machine mounts the right `/usr` and `/var`. 63 tests. **PID 1 stays alive on the appliance and has restarted both of its services after they were killed.** |
-| `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates, the configuration model actually applied (ADR-0008), and the terminal session (ADR-0014), the updater on the signed manifest, a supervisor that restarts Plex and swaps a newly-installed version in without a reboot, the console's own TLS identity (ADR-0014), the installer and the first-boot flow (ADR-0016). 301 tests. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
+| `crates/plexos-sys` | The kernel-interface layer, and the only crate allowed `unsafe`: verity superblock, dm ioctls, mount, exec/execve, partition labels, Landlock, privilege dropping, `reboot(2)`, `sethostname(2)`, PTY allocation for the console terminal, reaping children for PID 1, resolving partitions on a *named disk* rather than by label alone, and `statvfs(3)` — free space is the one thing this appliance reports about itself that is not readable as a file — and the CPU compatibility model, which needs no `unsafe` at all: vendor, family and features out of CPUID, judged against a requirement passed in as data so every test is deterministic on whatever host runs it. 117 tests. The boot syscalls have run on real hardware; Landlock is proven by `examples/landlock-demo` on a build host and now by Plex running under it on the appliance; privilege dropping has run, dropping to 900:900 before `execve`. |
+| `crates/plexos-init` | Plans and executes the boot, and runs as PID 1 in both roles. It also lets the attached screen go dark after five idle minutes — two escape sequences from `console_codes(4)` written once to `/dev/tty0`, which needs no package and no daemon, because `setterm` is `util-linux` and not in this image. The supervisor role mounts the Plex app image, then keeps the console and a shell running: it reaps orphans, restarts what dies with a widening delay, and never exits. It also asks the boot loader which disk the firmware started, so a two-disk machine mounts the right `/usr` and `/var`. 63 tests. **PID 1 stays alive on the appliance and has restarted both of its services after they were killed.** |
+| `crates/plexosd` | Network diagnostics on the page (ADR-0012), the health gate (now run after Plex starts, with a real loopback probe), boot-counter clearing, and the status console (ADR-0012): wired-network bring-up, a hand-written HTTP server, the page, the ADR-0013 device token and the gate that enforces it, mounting the Plex app image at boot, claiming the device at first start, provisioning Plex in the background, starting it confined, and stopping the machine cleanly from the page. Also ADR-0005's enforcement: restarting on an unhealthy boot when the entry is still being counted, recording on `/var` why a slot was given back, and clearing away the boot entries of failed updates, the configuration model actually applied (ADR-0008), and the terminal session (ADR-0014), the updater on the signed manifest, a supervisor that restarts Plex and swaps a newly-installed version in without a reboot, the console's own TLS identity (ADR-0014), the installer and the first-boot flow (ADR-0016), live Plex activity behind the device token (ADR-0018 — the Plex account token is read from `Preferences.xml` per request, sent to loopback in a header, and has no field in the browser's document it could land in), and the activity card — what the machine is doing *now*, which is the only view here about a moment rather than a state. 407 tests, of which two fail on any development host running Plex; see the trap list. **The activity card has never run on the appliance**: its numbers were produced by replaying the appliance's own captured `/proc` and `/sys` through the real code, which is one step short of the machine. **Working on the reference laptop:** the appliance brings up its own network, takes a DHCP lease, and serves the page to a browser on another machine. It took three boots and three faults to get there — bring-up ordering, `PATH`, and a missing `/tmp` — each hidden behind the one before it. |
 | `crates/plexos-plex` | Provisioning Plex from its own signed packages (ADR-0010, ADR-0007): reads the `.deb`, verifies `_gpgplex` against a pinned key, ties it to the payload, builds an erofs app image, manages the version store, mounts it with the hash checked first, bounds it with cgroup v2, and holds the confine-then-exec sequence. 104 tests. Provisioning now runs end to end **on the appliance**, driven from a browser: download, signature, manifest, build, publish, mount, confine, start. |
-| `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. |
-| `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 47 checks in `post-image-test.sh`, none skipped on a machine with the Buildroot tree. |
+| `buildroot/` | Builds. defconfig, kernel fragment, a users table for the `plex` account, and packages for `plexos-init`, `plexosd`, `plexos-gpu`, `plexos-systemd-boot` and `plexos-plex-keyring`. **The CPU target is `BR2_x86_x86_64` — generic x86-64.** It was `BR2_x86_corei7` from the first day, chosen by nobody, and it made Nehalem the oldest processor the image would run on; no component ever needed it. |
+| `post-image.sh` | All stages run, and produce an image that boots on hardware. Stage 0 applies the users table, which Buildroot itself applies too late to reach `/usr`. 130 checks in `post-image-test.sh`, one skipped on a machine with the Buildroot tree (Secure Boot signatures, when `PLEXOS_SB_KEY` is deliberately unset) — including stage 7, which asserts that **every shipped `.ko` is one `plexos_init::nvidia::MODULES` names**, stage 7b, which asserts the kernel config contract against the `.config` the kernel was actually built with rather than against the fragment that asked for it, stage 8, which asserts the CPU baseline at the configuration decision *and* by running five target binaries on an `Opteron_G1` model, and stage 9, which proves no package's source sync can recurse into a build tree by running rsync rather than by grepping for a pattern. |
 | Installer, updater, first-boot wizard | Not started. |
 
-**PlexOS is installed on the reference laptop's internal disk and boots from it.** Its own
+**MediaLith is installed on the reference laptop's internal disk and boots from it.** Its own
 installer put it there (ADR-0016); the USB stick it was installed from is still attached and
 still holds a working system, which makes it the recovery medium. Everything below that
 says "USB stick" is history rather than the present arrangement.
@@ -153,18 +216,35 @@ list that goes stale in one of them.
    screen reports otherwise. Both slots must carry signed UKIs before it is switched on, or
    ADR-0005's rollback lands on a UKI the firmware refuses.
 
-2. **`docs/PRODUCTION-READINESS.md`** — the distance between this and something that can be
+2. **A MediaLith update service that exists.** ADR-0020 built the appliance's half and the
+   publishing half, and proved both on hardware — but there is no host, no domain and no
+   published tree, so every appliance ships with `[update_service].url` empty and never
+   looks. The remaining work is not code: somewhere to put a static directory, and the
+   clock-synchronisation item below, because a machine whose RTC is wrong cannot validate
+   TLS against a real service and this deliberately does not weaken that.
+
+3. **`docs/PRODUCTION-READINESS.md`** — the distance between this and something that can be
    handed to a person who did not build it, with a revision note recording what has closed
    since it was written. Nothing in it is architectural. The items with no owner: a
    development root key with no ceremony and no way to revoke *itself*, no update channel
-   or discovery, no clock synchronisation of any kind, nothing ever writing `/var/log`, no
-   free-space check anywhere on a `/var` whose largest writer is never pruned, and no
-   ceiling on connections.
+   or discovery, no clock synchronisation of any kind, nothing ever writing `/var/log`,
+   nothing pruning `/var`'s largest writer, and no ceiling on connections.
+   Free space is half closed: `plexos_sys::fs::space` reads it and the activity card shows it
+   against a severity threshold, so a filling `/var` is now visible. **Nothing refuses on
+   it** — the update and provisioning paths still stage an ~85 MB download without asking
+   whether it fits, which is the half that turns a full partition into a failure rather than
+   a warning.
 
-3. **Run the hardware that has never been run.** `xe` has its firmware in the initrd, the
+4. **Run the hardware that has never been run.** `xe` has its firmware in the initrd, the
    `xe` debugfs layout is now read the way `xe` actually creates it, and no Arc card has
    ever been plugged in — so the claim is shipped-and-unverified rather than false, and the
    only thing that can close it is a card.
+   The same sentence now applies to the CPU baseline, and it is worth keeping honest: the
+   image is built for generic x86-64 and has booted, networked, served its console and
+   started Plex on `Opteron_G1`, `Conroe`, `Nehalem` and `Haswell` **CPU models under
+   QEMU/TCG**. No processor older than the reference laptop's Core i5-8265U has executed
+   it in silicon. Emulation is good evidence about instruction sets and no evidence at all
+   about firmware, chipsets or errata.
 
 ## Done, and proven on the machine (ADR-0016)
 
@@ -199,7 +279,7 @@ clicked through.
 it — was partitioned, written and booted: `/api/install` listed it as `EFI system
 partition, Microsoft reserved partition, Basic data partition` so there was no mistaking
 whose disk it was, all five refusals were exercised against the real machine first, and
-the install took under two minutes. The machine now boots PlexOS from its internal disk
+the install took under two minutes. The machine now boots MediaLith from its internal disk
 with an empty `/var`, which means a new device token, a new TLS key, and Plex reported as
 not provisioned — a fresh appliance, exactly as ADR-0016 intended.
 
@@ -275,6 +355,50 @@ of them.
 The root key is a development key: its private half is on the build host, and every place
 that reports a signature says so, including the appliance's own log line.
 
+**And the appliance now finds its own releases (ADR-0020).** Channels were decided by
+nobody: the manifest has carried the field since v1, `sign-bundle.sh` wrote `dev` into every
+one, and `[updates].channel` has defaulted to `stable` since the schema was written with no
+readers at all — so a machine asking for stable installed development builds without comment.
+That is the fourth complete-tested-uncalled design this project has found.
+
+An update service is now files on a web server: `channels/<channel>.json` names a release,
+`releases/<release>/` holds the artefacts once and a small signed manifest per channel beside
+them. Discovery resolves an address and nothing else — everything after it is the path that
+already existed, so the unsigned channel file can only choose which *signed* manifest gets
+evaluated.
+
+**All of it has run on the reference laptop, in one sitting**, in this order: the machine
+reported itself up to date against a feed; a newer release appeared and it **found it without
+anybody typing an address**, showing the release notes and the signing key; it installed from
+the service into the inactive slot and the gate made it permanent; a release published only to
+`dev` was invisible to the same machine set to `stable`, became visible on `beta` and then on
+`stable` as the **same bytes** were promoted (`sha256sum` identical across all three); a
+manifest edited after signing was refused; a corrupted `usr.erofs` behind a valid manifest was
+refused after the download and before any partition was written; a genuinely signed older
+release was refused by the anti-rollback counter with its signer named; and a deliberately
+broken release was installed, booted, and **undid itself** — `plexos-0.1.0.202608120253+0-3.efi`
+on the ESP, three tries offered and three used, back on the previous release in seven minutes
+with nobody at the machine and the update channel and service address still configured
+afterwards.
+
+The trap that came out of the last one is in the list below and is the one worth knowing: a
+failed update raises the anti-rollback floor before anyone knows it failed.
+
+**And the appliance is on WPA3 (2026-08-13).** `/api/wifi` reports `ssid: GTFO`,
+`frequency_mhz: 6175`, `band: 6 GHz` — a successful **SAE** association, on a Wi-Fi 7
+network the router publishes across 2.4, 5 and 6 GHz with MLO and `MFP-required`. Every
+previous attempt in this project had ended at `key mgmt mismatch`, so this is the first
+one. The reading comes from `iw dev wlan0 link`, parsed against a capture in
+`tools/captures/iw-link-wlan0.txt`, and the console shows the name, band and signal in the
+Network view and the Overview tile.
+
+Four wireless defects were fixed getting there, all found on the machine and all in the
+trap list. The one worth carrying: **asking a supplicant to stop is not the same as it
+having stopped**, so the second network of a boot could never be joined. What is still
+**unproven**: that switching networks *from the console page* now works end to end, and
+that a failed join puts the machine back on the network it was on — the repair exists and
+has tests, and nothing has yet made it run on hardware.
+
 **And nothing runs unattended any more.** `0.1.0.202607301247` — the first release
 installed through the signed path end to end — boots with `plexos-init` still alive as
 PID 1. Proved by killing things on the machine: the console shell was killed and came back
@@ -349,22 +473,68 @@ Boot must be off** — that is ADR-0004 and separate from update signing.
 
 An index, so nothing here has to be rediscovered by reading the tree.
 
+**The attached screen** — `crates/plexosd/src/dashboard/`, a thread inside `plexosd` that
+owns `/dev/tty1`. What the machine is, whether it works, and the address to point a browser
+at; **P** puts a QR code on it that signs a browser in for twelve hours. The model, the
+rendering and the QR are three modules so that every state — recovered, on trial, no
+network, pairing, expired — is a test rather than a photograph. `plexos-init` moved the log
+and the console shell to `/dev/tty2`, one **Alt+F2** away, because a log written over a
+drawing wins.
+
+**The console page** — one file, `crates/plexosd/src/ui/console.html`, embedded with
+`include_str!`. No framework, no build step, no external anything. Since the redesign it is
+an application shell rather than a long page: a sticky header (what the machine is, the
+health verdict, the address, the slot, uptime, the administrator lock, restart and shut
+down), a sidebar of seven views — Overview, Plex, Storage, Network, System, Events, and
+Terminal under Advanced — and one view showing at a time.
+
+The Overview's rail leads with **Now Playing** (ADR-0018), and the Plex view lists every
+stream in full. Both are blank and **fetch nothing** without the device token: a page that
+downloaded the titles and declined to draw them would have put them in a browser that was
+never entitled to them.
+
+Nothing navigates. Switching is `hidden` on six sections and off one, so the six polls, the
+terminal's scrollback and the typed token all survive a click; `pushState` and `popstate`
+keep the URL and the view agreeing, so `#network` is a link somebody can send and the back
+button works. The device token is behind the lock in the header rather than in a card at the
+top of the page, and **ADR-0013 is untouched by that**: same field, `sessionStorage` only,
+same `Authorization: Bearer` header. Light/Dark/System is kept in `localStorage`, because it
+is a property of the browser looking rather than of the machine being looked at.
+
+The rules the page is built around, each of which has cost a fault: nothing anybody types
+into may live inside a region a poll replaces; anything with state a person set — an open
+disclosure, a table they asked for — may not either; a failure must be shown in the section
+whose button caused it, and must open that section if it is folded; and a `GET` stays
+readable without a credential so a broken machine can still be diagnosed.
+
 **Console API** — HTTPS only, port 443; port 80 answers a 308. `GET` needs no credential,
-every `POST` needs the device token (ADR-0013), and the terminal is *all* `POST` so a root
-shell's output cannot be read without one.
+every `POST` needs an administrator credential, and the terminal is *all* `POST` so a root
+shell's output cannot be read without one. **Two credentials are accepted and no route knows
+which arrived**: the recovery device code (ADR-0013) and an administrator session issued by
+pairing at the machine's own screen (ADR-0019). `auth::authenticate` is the only thing that
+decides, and `http::refusal` is the only thing that calls it.
 
 | Route | What it is |
 | --- | --- |
 | `/api/status` | Image identity, slot, root hash, whole kernel command line, health checks, TLS fingerprint |
+| `/api/metrics` | What the machine is doing now: processor per core, memory, Plex's own cgroup, GPU clock, temperatures, free space, throughput. Rates, not since-boot totals |
+| `/api/metrics/processes` | What is running. **A `POST`**, so the method-based gate applies: a process list with command lines is not something every reader on the LAN should have |
+| `/api/plex/sessions` | What Plex is playing now: who, on what, and what is happening to the picture and the sound (ADR-0018). **A `POST`** for the same reason and a stronger one — a title, a username and a device name are what somebody in the house is doing this evening |
 | `/api/setup` | The first-boot flow: ordered steps, computed not stored (ADR-0016) |
-| `/api/install` | Disks, refusals, and installing PlexOS onto one (ADR-0016) |
-| `/api/update` | Check and install a signed update; gate verdict; rollback record (ADR-0005/0006) |
+| `/api/install` | Disks, refusals, and installing MediaLith onto one (ADR-0016) |
+| `/api/update` | Check and install a signed update; gate verdict; rollback record (ADR-0005/0006). A body with no `source` means "the release the update service offered" |
+| `/api/update/check` | Ask the configured update service what it has, and install nothing (ADR-0020) |
 | `/api/provision` | Install Plex from Plex's own packages (ADR-0010) |
 | `/api/config`, `/api/network` | Hostname, timezone, static addressing (ADR-0008) |
 | `/api/shares` | Network shares the library lives on |
+| `/api/disks` | A library on a disk in this machine (ADR-0021). `GET` is the inventory and discloses no more than `/api/install`; **scan, browse, add, remove and release are `POST`s** — the folder names on somebody's Windows disk are the same class of thing as the process list |
+| `/api/plex/restart` | Restart Plex and nothing else, so a library added now can be seen without restarting the appliance |
 | `/api/terminal` | Root shell, long-polled (ADR-0014) |
 | `/api/power` | Shut down, restart |
-| `/api/token` | Rotate the device token |
+| `/api/pair` | Spend a pairing code for an administrator session (ADR-0019). **The one mutating route with no credential**, because it issues one — and it has nothing to spend unless somebody pressed P at the machine |
+| `/api/session` | Is this browser still an administrator, and sign it out |
+| `/api/browser-pair/*` | One authorised browser approving another (ADR-0019). `start`, `redeem` and `cancel` carry no credential — the first because asking is not being let in, the other two because they need a secret only the asking browser has. `inspect`, `approve` and `deny` are gated like everything else |
+| `/api/token` | Rotate the recovery device code. Revokes every session and any pairing offer |
 
 **Publisher tooling**, all on the build host:
 
@@ -373,6 +543,9 @@ shell's output cannot be read without one.
 | `tools/sign-bundle.sh` | Turns a built bundle into `manifest.json` + `.sig`, then verifies it with the appliance's own verifier |
 | `tools/publish-update.sh` | Serves the bundle; refuses one with no signed manifest |
 | `tools/break-bundle.sh` | Corrupts an image and re-signs it, to exercise ADR-0005 |
+| `tools/publish-release.sh` | Puts a signed bundle into a static update tree an appliance can poll (ADR-0020) |
+| `tools/promote-release.sh` | Publishes the *same bytes* to another channel; refuses if any digest moved |
+| `tools/publish-revocations.sh` | Copies a root-signed revocation list into every release directory |
 | `plexos-sign` | `root-key`, `signing-key`, `certify`, `sign`, `check`, `revoke`, `trust` |
 
 **State on `/var`** — the only surface a rollback leaves alone, which is why every one of
@@ -385,6 +558,8 @@ these is here and not in `/usr`:
 | `update/rollback.json` | Why a boot was handed back to the other slot (ADR-0005) |
 | `tls/` | The console's key and certificate; the key outlives the certificate |
 | `apps/plex/` | Plex app images and the `current` link (ADR-0007) |
+| `disks.json` | Libraries on local drives, by `PARTUUID` (ADR-0021) |
+| `shares.json` | Libraries on network servers |
 | `etc/` | The writable half of the `/etc` overlay |
 | `STATE_VERSION` | The `/var` layout version (ADR-0009) |
 
@@ -404,6 +579,154 @@ and its certificate — sign with the second one.
   the defconfig, always re-run kconfig and check the options actually survived. Four
   were being dropped at one point, and the result was a uClibc toolchain that Plex
   cannot run on.
+- **An option whose dependency is unmet is not in `.config` at all — not as `=y`, not as
+  `is not set`.** The sharper form of the trap above, and it defeats the obvious check.
+  Grepping for `CONFIG_USB_NET_AX88179_178A` in a built kernel's `.config` returned
+  *nothing*, because `CONFIG_USB_USBNET` was off and everything depending on it is simply
+  not emitted. So the natural test — "is it `=y`, or is it `is not set`?" — has a third
+  answer that reads like a typo in the grep, and three USB Ethernet drivers were absent
+  for the life of the project without ever appearing as refused. Check for the *absence*
+  explicitly, and when a symbol is missing look for the gate above it rather than for a
+  misspelling. `post-image-test.sh` stage 7b prints `(absent from .config)` as its own
+  outcome for this reason.
+- **Turning `CONFIG_MODULES` on changes the default answer for every tristate symbol in
+  the tree, not only for the driver that motivated it.** kconfig gains a third answer and
+  takes it: eleven options became `=m` on the next build, producing eight `.ko` files, in
+  an image with no udev, no kmod and no modprobe — so each was a feature that compiled,
+  installed, passed every test and never happened on a machine. One of them,
+  `X86_PKG_TEMP_THERMAL`, publishes the only thermal zone reporting the processor die, so
+  the activity card reported a chassis sensor as the processor with nothing failing and
+  nothing logged. The rule was written down at the time and half-applied — `efivarfs` was
+  pinned and the note said to check the rest. `find output/target -name '*.ko'` answers it
+  in a second and nobody ran it for a release. Stage 7 runs it now.
+- **The same trap again, in the kernel fragment, and it hid for months behind evidence
+  pointing somewhere else.** `CONFIG_FONT_TER16x32` and `CONFIG_FONT_TER10x18`
+  `depends on !SPARC && FONTS`, and `CONFIG_FONTS` was never set — so both were dropped
+  in silence and the image shipped with the two fonts the kernel picks on its own. The
+  command line then asked for `fbcon=font:TER16x32`, `find_font` returned NULL for a font
+  that had never been compiled in, and fbcon carried on with 8x16. On the reference
+  laptop's 2880x1620 panel that is a 360x101 grid: characters about three millimetres
+  tall on a fifteen-inch screen, reported by the person looking at it as "the text is
+  barely visible".
+  Everything about the symptom says *the command line does not take effect*, which is
+  where two attempts to diagnose it went. The fault is a Kconfig dependency two
+  directories away. **`ls output/build/linux-*/lib/fonts/*.o` answers it in a second** —
+  two object files where there should be four — and that is the shape of check worth
+  reaching for whenever a `CONFIG_*` symbol appears not to have done anything: look for
+  what the build *produced*, not for what the configuration says.
+  `plexos_sys::tty::use_font` now asks the kernel directly as well, so a font that is not
+  there fails in a log line naming both symbols instead of silently.
+- **A boot that reaches PID 1 has proved nothing about the userspace, and the CPU
+  baseline is how that gets discovered.** `BR2_x86_corei7` sat in the defconfig from the
+  first day, chosen by nobody, and made Nehalem the oldest processor the image would run
+  on. Nothing asked for it: the 6.19 kernel's own `X86_REQUIRED_FEATURE_*` list wants
+  only the x86-64 architectural bits, all three Rust binaries are built with no
+  `-C target-cpu`, and Plex carries its own musl runtime and dispatches on CPUID. What
+  it produced below the floor was not a refusal but a *plausible-looking machine*: on a
+  Conroe model, firmware, kernel and `plexos-init` all succeeded, the dashboard rendered
+  a welcome screen with a recovery device code to write down, and underneath it
+  `pid 196 was killed by signal 4` — SIGILL, inside `ld-linux-x86-64.so.2`, so the
+  program never started at all. `ip` died 56 times and `sh` 6 times, forever, with no
+  panic and no `Attempted to kill init`. The image is `-march=x86-64` now; stage 8 of
+  `post-image-test.sh` and `plexos_sys::cpu::REQUIRED` are what keep it there.
+- **KVM cannot test a CPU baseline, and it will tell you everything is fine.** `-cpu
+  Conroe` under KVM changes what CPUID *reports*; the instruction is still in the
+  silicon underneath and still executes. So an SSE4.2 binary runs perfectly on a guest
+  claiming to be a Core 2 and the matrix comes back green about a floor that is still
+  there. Only TCG decodes each instruction against the model. Use `-cpu host` with KVM
+  for speed; use TCG with a named model when the question is which instructions exist.
+- **A disassembly scan cannot tell a CPU floor from a CPUID-guarded fast path.** Written
+  here as "grep busybox, because unlike glibc it has no runtime dispatch", and that is
+  simply false: busybox ships hand-written SHA-1/SHA-256 assembly in
+  `libbb/hash_sha*_hwaccel_x86-64.S` — `pshufb`, `palignr`, `sha256rnds2` — reached only
+  through `get_shaNI()`, which asks CPUID first. So the generic build still contains
+  those instructions and runs on an Opteron_G1 model perfectly. The check would have
+  **failed on a correct build**, which is the worse direction: it teaches people to
+  ignore it. The property is "does it run on a baseline CPU", and only running it
+  answers that.
+- **A whole feature can be missing because the product was only ever described from the
+  machine it was built on.** Every path to a media library assumed a NAS — `shares.rs`, the
+  first-boot step that said "add the network share your films are on", the Storage view's
+  empty state saying "add the NAS the library lives on below". That is true of the reference
+  laptop and is not the common case: somebody who writes the image to a stick and boots it
+  on the computer they own has their films on **that computer's Windows partition**, inches
+  away, on a disk the installer already enumerates by name. The kernel could not read NTFS
+  at all, and `media.rs` carried the sentence "If it is NTFS, this kernel cannot read it" as
+  advice. Nothing failed, nothing was logged, and no test could see it, because the gap was
+  between what the product does and who it is for. ADR-0021 is the fix. The check worth
+  keeping is the one that found it: ask what the *first* thing a stranger does with this is,
+  and whether the machine they do it on looks anything like the one it was written on.
+- **A read-only mount is the thing that makes a hibernated Windows partition readable, and
+  it took reading the driver to know.** `ntfs3` refuses a volume with `VOLUME_FLAG_DIRTY`
+  set or an unreplayed journal — which Fast Startup, the Windows default, leaves behind
+  every time — and **both refusals are guarded by `!ro`** (`fs/ntfs3/super.c:1367,1373`).
+  So the common case needs no `force` and no advice to go and shut Windows down properly.
+  Guessed the other way, this would have shipped a feature that fails on most of the
+  machines it exists for, with a message blaming the user's computer.
+- **A filesystem with no Unix owner takes its permissions from whoever mounted it.**
+  `ntfs3`, exFAT and FAT fill in `fs_uid = current_uid()` and `fs_fmask_inv =
+  ~current_umask()` (`fs/ntfs3/super.c:1804`). `plexosd` is root and Plex runs as uid 900,
+  so a mount that does not say otherwise is a library every layer above reports as fine and
+  only Plex finds empty. Fourth appearance of the render-node shape. Pass `uid`, `gid`,
+  `fmask` and `dmask` explicitly. ext4 and XFS are the opposite case and cannot be fixed by
+  any option, so `disks::readable_by` *asks* — from the mode bits, not by attempting the
+  read, because this process is root and root's attempt always succeeds.
+- **`mount(2)` discards every flag but `MS_REC` on a bind.** `fs/namespace.c:4025` hands
+  straight to `do_loopback`, and the new mount copies the source's `mnt_flags` verbatim
+  (`fs/namespace.c:1256`). So `ro,noexec` in a bind's option string is a string that reads
+  as though it were enforcing something. It is safe here only because the mount underneath
+  is already read-only; write the bind as `bind` alone so the next reader learns that from
+  the code.
+- **A report derived entirely from present state cannot say "this was tried and it failed",
+  and that reads as "this has not been tried".** The first real drive scan on hardware:
+  `mount_probe` tried six filesystems on an empty partition, every one refused, and it built
+  a message naming each. The console threw the `POST` response away and asked again with a
+  `GET` — and `report` rebuilds everything from the machine as it is now, where a drive that
+  would not mount is attached, enumerable and unmounted, which is *identical* to a drive
+  nobody has touched. So the page said "not scanned yet" about a mount that had just failed,
+  and `scanned` was inferred from "is anything mounted", which is false for a scan where
+  nothing mounted — so it also offered to run the scan that had just failed, as though for
+  the first time. Two derivations, both correct about the present, both blind to what
+  happened. The diagnosis existed, was right, and reached nobody: the same shape as a
+  rollback destroying its own explanation, one floor down. `plexosd::disks::LAST_SCAN` keeps
+  the outcome, because it is the only thing that knows. **Ask whether the fact you are
+  deriving is a fact about a state or about an event.**
+- **Audit against the remote, not against what you last fetched — and check a claim before
+  repeating it.** A repository audit on 2026-08-14 reported five remote branches and
+  concluded that CI had never run. Both were wrong, and differently. The branch list came
+  from stale remote-tracking refs because nothing ran `git fetch` first, so a sixth branch
+  carrying two unique workflow commits was invisible and would have been left out of any
+  cleanup. The CI claim came from reading `on: push: [main]`, seeing `main` 112 commits
+  behind, and inferring — while `gh run list` shows dozens of runs including eight pushes to
+  `main`. Worse, the sentence had a source: the README said "has never fired once", which
+  was true the day it was written and was falsified by the very push that added it. An
+  inference dressed as a finding, and a stale document quoted as evidence. `git fetch
+  --prune` before reading refs; `gh run list` before saying anything about CI.
+- **A zero MBR disk signature makes `PARTUUID` non-unique.** The kernel synthesises
+  `%08x-%02x` from the disk signature and the partition number, so a drive that was never
+  given a signature enumerates as `00000000-01` — and so does the next one. That is exactly
+  the collision `PARTUUID` was chosen over device names to avoid, arriving by another door.
+  Seen on the reference laptop's blank internal WD SN560. Not yet handled: refusing it
+  outright would block the drive entirely, and the honest fix is a GPT, which busybox's
+  `fdisk` cannot write.
+- **The appliance cannot be written to over the network, and this surprises people.** The
+  image ships `curl` and `wget`, which are *clients*; there is no SSH, no Samba, no
+  `nfs-utils`, and ADR-0021 mounts every library read-only on purpose. So "put some films on
+  the appliance's own disk" has no answer today — the assumed route is that the drive is
+  filled by the computer that owns it and then attached. Worth knowing before promising
+  anything: it is a missing feature rather than a broken one.
+- **The image cannot create an NTFS filesystem, only read one.** `ntfs3` is a kernel driver
+  and there is no `ntfsprogs`; `mke2fs`, `mkfs.xfs` and `mkfs.erofs` are the whole set. So
+  ADR-0021 reads a Windows disk and cannot make one, which is the correct division and is
+  not what somebody asking for "an NTFS partition" expects to hear.
+- **A screenshot cannot tell you a table is too wide, and "it overflows" is not actionable.**
+  At 390 px the Storage view's page overflow measured **zero** — every table scrolls inside
+  its own container, correctly — while the primary button on each row sat off screen until
+  somebody discovered they could drag sideways. The useful measurement is per element:
+  `getBoundingClientRect().right` against `documentElement.clientWidth`, printing the widest
+  offender. It also corrected a guess: the two widest tables in that view (392 px and 552 px)
+  were the pre-existing Media shares and Disks tables, not the new ones, which came in at
+  334. Measure before attributing.
 - **Rollback reverts `/usr`, never `/var`.** Any migration must leave state the
   previous release can still read. `crates/plexos-init/src/state.rs` encodes this.
 - **Tests that only compare a thing to itself will pass while it is wrong.** Every
@@ -449,6 +772,25 @@ and its certificate — sign with the second one.
   for both, and they take opposite remedies. Only `IFF_UP` in sysfs `flags` separates
   them. A diagnostic that reports `operstate` alone will send someone to check a cable
   that was never the problem.
+- **Asking a program to stop is not the same as it having stopped, and the second wireless
+  network of a boot is where that gets discovered.** `wpa_cli terminate` returns when the
+  running supplicant *accepts* the command; the exit and the unlinking of
+  `/run/wpa_supplicant/wlan0` follow it. `connect` sent the terminate and started the next
+  supplicant on the line after, which loses the race every time: the new one finds the
+  socket bound, prints `ctrl_iface exists and seems to be in use - cannot override it`, and
+  exits 255. Found on the appliance the first time somebody moved between two networks —
+  joining one worked perfectly, and every join after it failed. **The capture contained its
+  own diagnosis and it is worth knowing the shape**: the *last* line was the old
+  supplicant's `nl80211: deinit ifname=wlan0`, printed after the new one had already given
+  up, so the ordering in the log is the whole answer. Wait for the thing to be gone rather
+  than for the request to be delivered.
+  The half hiding behind it was worse. The association timeout ended in `child.kill()`, and
+  a supplicant killed with SIGKILL never unlinks its socket — so one wrong passphrase left
+  a file that nothing on the machine would ever remove, and wireless was unjoinable until a
+  reboot. A stale socket and a live one look identical on disk; only asking whether anything
+  answers on it tells them apart, and the two take opposite remedies. `release_supplicant`
+  is one place that guarantees a clean start, which beats every failure path remembering to
+  tidy up after itself.
 - **The running root contains only what `plan.rs` puts there.** It is a tmpfs assembled
   from nothing, so directories present in the Buildroot rootfs — `/tmp` among them —
   never reach the booted system. `/tmp` was missing for the whole life of the project
@@ -459,7 +801,7 @@ and its certificate — sign with the second one.
   table while generating each filesystem image, into a copy — so `TARGET_DIR/etc/passwd`
   never gains the accounts, and anything in `post-image.sh` that reads `TARGET_DIR/etc`
   is reading the tree from before they existed. That is how the `plex` account ended up
-  in `rootfs.erofs` and absent from the `/usr` image PlexOS actually boots. `post-image.sh`
+  in `rootfs.erofs` and absent from the `/usr` image MediaLith actually boots. `post-image.sh`
   stage 0 now runs Buildroot's own `mkusers` against `TARGET_DIR` first, and stage 1
   refuses to build an image whose factory `/etc` is missing an account `users.table`
   declares. The Buildroot behaviour has not changed, so anything else added here that
@@ -590,6 +932,17 @@ and its certificate — sign with the second one.
   above `0`, so every update would have been refused as older, with a message blaming
   whoever published it. Anything that must appear *in the image* has to be written before
   stage 1, and the check is to extract the built image and look — not to read the script.
+- **Git refuses a push to the branch the build host has checked out, and a build will
+  happily carry on without it.** `receive.denyCurrentBranch` rejects it — correctly — but the
+  refusal is on the *push*, several steps before the build, and if that output goes anywhere
+  nobody reads then `make` runs against the previous sources and stamps them with the new
+  version. That is the trap below wearing a different coat, and it survives `plexosd-rebuild`
+  completely: the rebuild was genuine, it just rebuilt the old file. Two things fix it, and
+  the second matters more than the first: **push to a ref nothing has checked out** and
+  `git reset --hard` onto it, and **grep the build host's checkout for something the change
+  added, before spending a build on it.** Found by comparing the SHA-256 of the page the
+  appliance serves against the working tree's — which is the check worth keeping, because it
+  compares the artefact to the source and nothing in between can lie about it.
 - **`make all` does not rebuild a package whose sources changed.** Buildroot rsyncs a
   package's tree into `output/build/<pkg>/` once and does not re-sync one it has already
   built, so a plain `make all` ships the *previous* binary under a new version stamp. Two
@@ -597,6 +950,28 @@ and its certificate — sign with the second one.
   functionally identical to the one it was running: version and slot changed, the fixes
   did not. `make <pkg>-rebuild` forces the re-sync. Check by grepping
   `output/build/<pkg>/` for something the change added, not by reading the script.
+  **And `-rebuild` is per package, so a change in a *shared* crate needs one per consumer.**
+  Walked into on 2026-08-13: `plexos-sys/src/device.rs` changed, `plexosd-rebuild` ran, the
+  image built — and `plexos-init` still carried the previous `device.rs`, so the image would
+  have shipped **PID 1 without the fix** under a new stamp. The obvious consumer is not the
+  only one. Compare the changed file against *every* package tree before signing anything:
+  `for d in output-*/build/plexos*-0.1.0; do sha256sum <file> "$d/<file>"; done`. A package
+  whose own crate is unchanged and which does not depend on the changed one is fine even
+  when its copy differs — the rsync gives every package a copy of the whole repository and
+  `plexos-gpu` compiles almost none of it. Check `Cargo.toml` before rebuilding for nothing.
+- **That same rsync copies the whole repository, and its exclude list named exactly the
+  build directories that existed when it was written.** `--exclude=output` was every
+  Buildroot output tree there had ever been. The CPU-baseline phase needed two isolated
+  trees, `output-corei7` and `output-generic`, so that a corei7 object could not survive
+  into the generic image — and the moment `plexos-gpu` synced, rsync started copying a
+  10 GiB build tree into a directory *inside the tree it was copying*. That is a
+  recursion, so it does not fail; it fills the disk. **20 GiB used to 698 GiB**, and the
+  only outward symptom was a build that appeared to sit on `Syncing from source dir` for
+  a long while, which is exactly what a large sync looks like. `--exclude=output-*` in
+  all three `plexos-*.mk` files now, and `/output*/` in `.gitignore`, which had never
+  covered any of them either — one `git add -A` staged 672,911 files. Two lists, both
+  correct for the state they were written in, both wrong the moment a second output
+  directory existed.
 - **A control that is correct in the state it was written in can be wrong in the state it
   leads to.** Twice, in one shape. The `plex-http` probe was `|| false` and correct while
   Plex could not exist. The device-token field lived inside the Plex install card and was
@@ -623,10 +998,33 @@ and its certificate — sign with the second one.
   address on the appliance while its test passed. Same rule as `CONFIG_*` symbols and PCI
   IDs, applied to the output format of any program whose file you read.
 - **A design can be complete, tested and uncalled, and the tests will not tell you.**
-  Three times now: the `auth` gate, `cgroup::delegation`, and the whole ADR-0008
-  configuration model — schema, validation, fixtures, and `paths::CONFIG_FILE` with no
-  callers anywhere, so no hostname was ever set and no timezone ever applied. Grep for
-  callers of a constant before assuming the feature behind it exists.
+  Five times now: the `auth` gate, `cgroup::delegation`, the whole ADR-0008 configuration
+  model — schema, validation, fixtures, and `paths::CONFIG_FILE` with no callers anywhere, so
+  no hostname was ever set and no timezone ever applied — and then `[updates].channel`, which
+  had defaulted to `stable` since the schema was written while every bundle was signed `dev`,
+  so a machine asking for stable releases installed development builds without comment.
+  Grep for callers of a constant before assuming the feature behind it exists.
+  The fifth is the one worth remembering, because it was **written and found the same
+  evening**: `[update_service].check` was stored, patched by the API, drawn as a checkbox in
+  the console, and read by nothing — the scheduler asked the update service every round
+  regardless. A setting is not implemented when it round-trips; it is implemented when
+  something branches on it. The shape to grep for is a config field whose only occurrences
+  are the struct, the serializer and the form.
+  **The sixth was a whole section, and it was found by counting rather than by reading.**
+  `[plex]` — `media`, `transcode_dir`, `require_hardware_transcode` — had no reader anywhere
+  outside `config.rs`'s own tests, for the whole life of the project. The method that found
+  it takes one command and is worth keeping: list every field in the schema and count its
+  occurrences across the workspace. Anything at two or three is a struct, a default and a
+  test asserting that default, which is the "tests that only compare a thing to itself"
+  trap wearing a config field. Removed rather than wired: each had been overtaken by
+  something better placed, and ADR-0008's amendment says which. Note the shape of the
+  removal, because it is the general rule for this schema — **remove the whole section,
+  never a key from inside one.** `Config` is not `deny_unknown_fields` so an unknown section
+  is ignored, while every section is, so deleting a key makes a file carrying it unreadable
+  by the release that would have to fall back to it.
+  And one of the three is worth a second look: `media` described *exactly* the feature
+  ADR-0021 built from scratch a week later. Nobody grepped the schema before designing it.
+  Read `config.rs` before writing a feature about state a user might configure.
 - **Storing is not applying, and a settings page that conflates them is worse than none.**
   It looks like it worked. `plexosd::settings` reports four distinct outcomes per field
   for that reason, and the sharpest case is the timezone: with no zoneinfo in the image,
@@ -731,9 +1129,9 @@ and its certificate — sign with the second one.
   verdict and the version string with it, and the system that comes back is the older one,
   which cannot tell it is a replacement. `/var` is the only surface that survives, and it
   survives because of the rule that makes it awkward everywhere else.
-- **Everything in PlexOS resolves partitions by label, and an installer makes labels
+- **Everything in MediaLith resolves partitions by label, and an installer makes labels
   ambiguous — including for the updater and for PID 1.** This is bigger than the console
-  bug below it and was found the same evening. With PlexOS installed to an internal disk and
+  bug below it and was found the same evening. With MediaLith installed to an internal disk and
   the USB stick still plugged in, the machine has two partitions called `esp`, two called
   `usr_a`, two called `var`. `plexos_sys::device::by_partlabel` returns whichever the kernel
   enumerated first, and it is used by the updater to choose the partition to *write*, by
@@ -743,7 +1141,7 @@ and its certificate — sign with the second one.
   running from the USB stick, and both the `/usr` write *and* the boot entry landed on the
   internal disk. The stick's ESP never saw the new entry. It was harmless and it was not a
   decision. **Label resolution has to be scoped to the disk the running system is on**, and until
-  it is, a machine with two PlexOS disks attached is a machine whose updates land somewhere
+  it is, a machine with two MediaLith disks attached is a machine whose updates land somewhere
   arbitrary. **Fixed** by `by_partlabel_on(disk, label)` and a running-disk lookup that goes
   through dm-verity's `slaves` rather than through a label — in the updater's partition
   writes, the boot-entry install, the installer's own source resolution, and the health
@@ -765,7 +1163,7 @@ and its certificate — sign with the second one.
   true.** The console found the disk it was running from by resolving the ESP's partition
   label. That worked until the first successful install, at which point the machine had two
   partitions called `esp` and `by_partlabel` returned the one on the disk that had just been
-  written — so the console reported PlexOS as running from the *target*, and would then have
+  written — so the console reported MediaLith as running from the *target*, and would then have
   offered the disk it was actually running from as somewhere to install. Accepting that
   erases the running system. The copy path had been designed against exactly this hazard,
   by resolving the source partitions before writing anything; the same hazard in a second
@@ -775,6 +1173,21 @@ and its certificate — sign with the second one.
 - **"I do not know" and "nothing is excluded" are the same value and opposite meanings.**
   `running_disk` returning `None` had to become a refusal of every disk rather than an
   install with nothing ruled out.
+- **A fallback that changes how everything downstream is chosen has to say that it
+  happened.** `booted_disk` logs when `efivarfs` will not mount and logs when the GUID
+  matches no partition — but the branch where `systemd-boot` left no `LoaderDevicePartUUID`
+  at all was `found?`, which returns `None` without a word. So a machine that had fallen
+  back to resolving partitions by label looked exactly like one that had asked and been
+  answered: the boot log went from the banner straight to step 1. That silence cost an hour
+  on a two-disk boot that mounted the *other* installation's `/usr` and died with
+  `metadata block 1 is corrupted` — which is what verifying one installation's `/usr`
+  against another's hash tree looks like, and says nothing about disks.
+  The variable is absent for a reason worth knowing: **`systemd-boot` is what sets it**, so
+  picking a UKI directly out of a firmware boot menu skips the boot loader and skips the
+  answer with it. Booting the *device* rather than the file is what keeps the question
+  answerable. `booted_partuuid` also had no test at all, which is how a parser of firmware
+  bytes — a four-byte attribute prefix, UTF-16, a length check — came to decide which disk
+  the whole system is assembled from on nothing but inspection.
 - **The bootloader spends a try *to* boot an entry, so the entry running can already be
   exhausted.** The gate inferred which entry had booted from the shape of the set — none
   counting plus a permanent one present meant the permanent one was running — and that is
@@ -797,14 +1210,29 @@ and its certificate — sign with the second one.
   partitions are written the disk holds exactly two versions of `/usr`**, and an entry
   naming any other version is guaranteed not to boot. Prune before installing, not after,
   because the failure being prevented is running out of room during the install.
-- **There is an unreproduced flake in the suite, seen three times.** A single `cargo test
-  --workspace` failed once with `plexos-plex`'s `a_mkfs_without_the_compressor` and twice
-  with nothing captured, against **more than fifty** deliberate consecutive runs that were
-  clean — so roughly one in twenty-five, and it has never been caught with output. The
-  suspect is the shape below: that test writes a shell stub to a fixed path and then
-  executes it, which races with any other test in the same process that forks — `ETXTBSY` on
-  a file another thread holds open for writing. Recorded rather than guessed at, because a
-  speculative fix to a test that cannot be made to fail is a change nobody can check.
+- **`POST /api/provision` starts provisioning; it does not report on it.** It answers
+  `{"started":true}` either way, so polling it with POST is not polling — it re-triggers
+  the whole install. Done seven times in five minutes while a build was in progress, it
+  produced a Plex that crash-looped 163 log lines deep, which read exactly like "this
+  CPU cannot run Plex" and was nothing of the kind: one clean reboot brought it up first
+  try with a four-line log. That is the interrupted-mid-write trap below, reached by the
+  monitoring rather than by the appliance. **The status route is `GET`.**
+- **There is an unreproduced flake in the suite, seen four times.** A single `cargo test
+  --workspace` fails with `plexos-plex`'s `a_mkfs_without_the_compressor`, against
+  **more than fifty** deliberate consecutive runs that were clean — so roughly one in
+  twenty-five. Sightings one to three had nothing captured. The fourth, during the CPU
+  baseline work, was under heavy load from a TCG guest saturating the machine, which
+  fits the note below about twelve cores versus two; the panic location was captured
+  (`execute.rs:518`, the first assertion) but **not the assertion message**, and six
+  consecutive runs immediately afterwards were clean, so it still cannot be produced on
+  demand. Two details confirmed while it was fresh: the scratch path is
+  `std::env::temp_dir().join("plexos-mkfs-capability")` — fixed, with no test name in
+  it, against the rule this file already states — and the test *executes the file it has
+  just written*, which is the `ETXTBSY` shape: another thread forking while that file is
+  open for writing leaves a child holding the descriptor. Recorded rather than guessed
+  at, because a speculative fix to a test that cannot be made to fail is a change nobody
+  can check. **What would settle it** is capturing the assertion message, which needs a
+  run that fails with output kept — load appears to help.
 - **A shared scratch path makes two passing tests into one flaky pair.** Rust runs tests as
   threads in one process, so a fixed temp file is a race: one test deletes what another is
   reading and they fail in whichever order the scheduler picked. Hit twice in one day —
@@ -830,7 +1258,11 @@ and its certificate — sign with the second one.
   repository had ever parsed that file; the page's tests assert that strings appear in it,
   which a completely broken script satisfies. `the_pages_script_parses` runs `node --check`
   now, and announces a skip when no engine is installed, because a check nobody knows was
-  skipped is a check nobody has.
+  skipped is a check nobody has. It has since earned its keep on a second flavour of the same
+  thing: **a backtick inside a template literal ends the literal**, and the offender was an
+  HTML *comment* — one explaining why a variable existed, written as `` `lastNetdiag` ``,
+  inside the very template it was describing. Prose is code in there; quote code in comments
+  with nothing, or with quotation marks.
 - **A name used twice on the console page is not an error anywhere, and both halves of the
   duplicate keep working — on the wrong thing.** The Plex card's button and the disk
   installer's section were both `id="install"`, and both click handlers were
@@ -846,6 +1278,45 @@ and its certificate — sign with the second one.
   thing". `no_id_is_given_to_two_elements` and `the_script_declares_no_function_twice` ask
   it; note that only the `const` flavour of this is a parse error, which is why
   `the_pages_script_parses` could not see the `function` one.
+- **CSS specificity is the console's silent failure mode, and it has now cost four
+  faults in one afternoon.** All four passed every test in this repository, because every
+  test here reads the page as *text* and in all four cases the text was right. Only a
+  rendered page shows them.
+  - `#view-overview { display: flex }` beats `.view[hidden] { display: none }`, because an
+    id outranks any number of classes. So the Overview stayed on screen underneath every
+    other view, with the sticky header floating halfway down a page of summary cards. **An
+    id in a layout rule needs the state in the selector**: `#view-overview:not([hidden])`.
+    Already recorded once on `#terminal.folded`, and walked into again.
+  - `.navitem` is one class and loses to `button:not(.ghost)`, which is an element and a
+    class — so the sidebar rendered as seven solid blue buttons, which is exactly what the
+    base rule guarantees a button looks like. `button.navitem`, placed *after* the base
+    rule, wins on equal specificity plus source order **without naming where the button
+    is**, which is the property `buttons_are_styled_without_naming_where_they_are` exists
+    to keep.
+  - The same again for `.linkish`, and the colour was the half that was missed: a
+    cross-reference inside a muted paragraph rendered white on nearly-white and could not
+    be seen at all.
+  - Two media queries both apply on a phone, because a phone is narrower than a tablet. The
+    tablet rail hides nav labels with `button.navitem .label`; the phone rule bringing them
+    back was written `.navitem .label`, one class less specific, so it lost however far
+    down the sheet it sat. The drawer opened to a column of seven unlabelled icons — a
+    rail, not a drawer, and the whole point of a drawer is that there is room for words.
+- **A page wider than its window is cropped in a screenshot, which looks exactly like a
+  page that fits.** "No horizontal scrolling" cannot be checked by looking. The System view
+  was 54 px wider than a 390 px window from one `white-space: nowrap` pill, and six
+  screenshots of that view had already been read as fine. Measure it in the browser —
+  `documentElement.scrollWidth` against `clientWidth`, per view — and have the probe **name
+  the widest element that sticks out**, because "something overflows" is not something
+  anybody can act on. `tools/preview-console.py` serves the page; a few injected lines do
+  the rest.
+- **A rename applied to a file rather than to an identifier rewrites string literals with
+  it.** `metricLevel` returned `warn-metricLevel` and `bad-metricLevel` while the stylesheet
+  defined `.meter.warn-level` and `.meter.bad-level`, so **no meter on the activity card had
+  ever left the accent colour**: a `/var` at 96% full drew exactly like one at 6%, which is
+  the one reading that card exists to make loud. Both halves stayed internally consistent,
+  so nothing reading the page as text could see it. The test that catches it takes the class
+  names from the function *by running it* and looks each one up in the stylesheet — which is
+  the general shape for any pair of files that have to agree on a name.
 - **`\b` is a backspace only inside a character class, and the terminal was deleting the
   last character of every word.** `body.replace(/[^\n\b]\b/g, "")` was meant to say "drop a
   character that a backspace erased". The `\b` *inside* the class is `\x08`, so the first
@@ -913,7 +1384,7 @@ and its certificate — sign with the second one.
   defect in what the return *meant*.
 - **A schema written before the artefact exists describes an artefact that does not
   exist.** `plexos-types::manifest` had one `uki` field and one `os_version` of the form
-  `MAJOR.MINOR.PATCH`. PlexOS builds two UKIs, because `plexos.slot=` is on the command
+  `MAJOR.MINOR.PATCH`. MediaLith builds two UKIs, because `plexos.slot=` is on the command
   line *inside* one, and stamps its version `0.1.0.202607281844`, which that type cannot
   hold. Both were written months before either artefact existed, both had passing
   fixture-based tests, and neither could have carried a real update. What made it cheap was
@@ -936,6 +1407,147 @@ and its certificate — sign with the second one.
   experiment that skipped it would be testing the signature check -- which has its own
   tests -- and would prove nothing about ADR-0005, while looking like a rollback that
   worked.
+- **The console cannot be measured through the console.** The screen blanks after five idle
+  minutes now, and every attempt to *observe* that through `POST /api/terminal` failed —
+  because opening a session makes `plexosd` log a line, PID 1's log goes to the console, and
+  console output both unblanks the screen and resets the blank timer. So the act of looking
+  put the screen back on, three different sampling harnesses in a row measured a lit panel and
+  looked like a broken feature, and the thing that settled it was Sebastian saying "102 zgasł
+  ekran". Two lessons: a detached sampler does not survive `take_over: true`, which replaces
+  the session and kills its children; and when the quantity is *what somebody sees*, the
+  person in front of the panel is the instrument, not a workaround for the lack of one.
+  Incidentally `/sys/class/graphics/fb0/blank` is not that instrument either — it read `4`
+  while `actual_brightness` was at maximum. `actual_brightness` and the connector's `dpms` are
+  the honest signals.
+- **A region on a timer destroys anything a person opened inside it.** The activity card
+  redraws twice a second, and the process table and the "what these numbers do not say"
+  section were rendered into that same element — so both worked for up to two seconds and then
+  shut themselves, which reads as a control that refuses to stay open. Reported from the
+  machine within minutes of the card being installed. The fix is not a saved-and-restored
+  flag: the stateful parts are written once in the markup as **siblings** of the redrawn
+  region, and only their contents are updated. This is the "correct in the state it was
+  written in" trap again, and the new detail worth keeping is *when* it appears — the card had
+  no state at all until it grew a table and a `<details>`, so the polling loop was harmless
+  right up to the commit that made it not.
+- **A style rule that enumerates the kinds of a thing will miss one — and narrowing the list
+  is not the fix.** Buttons were styled by `.plex button`, `.form button` and `.power button`,
+  so the network card — a plain `<div class="card">` — matched none of them and its "Diagnose
+  the network" button had **no styling at all**: a raw operating-system control in the middle
+  of a designed page, shipped and reported by somebody looking at it. The stylesheet already
+  carried a comment saying the rule had been written three times and that the common half had
+  been factored out; the selectors stayed enumerated, so the gap survived the tidy-up that was
+  about it. That was then "fixed" to `.card button` — which missed the next button added, the
+  power controls in the sticky header, **the same trap one turn of the screw later**. The rule
+  is on the element now: a rule about how a button looks should not know where buttons are.
+  Ask what a rule does about a case that does not exist yet.
+- **A presence check can be satisfied by a string that asserts the opposite.** The build
+  script greps the rsynced package tree to prove the new code got in. One marker was
+  `card button {` — and it passed *after that rule had been deleted*, because `grep -r` found
+  it in the list of forbidden selectors inside the test asserting its absence. A check that
+  cannot fail is worse than no check, because it is counted. Grep the **artefact** — the page,
+  the module — not the tree that also contains everything written *about* it.
+- **A function that names itself in its own output cannot be composed.** `humanUptime`
+  returned `"Up 1 h 21 min"` while its own comment described only the duration, so both callers
+  added a label of their own: the header badge read **"UP UP 18 MIN"** and the activity tile
+  was headed "Up" above a value of "Up 1 h 21 min", which had been on a machine for a day
+  without anyone noticing. A formatter returns the value; the caller says what it is.
+- **A class name in the page's script is a channel nothing was watching.** Three tests guard
+  the console page — its script parses, every id it addresses exists, no id names two things
+  — and a rename that mangled `class="meter"` into `class="metricMeter"` passed all three.
+  The page would have rendered every element, addressed every id, parsed cleanly, and drawn
+  as unstyled text. `every_class_the_script_draws_with_is_a_class_the_stylesheet_defines` asks
+  the fourth question, and its rule is "styled, **or** selected on" rather than "styled",
+  because some classes exist to be found rather than painted — it flagged `media-pick` and
+  `share-drop` on its first run, both legitimate `querySelectorAll` hooks. A list of
+  exceptions would have gone stale; a property of the page does not.
+- **`preserveAspectRatio="none"` scales shapes, and `vector-effect` only exempts the
+  stroke.** A sparkline stretched to a tile's width has an x scale about twice its y scale, so
+  the `r="3"` end marker came out a six-pixel-wide, three-pixel-tall smear — and at `cx="100"`
+  half of it fell outside the viewBox and was clipped by the tile edge. Marking the current
+  value with the last *segment* in the accent is immune, because a stroke is all it is. Found
+  by rendering the card and looking at it; both the function's output and `node --check` were
+  perfectly happy.
+- **A sparkline's x axis must span the points there are, not the ring's capacity.** Divided by
+  a sixty-sample ring, four samples drew a line five per cent of the tile wide tucked in a
+  corner — which reads as a rendering fault rather than as "not much history yet". It shipped
+  twice: once anchored left, then "fixed" by anchoring right, which moved the same stub to the
+  other corner. `the_sparkline_spans_the_tile_whatever_it_has_to_draw` runs the page's own
+  function under `node`, the way the terminal cleaner's test does, and both versions fail it.
+- **A thermal zone's `type` is not unique.** A development host answered with two zones both
+  typed `acpitz`, at 27.8 °C and 29.8 °C, so a table keyed on the type showed one label twice
+  and no way to attribute either reading. The `thermal_zoneN` directory is what separates
+  them. Same question as the duplicated `id` on the console page: not whether a name resolves,
+  but whether it resolves to *one* thing.
+- **`coretemp` is the hwmon driver; `x86_pkg_temp` is the thermal zone.** Anything reading
+  `/sys/class/thermal` and reporting "no processor temperature, enable
+  `CONFIG_SENSORS_CORETEMP`" has named the wrong symbol —
+  `CONFIG_X86_PKG_TEMP_THERMAL` is what publishes the zone, and it has to be `=y` here
+  because `CONFIG_MODULES` is off. Both spellings were checked against a real
+  `/boot/config-*` rather than recalled.
+- **Two tests in the suite fail on any development host running Plex.**
+  `plex::tests::a_handle_that_has_started_nothing_reports_nothing_running` and
+  `an_unprovisioned_machine_is_told_where_plex_would_be_rather_than_failing` both go through
+  `Handle::is_running`, which probes `127.0.0.1:32400` — correctly, since ADR-0005's gate has
+  to ask the port rather than only its own child. On a machine that has its own Plex the probe
+  succeeds, so a clean `cargo test --workspace` is impossible there and CI's green run says
+  nothing about it. Not a defect in the code under test; a suite that is not hermetic.
+- **Plex's hardware-transcoding fields are empty until the transcoder actually runs, and
+  empty looks exactly like software.** A session captured seconds after it started reported
+  `transcodeHwRequested: false` and `transcodeHwDecodingTitle: "Intel ()"` — the parentheses
+  hold the API name and are empty. The *same session* moments later reported
+  `transcodeHwDecoding: "vaapi"`, `transcodeHwEncoding: "vaapi"` and
+  `transcodeHwFullPipeline: true`. So the only positive evidence is a named decoder or
+  encoder, and "no evidence" means software **only** once the transcoder has demonstrably
+  produced something (`progress > 0`). Reading the first state as software puts an amber
+  warning on this appliance's whole reason for existing, every time somebody presses play.
+  `Video::hardware` is an `Option` for this, and `None` is a third answer rather than a
+  missing one.
+- **Plex says nothing at all about a Direct Play, so it has to be read out of the silence.**
+  A direct-play session captured from the appliance had no `TranscodeSession` node and no
+  `decision` field anywhere in it — not `"decision": "directplay"`, nothing. The absence is
+  the answer. `Decision::default()` is therefore `Unknown` and not `DirectPlay`, so the best
+  case cannot be arrived at by a field failing to parse.
+- **A transcoding session's `Media` node is the *output*, so the file's own resolution is
+  not in it.** `videoResolution` read `720p` and `container` `mpegts` for a 4K MKV. The
+  source codec is in `TranscodeSession.sourceVideoCodec`; the source resolution and the HDR
+  format exist only in `/library/metadata/<ratingKey>`, which is why `plexactivity` looks
+  them up and caches them. The one place the session *does* carry the source is a display
+  string — `"4K DoVi/HDR10"` — which is composed for people and partly localised, so parsing
+  it would be the fixture-you-imagined trap in a new coat.
+- **A hardware verdict belongs to a video transcode and to nothing else.** Found on the
+  appliance on a real Direct Stream — video copied, audio re-encoded — where the transcode
+  session had progressed and named no decoder, so "has it named hardware" answered `false`
+  about a picture nothing was decoding. The page does not draw it in that state, which is
+  what made it invisible: a field that is wrong only where nothing reads it is a field that
+  becomes wrong somewhere that does.
+- **A failed update raises the anti-rollback floor before it is known to be failed, so the
+  release you were running becomes uninstallable.** The sequence is recorded when the boot
+  entry is installed — deliberately, because recording it earlier would let one failed
+  download refuse a release for ever. The sibling case had never been run: install a broken
+  release, let ADR-0005 hand the machine back, and the floor now stands *above* the release
+  the machine is running. Republishing the previous good release — the obvious recovery
+  instinct — is refused as a downgrade, correctly and unhelpfully. Nothing is bricked and
+  the console works; the remedy is to publish a **higher** stamp, which any new build is.
+  Made worse here by the experiment itself: `break-bundle.sh` takes a version, and stamping
+  the broken bundle thirty minutes into the future put the floor above real time, so the
+  next genuine build was refused too. **Stamp a deliberately broken bundle one minute above
+  the running release, never into the future.**
+- **A tool that calls another tool is broken by that tool gaining a required argument, and
+  nothing says so until somebody reaches for it.** `sign-bundle.sh` gained a mandatory
+  `--channel`; `break-bundle.sh` calls it and would have failed at the moment somebody was
+  half-way through a rollback experiment. Grep for callers of a script when changing its
+  interface, exactly as for a constant.
+- **A test that spawns must both hold the lock and collect its own child.** Four `pty` tests
+  forked without `CHILD_PROCESS_TESTS` and never reaped, so `process::reap` — `waitpid(-1)`,
+  process-wide — collected a shell that had exited 0 and told the SIGKILL test it had a
+  status. It failed on a twelve-core host and passed on a two-core one, which is the whole
+  character of the bug: more tests in flight, more chances for somebody else's zombie to be
+  the one reaped. Holding the lock is not enough on its own, because a *finished* child is
+  still there after the lock is released.
+- **`sfdisk` is translated, and the GPT tests read English out of it.** On a Polish host
+  `sfdisk --list` answers `Typ etykiety dysku: gpt` and a test grepping for `Disklabel type`
+  fails about bytes that are perfect. Any test that greps a util-linux program's output has
+  to run it under `LC_ALL=C`.
 - **Break the image, not the manifest, when testing rollback.** Overwriting a data block
   and recomputing only the manifest digest leaves the hash tree and root hash intact, so
   the updater accepts the bundle — correctly, because every check it makes asks whether the
@@ -969,14 +1581,23 @@ boots, serves the console, and transcodes on the CPU. No kernel driver binds to 
 this kernel builds `i915` and nothing else, so `/sys/class/drm` holds only `version` and
 `/dev/dri` never exists.
 
-Supporting it is not a kernel option away, and ADR-0015 works out why. The blocker is not
-NVIDIA: **`# CONFIG_MODULES is not set`.** This kernel cannot load a module at all, and an
-out-of-tree driver cannot be built in — so the first step is admitting loadable modules to
-an image whose defining property is that it is one artefact built from source and covered
-by one root hash. After that comes a package building NVIDIA's open modules (Blackwell
-requires them; they are dual MIT/GPL, which is the good news), GSP firmware, and a
-binary-only userspace that Plex reaches NVDEC and NVENC through. Buildroot's
-`nvidia-driver` is pinned at **390.151**, a Kepler-era branch, and is no help.
+That paragraph describes the machine as it was first tried, and the blocker it names is
+gone. **`CONFIG_MODULES=y` now** — with `MODULE_SIG_FORCE`, and ADR-0015 step 1 is where
+the trade is written down. `plexos-init` loads four NVIDIA modules by `finit_module`,
+because there is still no udev and no modprobe and nothing else can load anything.
+
+**What that cost is the part worth carrying forward, and it is not about NVIDIA.** Turning
+modules on gives kconfig a third answer for every tristate symbol in the tree, and it takes
+it: eleven options became `=m`, producing eight `.ko` files, in an image where a module is
+a feature that is *silently gone*. `efivarfs` was caught at the time; the other eight
+shipped for a further release, and one of them — `x86_pkg_temp_thermal` — publishes the only
+thermal zone that reports the processor die, so the activity card reported a chassis sensor
+as the processor with nothing failing and nothing logged. They are pinned now, and
+`post-image-test.sh` stage 7 asserts that every shipped `.ko` is one `plexos_init::nvidia::MODULES`
+names, so the next occurrence is a failed build that prints the module.
+
+Buildroot's `nvidia-driver` package is pinned at **390.151**, a Kepler-era branch, and was
+no help; the open modules are built by `BR2_PACKAGE_PLEXOS_NVIDIA` instead.
 
 `CONFIG_DRM_XE=y` is already set, so current Intel Arc cards work today with no change.
 `CONFIG_DRM_AMDGPU` is not set; it is the cheapest coverage available but is deliberately
@@ -1003,9 +1624,28 @@ See `docs/DEVELOPMENT.md`. Short version: Buildroot needs a Linux host with real
 network access. It cannot be built in the hosted Claude Code environment — the proxy
 there reaches GitHub and nothing else, and Buildroot fetches from a dozen other hosts.
 
-## Open decisions, none blocking
+## Open decisions
 
-1. **Name.** "PlexOS" uses a third-party trademark and likely needs to change. Cheap
-   now, a state migration later — `/var/lib/plexos` is in the frozen layout.
-2. **Secure Boot keys.** Enrol our own, or go through Microsoft's shim process.
-3. **Licence.** Not chosen.
+None blocks a build. Item 3 is the one that would cost somebody an evening if it were met
+without warning, and it has a written remedy rather than a fix.
+
+**Naming is no longer one of these.** It was item 1 for months, phrased as "the internal
+namespace is the part still open", while the README answered the same question in a table.
+**ADR-0022 closes it: MediaLith is the product, `plexos` is a frozen internal namespace,
+and none of it moves.** A grep still finds about 1,900 occurrences; every one is either a
+contract with a disk or churn with no beneficiary, and the ADR says which. Do not start a
+partial migration — a tree where `plexos` means "frozen" in some places and "not got round
+to it" in others is worse than either end state.
+
+1. **Secure Boot keys.** Enrol our own, or go through Microsoft's shim process.
+2. **Licence.** Not chosen.
+3. **When the anti-rollback floor should be recorded — IMPORTANT, deliberately deferred
+   2026-08-12.** The sequence is written when the boot entry is installed, so a release that
+   turns out to be unbootable raises the floor *above the release the machine ends up running
+   after the rollback*, and republishing the last good release is refused as a downgrade.
+   Nothing is bricked and the remedy is a higher stamp, which every build has. The candidate
+   change — record it when the gate marks the slot permanent — moves a security-critical
+   decision ADR-0006 owns and opens a different window, so it needs its own ADR and a rerun of
+   the rollback experiment. **The full statement of both sides is
+   `docs/PRODUCTION-READINESS.md` §1.35**; this entry exists so it is not lost, and the
+   readiness document is the one that is kept current.
