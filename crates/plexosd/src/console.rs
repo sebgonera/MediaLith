@@ -2717,10 +2717,22 @@ mod tests {
         // "https://" is not in this list: the page has exactly one absolute URL and the
         // test below asks the sharper question about it -- whether it points at this
         // machine. A blanket ban here would only be a second, blunter copy of that.
-        for marker in ["<script src", "<link", "<img", "@import"] {
+        for marker in ["<script src", "<img", "@import"] {
             assert!(
                 !PAGE.contains(marker),
                 "the page must be self-contained, but it contains {marker:?}"
+            );
+        }
+
+        // `<link` used to be in that list, and the property it was protecting is that
+        // nothing is *fetched*. A `data:` URI fetches nothing, so the favicon is allowed
+        // by name and every other link is still refused -- which keeps the teeth where
+        // they were rather than widening the rule to "links are fine now".
+        for (index, _) in PAGE.match_indices("<link") {
+            let tag = &PAGE[index..PAGE[index..].find('>').map_or(PAGE.len(), |e| index + e)];
+            assert!(
+                tag.contains("rel=\"icon\"") && tag.contains("href=\"data:"),
+                "the only link this page may carry is the inline favicon, got: {tag}"
             );
         }
     }

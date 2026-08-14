@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="MediaLith">
+  <title>MediaLith — small sizes</title>
+  <!-- Below about 20 px the gap between the stones silts up and the mark turns to
+       mush. This keeps the silhouette and drops the claim: one slab, one triangle. -->
+  <path fill="currentColor" fill-rule="evenodd" d="M17.00 15.50Q17.00 11.00 21.35 9.84L42.65 4.16Q47.00 3.00 47.00 7.50L47.00 56.50Q47.00 61.00 42.50 61.00L21.50 61.00Q17.00 61.00 17.00 56.50Z M27.50 29.10Q27.50 26.50 29.67 27.92L39.83 34.58Q42.00 36.00 39.83 37.42L29.67 44.08Q27.50 45.50 27.50 42.90Z"/>
+</svg>

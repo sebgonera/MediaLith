@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="MediaLith">
+  <title>MediaLith</title>
+  <!--
+    MediaLith. Two standing stones with the play triangle struck across them, and the gap
+    between them cutting it in two.
+
+    Every part of it is load-bearing. Two stones because the image has two slots and only
+    ever two (ADR-0003), of unequal height because only one of them booted. The tops are
+    struck off at an angle rather than levelled: a rounded rectangle is a box, a slab whose
+    top was broken is something quarried, which is the word in the name. The triangle spans
+    both stones because it is the same media whichever slot is running, and it survives
+    being cut — which is the rollback the whole system is built around.
+
+    One path, one colour, no mask. It scales to a favicon and cuts out of vinyl.
+  -->
+  <path fill="currentColor" fill-rule="evenodd" d="M10.50 16.50Q10.50 12.50 14.35 11.43L24.65 8.57Q28.50 7.50 28.50 11.50L28.50 56.00Q28.50 60.00 24.50 60.00L14.50 60.00Q10.50 60.00 10.50 56.00Z M34.00 11.00Q34.00 7.00 37.88 6.03L48.12 3.47Q52.00 2.50 52.00 6.50L52.00 56.00Q52.00 60.00 48.00 60.00L38.00 60.00Q34.00 60.00 34.00 56.00Z M23.50 25.60Q23.50 23.00 25.83 24.16L42.17 32.34Q44.50 33.50 42.17 34.66L25.83 42.84Q23.50 44.00 23.50 41.40Z"/>
+</svg>
