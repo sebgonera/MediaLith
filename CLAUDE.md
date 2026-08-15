@@ -125,11 +125,29 @@ every request returns 200. It did surface a real defect elsewhere, below.
 *EasyAudioEncoder* — disproved by the log, which shows EAE converting E-AC3 to WAV. The
 fifth instance of that trap did not happen.
 
-What it actually was: **Microsoft Edge on Linux advertises HEVC it cannot decode.** Plex
-believes the client, chooses `videoDecision="copy"`, remuxes 4K HEVC into DASH, and the
-browser silently fails to decode a stream it asked for. iOS works, Firefox works (it does
-not claim HEVC, so Plex transcodes to H.264), and the *same Edge on macOS* works. Entirely
-client-side, nothing to do with this appliance, and it would not happen on an H.264 file.
+What it actually was: **Microsoft Edge on Linux advertises HEVC it cannot decode**, and the
+browser's own console says so in as many words. The capture below is from the Linux build,
+the one that fails; **the same browser on macOS makes the same claim and can back it up**,
+which is what makes the platform rather than the browser the variable. `s4032` is Shaka's
+`CONTENT_UNSUPPORTED_BY_BROWSER` — documented as "the content container or codecs are not
+supported by this browser… for example, if the content uses HEVC" — so the client refused a
+stream whose codec it had itself offered. `[MDE] Augmented profile` is where it offered it:
+`hevc` under both `directPlay` and `directStream`, `hvc1`/`hev1`, `maxBitDepth: 10`,
+4096x2160.
+
+**Plex was not copying, though — it transcoded, to HEVC, because the client asked it to.**
+That correction moves the fault a step further from this machine than the first account of
+it did. Direct play and both direct streams were refused by the *client's own quality
+settings* — `[MDE] Cannot direct play: allowDirectPlay`, then "option is disabled" three
+times — so Plex re-encoded, and `X-Plex-Client-Profile-Extra` carried
+`append-transcode-target-codec(…protocol=dash&videoCodec=hevc)`, which names HEVC as the
+**output**. The appliance produced exactly what was requested and the requester could not
+play it. The same `s4032` killed the first attempt *and* the transcode fallback after it,
+which is what rules out the file, the mount and the decode path in one line.
+
+iOS works, Firefox works (it does not claim HEVC, so Plex converts to H.264), and the *same
+Edge on macOS* works. Entirely client-side, nothing to do with this appliance, and it would
+not happen on an H.264 file.
 
 Two things worth keeping from how long it took.
 
@@ -142,6 +160,13 @@ warning gives the line; only the lines around it give the direction of causation
 appliance — mounts, Landlock, certificates, codecs, permissions, free space — and the
 difference was which browser was pointed at it. Where a fault involves something outside
 this machine, vary that before taking the machine apart.
+
+**And the client keeps a log.** Every server-side log in this repository was read before
+anybody opened the browser's console — where the answer was sitting in plain words, twice:
+the profile in which Edge claims HEVC, and Shaka naming the codec as the reason it gave up.
+The appliance's logs could not contain it, because from the appliance's side nothing failed:
+it was asked for HEVC and it delivered HEVC. When a fault is *between* two machines, the
+half that is not this one has a log too.
 
 **The console's Plex link was a certificate warning, and the code had predicted it.**
 `plexUrl` built a TLS address from the bare host, and the comment above it said that whether
