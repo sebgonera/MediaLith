@@ -572,6 +572,23 @@ check "with the same version in it" \
       "$(sed -n 's/^VERSION_ID=//p' "${MOCK}/target/usr/lib/os-release")" \
       "${PLEXOS_VERSION}"
 
+# The source the image was built from, recorded inside it.
+#
+# A version stamp says which build; it does not say which source, and the two come apart
+# whenever an output tree outlives the checkout that filled it. Without this an image built
+# from commit A can be packaged while the repository sits on commit B, and the release
+# would name B. `tools/make-preview-release.sh` refuses unless this field equals HEAD, so
+# a build that stops writing it silently disarms that check.
+assert "the image records the commit it was built from" \
+       "grep -qE '^MEDIALITH_COMMIT=[0-9a-f]{40}$|^MEDIALITH_COMMIT=unknown$' '${WORK}/os-release'" \
+       "no MEDIALITH_COMMIT in os-release; the release tool cannot prove provenance"
+assert "and whether that source was committed" \
+       "grep -qE '^MEDIALITH_SOURCE_STATE=(clean|dirty|unknown)$' '${WORK}/os-release'" \
+       "no MEDIALITH_SOURCE_STATE in os-release"
+assert "both reach the image tree, not just the UKI section" \
+       "grep -q '^MEDIALITH_COMMIT=' '${MOCK}/target/usr/lib/os-release'" \
+       "the commit is in the boot entry and not inside /usr, which is the copy dm-verity covers"
+
 # The product name, which is what a person reads: the console header, the boot menu, and
 # the vendor string Plex reports to its clients.
 check "the product names itself MediaLith" \

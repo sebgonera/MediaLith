@@ -13,8 +13,10 @@
 </p>
 
 > **Technical Preview.** It boots, installs itself, provisions Plex, transcodes 4K HDR on
-> the GPU and updates itself without anybody present. It has run on four machines. Try it
-> on a spare box — not on the only copy of anything you care about.
+> the GPU, and supports signed A/B updates with automatic rollback. It has run on four
+> machines. **There is no update service yet** — a preview is updated from a bundle by
+> hand, and the appliance never goes looking on its own. Try it on a spare box, not on the
+> only copy of anything you care about.
 
 ![The MediaLith console](docs/screenshots/overview.png)
 
@@ -31,7 +33,7 @@ MediaLith is a whole system built around not doing that.
 | **Write it and boot it** | One image. No distribution to install, no packages to choose |
 | **Plex from a browser** | Downloaded from Plex's own endpoint, its signature checked against a pinned key, started confined — cgroup v2, Landlock, uid 900 |
 | **Hardware transcoding, or a reason** | Every diagnostic names a remedy. A report that says "unavailable" and stops has reproduced the problem this project exists to fix |
-| **Updates that undo themselves** | Two slots. A bad update boots three times, fails a health gate, and hands the machine back with nobody at it |
+| **Updates that undo themselves** | Two slots and a signed manifest. A bad update boots three times, fails a health gate, and hands the machine back with nobody at it. Applied by hand in the preview — there is no update service yet |
 | **Films where they already are** | The Windows partition of the machine's own disk, or a USB drive. Mounted read-only, browsed from the console |
 | **Sealed** | `/usr` is a read-only image verified by dm-verity on every boot, and its root hash lives inside a signed kernel image |
 
@@ -47,18 +49,48 @@ MediaLith is a whole system built around not doing that.
 The shortest path from this page to a running appliance. Nothing is built and nothing is
 installed on the computer's own disks unless you ask for it.
 
-1. **Download** the image from [Releases](../../releases/latest), and check it:
-   `sha256sum -c SHA256SUMS`
+1. **Download** the image and `SHA256SUMS` from [Releases](../../releases/latest), and
+   check what you got: `sha256sum -c SHA256SUMS` on Linux, `shasum -a 256 -c SHA256SUMS`
+   on macOS.
 2. **Decompress** it: `xz -d MediaLith-*.img.xz`
 3. **Write it to a USB stick.** ⚠️ **This erases the stick completely, partition table and
-   all.** It is the whole disk, never a partition — `/dev/sdb`, not `/dev/sdb1`.
-   - Linux / macOS: `sudo dd if=MediaLith-*.img of=/dev/sdX bs=4M status=progress conv=fsync`
-   - Windows: [Rufus](https://rufus.ie) or [Balena Etcher](https://etcher.balena.io), and
-     pick the decompressed `.img`
+   all.** It is the whole disk, never a partition.
+
+   <details><summary><b>Linux</b></summary>
+
+   Find the device with `lsblk`, then — check the name twice, `dd` does not ask:
+
+   ```sh
+   sudo dd if=MediaLith-*.img of=/dev/sdX bs=4M status=progress conv=fsync
+   ```
+   </details>
+
+   <details><summary><b>macOS</b></summary>
+
+   `diskutil list` to find it, then unmount it — do not eject it, the device has to stay
+   present. `rdiskN` is the raw device and is many times faster than `diskN`. macOS `dd`
+   has no `status=progress`; press Ctrl-T to see where it is.
+
+   ```sh
+   diskutil list
+   diskutil unmountDisk /dev/diskN
+   sudo dd if=MediaLith-*.img of=/dev/rdiskN bs=4m
+   ```
+
+   [Balena Etcher](https://etcher.balena.io) does the same thing with a dialog.
+   </details>
+
+   <details><summary><b>Windows</b></summary>
+
+   [Rufus](https://rufus.ie) or [Balena Etcher](https://etcher.balena.io). Pick the
+   decompressed `.img` and write it in DD mode.
+   </details>
 4. **Turn Secure Boot off** in the machine's firmware, and boot the stick in **UEFI** mode.
 5. **Read the screen.** MediaLith prints its own address and a code to sign in with.
 
-   ![The screen on the machine itself](docs/screenshots/console-first-boot.png)
+   ![The MediaLith console on the machine's own screen, captured in QEMU](docs/screenshots/console-first-boot.png)
+
+   *Captured in a virtual machine, which is why it reports no hardware transcoding.*
 
 6. **Open that address** in a browser on the same network. Press **P** at the machine for a
    QR code that signs a phone in, or type the recovery code it printed.
@@ -71,7 +103,9 @@ see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## What it looks like
 
-Every screenshot here is the current build on a real machine. Nothing is mocked up.
+The web console shots are the current build on real hardware. The first-boot console
+below is a QEMU capture and is labelled as one — the physical console is a text console on
+`tty1` and there is no way to photograph it from here. Nothing anywhere is mocked up.
 
 | | |
 | --- | --- |
