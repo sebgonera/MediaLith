@@ -68,7 +68,9 @@ list is about the system. Check against this before committing; it is short on p
    the file by name. Better: put scratch probes outside the tree entirely.
 4. **A test's scratch path includes the test's name.** Rust runs tests as threads in one
    process, so a fixed path is a race — one test deleting what another is reading. Written
-   wrong twice; suspected in a third that still flakes about once in twenty runs.
+   wrong twice, and the third was the flake that took the life of the project to identify:
+   two paths in `plexos-plex::execute` were shared *and* the tests ran the file they had
+   just written, which is ETXTBSY. Both halves are fixed; see the trap entry.
 5. **Do not conclude a package was not rebuilt by grepping its binary for a string.** A
    string that nothing prints is one the compiler discards, so its absence proves nothing.
    That produced a false alarm about `plexosd`. Grep for a string that is actually used, or
@@ -79,11 +81,26 @@ list is about the system. Check against this before committing; it is short on p
 
 ## Where things stand
 
-**The reference laptop, as of 2026-08-14 15:05.** Running `0.1.0.202608141231` on **slot b**,
-healthy, reached at `192.168.2.190` over **wireless on WPA3** (`GTFO`, 6 GHz). It boots from
-the USB-enclosed Kingston; **the internal disk was removed** after a two-disk boot mounted
-the other installation's `/usr` and failed dm-verity — see the label-ambiguity traps. Plex is
-provisioned, signed in, and has transcoded two streams.
+**There is a public release, and it is the first one (2026-08-15).**
+`v0.1.0-technical-preview-1` — `0.1.0.202608151309`, built from `41bd0f7468` with the tree
+clean, root hash `b57385613e422ac6d41b36ec8c1d07c3c0596017713994711101cdd34e3cb6a7`, 194 MB
+compressed. The whole path a stranger takes was walked rather than assumed: README's button
+resolves through `/releases/latest`, the asset downloads, and `sha256sum -c SHA256SUMS`
+against the *published* bytes says OK. The UKIs are unsigned, so Secure Boot has to be off,
+which the notes say in the first section.
+Note for whoever publishes the next one: **`/releases/latest` ignores prereleases**, so
+marking a preview as one puts the README's download button back to 404. The name invites
+exactly that mistake.
+
+**The reference laptop, as of 2026-08-15 13:00.** Running `0.1.0.202608142020` on **slot b**,
+healthy, hostname `MDLTEST1`, Plex `1.43.3.10861` running and signed in. Reached at
+`192.168.2.102`; it was `192.168.2.190` over **wireless on WPA3** (`GTFO`, 6 GHz) the day
+before, and both are true of the same machine on different interfaces. **It does not answer
+ICMP**, so a ping says nothing about whether it is up — `curl -sk https://<addr>/api/status`
+is the check, and an afternoon was nearly spent believing the appliance was off. It boots
+from the USB-enclosed Kingston; **the internal disk was removed** after a two-disk boot
+mounted the other installation's `/usr` and failed dm-verity — see the label-ambiguity
+traps. Plex is provisioned, signed in, and has transcoded two streams.
 
 `0.1.0.202608141256` is built, signed (`plexos-signing-dev-2`, channel `stable`) and being
 served from the build host at `http://192.168.2.123:8080/medialith-update`. It is the first
