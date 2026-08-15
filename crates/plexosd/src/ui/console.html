@@ -6638,6 +6638,18 @@ const PHASES = {
 // unusable. So: render only when something a reader would notice has actually changed.
 let lastRendered = null;
 
+/// Whether a restart has been asked for and the machine has not yet shown any sign of it.
+///
+/// It exists to cover one gap and no more: the poll runs every five seconds, so a page that
+/// rendered only what the last report said would sit there saying "Running" for up to five
+/// seconds after somebody pressed the button, which reads as a control that did nothing. It
+/// is cleared the moment a report says Plex is *not* running -- from there the card's own
+/// state line and the sentence about the supervisor tell the truth better than a flag here
+/// could -- and by `PLEX_RESTART_GIVE_UP_MS` if that never happens, so a restart the
+/// appliance silently declined cannot leave the button disabled for ever.
+let plexRestarting = false;
+let plexRestartAskedAt = 0;
+
 /** The Plex section, rendered from what /api/provision reports. */
 function renderPlex(report) {
   const signature = JSON.stringify([
@@ -6648,6 +6660,11 @@ function renderPlex(report) {
     // signed in, only at the next unrelated redraw -- which reads as intermittent.
     report.installed_version, report.latest_version,
     (((latestSetup || {}).steps || []).find(s => s.id === "claim-plex") || {}).state,
+    // Not a field of the report, and it still belongs here: it is the only thing that
+    // changes when somebody presses Restart, so leaving it out would hold the button on
+    // "Restart Plex" until an unrelated redraw came past. This section has had that defect
+    // once already, over the signing key on the update card.
+    plexRestarting,
   ]);
   if (signature === lastRendered) return;
   lastRendered = signature;
@@ -6816,6 +6833,15 @@ function renderPlexInto(report) {
           ? `<a class="visit" target="_blank" rel="noopener noreferrer"
                 href="${plexUrl(report.web)}">Open Plex</a>`
           : ""}
+        ${/* Beside the link because this is where somebody looks for it, and because the
+              route has existed since ADR-0021 with exactly one caller: the prompt after a
+              library is added. So the only way to restart Plex from a browser was to go
+              through adding a library, which is a feature reachable only by pretending to
+              use a different one. Offered whenever Plex is installed rather than only when
+              it is running -- a Plex that will not start is the state somebody most wants
+              this button in. */""}
+        <button id="plex-restart" class="ghost" ${plexRestarting ? "disabled" : ""}>${
+          plexRestarting ? "Restarting…" : "Restart Plex"}</button>
       </div>
       <dl>
         <dt>Installed</dt>
@@ -6849,6 +6875,8 @@ function renderPlexInto(report) {
       if (busy || phase === "failed") care.open = true;
     }
     wirePlexVersionControls(report);
+    const restart = document.getElementById("plex-restart");
+    if (restart) restart.addEventListener("click", askToRestartPlex);
     renderPlexFuture(report);
     return;
   }
@@ -7433,9 +7461,20 @@ function renderDriveBrowser() {
 /// The shares card gets this for nothing because every redraw replaces the whole section.
 /// This one deliberately does not replace the whole section, so the box would outlive the
 /// problem and report a failure that has since been fixed.
-function driveClearError() {
-  const box = document.querySelector("#drives .progress");
+/// Removes the failure `sectionError` wrote into a card, and nothing else.
+///
+/// Scoped to the card rather than to the page, because two sections can be showing a
+/// failure at once and clearing somebody else's is how a fault becomes invisible without
+/// becoming fixed. Note that the Plex card's install progress is *not* in range: it is
+/// rendered into `#plex-maintenance-body`, a different element, so this cannot remove a
+/// running install's log.
+function clearSectionError(id) {
+  const box = document.querySelector("#" + id + " .progress");
   if (box) box.remove();
+}
+
+function driveClearError() {
+  clearSectionError("drives");
 }
 
 async function drivesRequest(body) {
@@ -7517,8 +7556,40 @@ async function driveAdd(path, fromField) {
   // so it is their decision -- and the card says why it is needed rather than leaving a
   // library that is mounted and invisible.
   if (confirm("Added. Plex has to be restarted before it can see it. Restart Plex now? Anything playing will stop.")) {
-    restartPlex();
+    restartPlex("drives");
   }
+}
+
+/// Asks first, from the Plex view.
+///
+/// Separate from `restartPlex` because the two callers differ in what the person already
+/// knows. After adding a library the prompt says why a restart is needed at all; here they
+/// pressed a button called Restart Plex, so the only thing left to say is what it costs.
+function askToRestartPlex() {
+  if (!confirm("Restart Plex? Anything playing will stop. The appliance itself keeps running.")) return;
+  restartPlex("plex");
+}
+
+/// How long "Restarting…" may stand with the machine showing no sign of a restart.
+const PLEX_RESTART_GIVE_UP_MS = 60000;
+
+/// Whether the "Restarting…" state has done its job and should come down.
+///
+/// A function taking everything it reads, rather than a condition inside the poll, because
+/// the two ways it goes wrong are both invisible from the outside: a flag that never clears
+/// leaves the button disabled until somebody reloads the page, and one that clears at once
+/// makes the button look like it did nothing. Neither is a fact about the page's text, so
+/// only running this can tell.
+///
+/// `false` for a restart nobody asked for, so the caller cannot clear a flag that is not
+/// set and count that as an outcome.
+function plexRestartIsOver(asked, askedAt, report, now) {
+  if (!asked) return false;
+  // Plex being down *is* the sign, and from here the card says it better: a state line, a
+  // colour, and a sentence about the supervisor bringing it back.
+  if (!report.running) return true;
+  // And the deadline, for a restart the appliance accepted and did not perform.
+  return now - askedAt > PLEX_RESTART_GIVE_UP_MS;
 }
 
 /// Restarts Plex and nothing else.
@@ -7528,10 +7599,17 @@ async function driveAdd(path, fromField) {
 /// playing belongs to whoever is at the page. Reported as "restarting" rather than
 /// "restarted" -- Plex takes about twenty seconds to answer, and a page that announced it
 /// was up and then found a dead port would be lying about the thing it just did.
-async function restartPlex() {
+///
+/// `section` is which card shows a failure, and it is a parameter rather than a constant
+/// because this used to name `drives` in three places. That was right while the only way to
+/// reach it was the prompt after adding a library, and it became wrong the moment the Plex
+/// view grew a button: the page's own rule is that a failure appears in the section whose
+/// control caused it, and a restart refused from the Plex view would have reported itself
+/// into Storage, on a card the reader is not looking at.
+async function restartPlex(section) {
   const value = credential();
   if (!value) {
-    sectionError("drives", "The device token is needed to restart Plex. Unlock with the control in the header, at the top right of this page.");
+    sectionError(section, "The device token is needed to restart Plex. Unlock with the control in the header, at the top right of this page.");
     return;
   }
   try {
@@ -7541,11 +7619,20 @@ async function restartPlex() {
       headers: { "Authorization": "Bearer " + value, "Content-Type": "application/json" },
       body: "{}",
     });
-    if (!response.ok) { sectionError("drives", await response.text()); return; }
-    driveClearError();
+    if (!response.ok) { sectionError(section, await response.text()); return; }
+    clearSectionError(section);
   } catch (error) {
-    sectionError("drives", error.message || String(error));
+    sectionError(section, error.message || String(error));
+    return;
   }
+  // Only now, because a request that was refused restarted nothing and a button that went
+  // to "Restarting…" over a refusal would be the page saying something it had just been
+  // told was untrue.
+  plexRestarting = true;
+  plexRestartAskedAt = Date.now();
+  // The five-second idle poll is too slow to catch a server that goes down and comes back;
+  // asking again now moves the section to the one-second rate for as long as this lasts.
+  plexTick();
 }
 
 async function drivesTick() {
@@ -8167,13 +8254,20 @@ async function plexTick() {
   // with a different signature -- so reading the report from inside that early return would
   // have left the summary showing the first reply for ever.
   latestProvision = report;
+  if (plexRestartIsOver(plexRestarting, plexRestartAskedAt, report, Date.now())) {
+    plexRestarting = false;
+  }
   // The System view names Plex's version beside MediaLith's, and this is where that number
   // arrives. Cheap, and it cannot disagree with the Plex view because it is the same reply.
   renderPlexSoftware();
   renderSummary();
 
   renderPlex(report);
-  const busy = ["catalogue", "downloading", "verifying", "building", "starting"].includes(report.phase);
+  // A restart counts as busy: the whole point of the fast rate here is to catch a change of
+  // state, and a server going down and coming back is the fastest change this page ever has
+  // to follow.
+  const busy = plexRestarting
+    || ["catalogue", "downloading", "verifying", "building", "starting"].includes(report.phase);
   clearTimeout(plexTimer);
   plexTimer = setTimeout(plexTick, busy ? PLEX_BUSY_MS : PLEX_IDLE_MS);
 }

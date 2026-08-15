@@ -3308,6 +3308,193 @@ mod tests {
         }
     }
 
+    /// The body of the function that draws the Plex card, so a test can ask what is *in*
+    /// that card rather than what is somewhere in a nine-thousand-line page.
+    fn plex_card_markup() -> &'static str {
+        let body = PAGE
+            .split("function renderPlexInto(report) {")
+            .nth(1)
+            .expect("renderPlexInto is a named function so that this can be checked");
+        &body[..body.find("\nfunction ").unwrap_or(body.len())]
+    }
+
+    #[test]
+    fn plex_can_be_restarted_without_pretending_to_add_a_library() {
+        // `POST /api/plex/restart` shipped with ADR-0021 and had exactly one caller: the
+        // prompt after a library is added. So the route existed, the helper existed, both
+        // were tested, and the only way to reach either from a browser was to go through a
+        // feature about something else. That is the "complete, tested and uncalled" shape
+        // this repository has now found seven times, one notch weaker -- called once, from
+        // the wrong place -- and the check that catches it is asking whether the control is
+        // where somebody would look for it.
+        assert!(
+            plex_card_markup().contains("id=\"plex-restart\""),
+            "the Plex card must offer the restart, not only the drive-added prompt"
+        );
+        assert!(
+            PAGE.contains("restart.addEventListener(\"click\", askToRestartPlex)"),
+            "a button nothing listens to is a button that does nothing"
+        );
+    }
+
+    #[test]
+    fn every_caller_of_restart_plex_says_which_card_shows_a_failure() {
+        // The page's rule is that a failure appears in the section whose control caused it.
+        // `restartPlex` named `drives` in three places, which was right while the prompt
+        // after adding a library was the only way in, and became wrong the moment the Plex
+        // view grew a button: a refusal would have been written into Storage, on a card the
+        // reader is not looking at, while the card they pressed said nothing at all.
+        let body = PAGE
+            .split("async function restartPlex(section) {")
+            .nth(1)
+            .expect("restartPlex takes the section so that this can be checked");
+        let body = &body[..body.find("\nfunction ").unwrap_or(body.len())];
+        assert!(
+            !body.contains("\"drives\""),
+            "restartPlex must report into the section it was called from: {body}"
+        );
+        for (at, _) in PAGE.match_indices("restartPlex(") {
+            let call = &PAGE[at..];
+            assert!(
+                call.starts_with("restartPlex(\"") || call.starts_with("restartPlex(section"),
+                "every call has to name a section: {}",
+                &call[..call.find(')').map_or(24, |e| e + 1)]
+            );
+        }
+    }
+
+    #[test]
+    fn pressing_restart_is_a_change_the_card_redraws_for() {
+        // `renderPlex` redraws only when a listed value changes, and every one of them comes
+        // from the report -- so the button would have stayed on "Restart Plex" until some
+        // unrelated field moved, which reads as a control that ignored the press. The update
+        // card had this exact defect over a newly-verified signing key.
+        //
+        // Scoped to `renderPlex` before looking for the signature, because two renderers on
+        // this page compute one and the first written match is the other card's. The first
+        // version of this test read that one and failed about a signature it was never
+        // asked about -- the "does the name resolve to *one* thing" question, arriving in a
+        // test rather than in the page.
+        let render = PAGE
+            .split("function renderPlex(report) {")
+            .nth(1)
+            .expect("renderPlex is a named function so that this can be checked");
+        let signature = render
+            .split("const signature = JSON.stringify([")
+            .nth(1)
+            .expect("renderPlex computes a signature");
+        let signature = &signature[..signature.find("]);").unwrap_or(signature.len())];
+        assert!(
+            signature.contains("plexRestarting"),
+            "what changes when the button is pressed has to be in the signature: {signature}"
+        );
+    }
+
+    #[test]
+    fn the_restarting_state_ends_on_the_machine_and_not_on_a_hope() {
+        // Run rather than read, because both ways this goes wrong are invisible in the text.
+        // A flag that never clears leaves the button disabled until somebody reloads the
+        // page; one that clears immediately makes the button look like it did nothing. The
+        // page's own function is the thing under test, and the deadline comes out of the
+        // page with it rather than being written again here -- a test carrying its own copy
+        // of the constant would agree with itself while the page drifted.
+        let script = PAGE
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(body, _)| body)
+            .expect("the page has one script block");
+        let start = script
+            .find("const PLEX_RESTART_GIVE_UP_MS")
+            .expect("the deadline is declared above the function that applies it");
+        let end = script
+            .find("/// Restarts Plex and nothing else.")
+            .expect("and the function ends where the request begins");
+        let slice = &script[start..end];
+
+        let Some(engine) = ["node", "deno", "qjs"].into_iter().find(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        }) else {
+            println!(
+                "skip: the restarting state was not exercised -- no node, deno or qjs on \
+                 this host. Install one, or a button that stays disabled for ever will only \
+                 be found by pressing it on an appliance."
+            );
+            return;
+        };
+
+        // asked, ms since asking, whether Plex answers now, and what that has to mean.
+        let cases = [
+            (
+                true,
+                0,
+                true,
+                false,
+                "the moment it is asked, nothing has happened yet",
+            ),
+            (
+                true,
+                2000,
+                false,
+                true,
+                "Plex is down: the restart is visibly under way",
+            ),
+            (
+                true,
+                3000,
+                true,
+                false,
+                "still up two seconds later is still plausible",
+            ),
+            (
+                true,
+                61000,
+                true,
+                true,
+                "a minute up is a restart that never happened",
+            ),
+            (
+                false,
+                999_999,
+                false,
+                false,
+                "nothing was asked, so nothing is over",
+            ),
+        ];
+        let rows: Vec<String> = cases
+            .iter()
+            .map(|(asked, since, running, _, _)| format!("[{asked},{since},{running}]"))
+            .collect();
+        let cases_js = rows.join(",");
+        let driver = format!(
+            "{slice}\n\
+             const out = [];\n\
+             for (const [asked, since, running] of [{cases_js}]) {{\n\
+             \x20 out.push(plexRestartIsOver(asked, 1000000 - since, {{running}}, 1000000));\n\
+             }}\n\
+             console.log(JSON.stringify(out));\n"
+        );
+        let out = std::process::Command::new(engine)
+            .arg("-e")
+            .arg(&driver)
+            .output()
+            .expect("the engine runs");
+        assert!(
+            out.status.success(),
+            "the page's own function did not run: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got: Vec<bool> = serde_json::from_slice(&out.stdout).expect("a list of verdicts");
+        for (index, (asked, since, running, want, why)) in cases.iter().enumerate() {
+            assert_eq!(
+                got[index], *want,
+                "asked={asked} {since}ms ago, running={running}: {why}"
+            );
+        }
+    }
+
     #[test]
     fn starting_an_install_disables_whichever_button_started_it() {
         // Three buttons now start the same install and they never appear together, so
