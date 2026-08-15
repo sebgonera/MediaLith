@@ -240,6 +240,14 @@ Verify the download first:
   against an active middle until somebody compares the fingerprint. Do not expose it to
   the internet.
 
+## If a film will not start in a browser
+
+Try a different browser, or a native Plex app. Some browsers advertise HEVC support they do
+not have; Plex believes the client, sends the video untouched instead of converting it, and
+nothing plays. It is a client-side misreport rather than anything on the appliance, and it
+does not happen to H.264 files. Seen on one desktop browser while another on the same
+machine, and the same browser on a different operating system, both played the same file.
+
 ## Not verified
 
 Stated because a preview that only lists what works is not a preview.

@@ -107,33 +107,51 @@ attempts and the kernel gave it a different name — `sdc1` became `sdb1` — an
 came back regardless. That is the entire reason the record is keyed on `PARTUUID` rather
 than a device name, and it was demonstrated by an unrelated replug rather than by a test.
 
-**Playback failed at first with Plex error `s4032 (Manifest)` on every film, and why it
-started working is not known.** Everything the appliance could be asked was green
-throughout: the confinement log clean, `/dev/dri/renderD128` open to Plex, GPU `ready` with
-GuC and HuC running, 5.2 GB free on `/var`, the health gate passing, Plex signed in. Then
-three things changed at once — the machine took an update and rebooted, the library was
-removed and re-added, and the drive was replugged — and it played. **Three changes, one
-observation, no attribution.** The candidate worth chasing is the first: a reboot runs
-`disks::mount_all` *before* Plex starts, which is what ADR-0021 says the ordering is for,
-while adding a library from the console mounts it under a `/var/media` that Plex was
-already confined to. If that is the cause then the console's "restart Plex" offer is not
-sufficient and the honest instruction is "restart the appliance" — but that is a
-hypothesis, and the way to settle it is to add a library on a running machine and try to
-play it without rebooting.
+**Playback failed at first with `s4032 (Manifest)`, and the cause was the browser.** Three
+hypotheses were raised and all three were wrong; each was killed by evidence rather than by
+argument, and the sequence is the lesson.
 
-That first scan earned its keep anyway: it found that the refusal was being computed,
-logged, and then thrown away by a page that asked again with a `GET` — see the trap about
-deriving an event from a state. `...141256` is the fix.
+*Mount ordering* — the idea that a library bind-mounted under `/var/media` after Plex was
+confined is unreachable. **Disproved on hardware**: a second bind mount over the same files,
+made twelve hours after Plex started, plays. The kernel said so first —
+`security/landlock/fs.c:899` walks up and calls `follow_up()` at a mount root, so the walk
+reaches the `/var/media` dentry in the parent mount and finds the rule there. ADR-0021's
+"mount before Plex starts" is sound caution and is **not** load-bearing this way; nothing
+about adding a library needs a reboot.
 
-The first library added on real hardware was called `d93455e9-7042-4876-a52d-377a56fbe19b`,
-because the add path took its name from the field, and the field is filled from the folder
-the browser is *standing in* rather than the one whose button was pressed. On a drive
-chosen at its root that is the volume, whose scan-point name is the `PARTUUID`. Fixed in
-`...142020`; worth keeping because the page swaps that GUID for the drive's own name
-everywhere else and then typed one into the only field a person names things in.
+*The certificate on 32400* — disproved by the log: the browser reaches Plex over TLS and
+every request returns 200. It did surface a real defect elsewhere, below.
 
-Also from the wireless work of 2026-08-13, still unrun: switching networks from the console
-page, and the return to the previous network after a join fails.
+*EasyAudioEncoder* — disproved by the log, which shows EAE converting E-AC3 to WAV. The
+fifth instance of that trap did not happen.
+
+What it actually was: **Microsoft Edge on Linux advertises HEVC it cannot decode.** Plex
+believes the client, chooses `videoDecision="copy"`, remuxes 4K HEVC into DASH, and the
+browser silently fails to decode a stream it asked for. iOS works, Firefox works (it does
+not claim HEVC, so Plex transcodes to H.264), and the *same Edge on macOS* works. Entirely
+client-side, nothing to do with this appliance, and it would not happen on an H.264 file.
+
+Two things worth keeping from how long it took.
+
+**`Transcode runner appears to have died` is an effect, not a cause.** It was read as the
+fault for an hour. The context around it shows Plex killing its own job with SIGKILL after
+`Client stopped playback` — the reaper then notices the death Plex ordered. `grep` for a
+warning gives the line; only the lines around it give the direction of causation.
+
+**The client is a variable, and it is the one to control first.** Three hours went into the
+appliance — mounts, Landlock, certificates, codecs, permissions, free space — and the
+difference was which browser was pointed at it. Where a fault involves something outside
+this machine, vary that before taking the machine apart.
+
+**The console's Plex link was a certificate warning, and the code had predicted it.**
+`plexUrl` built a TLS address from the bare host, and the comment above it said that whether
+Plex accepts one was a question this repository could not settle and that the remedy would
+be that one line. Settled now: Plex answers TLS on 32400 with a real Let's Encrypt
+certificate whose only SAN is `*.<hash>.plex.direct` — no address in it, so every browser
+refuses. It hands out cleartext now, deliberately, on the LAN this console already says it
+is the only thing fit for; the alternative was a warning people learn to dismiss. The
+address Plex itself wants needs a hash from Plex's configuration and public DNS, and a link
+that depends on public DNS fails on the isolated network this appliance is built for.
 
 **There is no way to put films on the appliance's own disk**, and somebody asked on the
 first day the drives card existed. No SSH, no Samba, no `nfs-utils`; `curl` and `wget` are
