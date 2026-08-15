@@ -1311,22 +1311,32 @@ and its certificate — sign with the second one.
   CPU cannot run Plex" and was nothing of the kind: one clean reboot brought it up first
   try with a four-line log. That is the interrupted-mid-write trap below, reached by the
   monitoring rather than by the appliance. **The status route is `GET`.**
-- **There is an unreproduced flake in the suite, seen four times.** A single `cargo test
-  --workspace` fails with `plexos-plex`'s `a_mkfs_without_the_compressor`, against
-  **more than fifty** deliberate consecutive runs that were clean — so roughly one in
-  twenty-five. Sightings one to three had nothing captured. The fourth, during the CPU
-  baseline work, was under heavy load from a TCG guest saturating the machine, which
-  fits the note below about twelve cores versus two; the panic location was captured
-  (`execute.rs:518`, the first assertion) but **not the assertion message**, and six
-  consecutive runs immediately afterwards were clean, so it still cannot be produced on
-  demand. Two details confirmed while it was fresh: the scratch path is
-  `std::env::temp_dir().join("plexos-mkfs-capability")` — fixed, with no test name in
-  it, against the rule this file already states — and the test *executes the file it has
-  just written*, which is the `ETXTBSY` shape: another thread forking while that file is
-  open for writing leaves a child holding the descriptor. Recorded rather than guessed
-  at, because a speculative fix to a test that cannot be made to fail is a change nobody
-  can check. **What would settle it** is capturing the assertion message, which needs a
-  run that fails with output kept — load appears to help.
+- **The flake that was unreproduced for the life of the project was `ETXTBSY`, and CI is
+  what caught it.** Seen five times, roughly one run in twenty-five, always in
+  `plexos-plex`. The entry that stood here said what would settle it — *capture the
+  assertion message* — and a CI run on an unrelated pull request did exactly that:
+  `asking mkfs.erofs what it supports: Text file busy (os error 26)`. The shape recorded
+  here as a suspicion was the answer.
+  `execve` answers ETXTBSY for a file any process holds open for writing. Rust runs tests
+  as threads in one process and several tests here spawn, so a `fork` landing between the
+  open and the close of a stub the test has just written hands the child an inherited
+  write descriptor; the child drops it at its own `exec`, and until then every attempt to
+  run that path fails — three frames away, as a message about mkfs.
+  **Then it was reproduced on demand, which nothing had managed before**: forty runs with
+  the machine kept busy produced two failures, and the second named a *different test* —
+  `running losetup: Text file busy`. It was never one test. It was every test in
+  `execute.rs` that writes an executable and runs it, and the one that got the blame was
+  simply the one that ran most often.
+  `write_executable_stub` writes the stub and does not return until it has run once. That
+  is a fix rather than a mitigation: nothing opens the file for writing again, so once one
+  `exec` has succeeded no later one can meet the window. Forty runs under the same load
+  afterwards: no failures and no ETXTBSY. Both scratch paths now carry their test's name,
+  which was the other half and had been written down as a rule long before.
+  Two things worth keeping. **The assertion message was three frames from the cause** —
+  "Text file busy" is about the file the *test* wrote, and the sentence naming mkfs sent
+  four investigations at the compressor check. And **a flake that cannot be reproduced can
+  still be diagnosed by the machine that runs it most**: this repository ran the suite by
+  hand for months and CI hit it inside a day.
 - **A shared scratch path makes two passing tests into one flaky pair.** Rust runs tests as
   threads in one process, so a fixed temp file is a race: one test deletes what another is
   reading and they fail in whichever order the scheduler picked. Hit twice in one day —

@@ -430,6 +430,57 @@ pub fn mount_plan(
 mod tests {
     use super::*;
 
+    /// Writes a stand-in program and does not return until it can actually be run.
+    ///
+    /// Written because two tests here wrote an executable and ran it, and both were flaky:
+    /// the suite failed roughly one run in twenty-five for the life of the project, always
+    /// at one of them, and the cause was invisible from the assertion that reported it.
+    ///
+    /// `execve` answers **ETXTBSY** for a file that any process holds open for writing.
+    /// Rust runs tests as threads in one process and several tests here spawn, so a `fork`
+    /// landing in the window between opening this file and closing it hands the child an
+    /// inherited write descriptor. The child drops it at its own `exec` -- Rust opens with
+    /// `O_CLOEXEC` -- but until then every attempt to run this path fails, three frames
+    /// away, as "Text file busy".
+    ///
+    /// Waiting here is a fix rather than a mitigation: nothing opens this file for writing
+    /// again, so once one `exec` has succeeded no later one can meet the same window. The
+    /// loop is bounded, so a stub that genuinely cannot run fails as a test rather than
+    /// hanging.
+    ///
+    /// Reproduced on demand before it was fixed -- forty runs against a machine kept busy,
+    /// two failures, both ETXTBSY, in two different tests -- and forty of the same with
+    /// this in place and none.
+    fn write_executable_stub(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for attempt in 0..200 {
+            match std::process::Command::new(&path).output() {
+                Ok(_) => return path,
+                Err(error) if error.raw_os_error() == Some(26) => {
+                    assert!(attempt < 199, "{} stayed ETXTBSY: {error}", path.display());
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("the stub at {} will not run: {error}", path.display()),
+            }
+        }
+        path
+    }
+
+    /// A scratch directory named after the test that owns it.
+    ///
+    /// The rule this repository already had and two paths in this file already broke: tests
+    /// are threads in one process, so a shared path is one test deleting what another is
+    /// reading.
+    fn scratch(test: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("plexos-{test}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn the_compression_matches_what_usr_uses() {
         // Not arbitrary: the defconfig sets BR2_TARGET_ROOTFS_EROFS_LZ4HC for /usr, and
@@ -444,18 +495,16 @@ mod tests {
         // Reported from the appliance: busybox's losetup has no --show, and the message
         // said all eight loop devices might be in use. That is good advice for a busy
         // machine and sends the reader nowhere useful here.
-        use std::os::unix::fs::PermissionsExt as _;
         use std::path::PathBuf;
 
-        let dir = std::env::temp_dir().join("plexos-losetup-remedy");
-        std::fs::create_dir_all(&dir).unwrap();
-        let stub = dir.join("losetup");
-        std::fs::write(
-            &stub,
+        let dir = scratch(
+            "a_losetup_that_does_not_understand_the_flag_is_not_blamed_on_busy_loop_devices",
+        );
+        let stub = write_executable_stub(
+            &dir,
+            "losetup",
             "#!/bin/sh\nprintf \"losetup: unrecognized option '--show'\\n\" >&2\nexit 1\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
 
         let tools = crate::tools::MountTools {
             losetup: stub,
@@ -483,16 +532,8 @@ mod tests {
         // against a stand-in that prints what the real one prints. The stand-in is a
         // shell script, which is the only part of this that is not the real thing --
         // the parsing being exercised is the parsing that ships.
-        let dir = std::env::temp_dir().join("plexos-mkfs-capability");
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let write_stub = |name: &str, body: &str| -> PathBuf {
-            use std::os::unix::fs::PermissionsExt as _;
-            let path = dir.join(name);
-            std::fs::write(&path, body).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            path
-        };
+        let dir = scratch("a_mkfs_without_the_compressor_is_refused_before_anything_is_downloaded");
+        let write_stub = |name: &str, body: &str| write_executable_stub(&dir, name, body);
 
         // What the target's mkfs.erofs printed when it had been built --disable-lz4.
         let without = write_stub(
