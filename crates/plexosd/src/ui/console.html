@@ -5800,11 +5800,33 @@ const ICONS = {
 /// copy of this string is exactly how the two would come to disagree about the scheme. The
 /// repository has a test that counts them.
 ///
-/// Whether Plex answers TLS on 32400, under a certificate a browser accepts for a bare
-/// address, is a question about Plex and not one this repository can settle. If it turns out
-/// not to, the remedy is this one line.
+/// It was `https` and that was wrong, which is now measured rather than assumed. The line
+/// above used to say that whether Plex answers TLS on 32400 under a certificate a browser
+/// accepts for a bare address was a question this repository could not settle, and that the
+/// remedy would be this one line. It has been settled, on the appliance:
+///
+///     $ openssl s_client -connect <appliance>:32400
+///     subject=CN=*.<hash>.plex.direct
+///     X509v3 Subject Alternative Name: DNS:*.<hash>.plex.direct
+///
+/// Plex does answer TLS, with a real Let's Encrypt certificate — and its only subject
+/// alternative name is that wildcard. There is **no IP address in it**, so a TLS link built
+/// from a bare address fails validation in every browser, and the button produced a security
+/// warning rather than security. Verified by
+/// asking: with validation on, that URL returns nothing; the `plex.direct` name returns 200.
+///
+/// So this hands out `http`. A console served over TLS pointing at a cleartext link is a real
+/// downgrade and it is the lesser of the two: the traffic stays on the same LAN the console
+/// already told you it is only fit for, whereas the alternative was a link that every browser
+/// refuses and most people would click through — which teaches somebody to dismiss exactly the
+/// warning that matters.
+///
+/// The address Plex itself wants is `<ip-with-dashes>.<hash>.plex.direct:32400`, which resolves
+/// to the LAN address through Plex's own DNS. This page cannot build it: the hash lives in
+/// Plex's configuration, and a link that depends on public DNS is a link that fails on an
+/// isolated network — which is the network this appliance is designed for.
 function plexUrl(path) {
-  return `https://${esc(location.hostname)}${esc(path)}`;
+  return `http://${esc(location.hostname)}${esc(path)}`;
 }
 
 /// The interface a person would actually be reaching this page through.

@@ -4144,9 +4144,26 @@ console.log("OK");
             .map(|(_, rest)| rest)
             .expect("plexUrl is a named function so that this can be checked");
         let body = &helper[..helper.find("\n}").unwrap_or(helper.len())];
+        // This used to require TLS, and the requirement was wrong -- measured on the
+        // appliance rather than argued. Plex does answer TLS on 32400, with a real Let's
+        // Encrypt certificate whose only subject alternative name is
+        // `*.<hash>.plex.direct`. There is no address in it, so a link built from a bare
+        // host fails validation in every browser: the button produced a security warning
+        // and taught people to click through one.
+        //
+        // So the scheme is cleartext, deliberately, on the LAN this console already says
+        // it is the only thing fit for. What the test still guards is the property the
+        // original was reaching for: exactly one place decides, and it builds the address
+        // from the host this page came from rather than from anything it was told.
         assert!(
-            body.contains("https://"),
-            "and that function must not drop out of TLS on the way: {body}"
+            body.contains("location.hostname"),
+            "the address must come from the host this page was served by, not from a \
+             field or a configured value: {body}"
+        );
+        assert!(
+            !body.contains("https://"),
+            "TLS here is a certificate warning rather than security -- Plex's own \
+             certificate does not cover a bare address: {body}"
         );
     }
 

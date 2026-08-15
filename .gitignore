@@ -17,6 +17,11 @@
 
 # Build artifacts
 *.img
+# What tools/make-preview-release.sh assembles: a 194 MB asset, its checksums and its
+# notes. The notes are generated from the commit and the build, so committing them would
+# be committing a copy that goes stale the moment either moves.
+/release/
+*.img.xz
 # QMP screendumps land in QEMU's cwd, which is wherever it was launched from.
 *.ppm
 *.erofs

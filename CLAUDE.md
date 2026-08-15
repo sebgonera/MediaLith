@@ -95,19 +95,88 @@ against the built artefacts rather than the build log — `ntfs_fs_type` and `in
 are symbols in `vmlinux` and there is no `.ko`, and the shipped `/usr` erofs was extracted
 and its `plexosd` grepped for strings the code actually uses.
 
-**What ADR-0021 has and has not done on hardware.** The scan runs: the appliance enumerated
-every partition on both attached disks, refused the six belonging to MediaLith itself, and
-offered the one that did not. **No NTFS volume has been opened** — the only non-MediaLith
-drive to hand is a blank 1 TB WD SN560 whose single MBR partition holds no filesystem, and
-all six filesystems correctly refused it. Browsing a drive and binding a folder under
-`/var/media` are still unrun.
+**ADR-0021 has now run, end to end, on hardware (2026-08-14).** A USB drive with an NTFS
+film library was plugged into the appliance: scanned, mounted `ntfs3`, browsed, a folder
+bound under `/var/media`, and Plex found and indexed the library. The Windows partition
+that was an unreadable block for the whole life of this project is readable.
 
-That first scan earned its keep anyway: it found that the refusal was being computed,
-logged, and then thrown away by a page that asked again with a `GET` — see the trap about
-deriving an event from a state. `...141256` is the fix.
+Two things came out of it that nobody planned.
 
-Also from the wireless work of 2026-08-13, still unrun: switching networks from the console
-page, and the return to the previous network after a join fails.
+**The `PARTUUID` identity proved itself by accident.** The drive was replugged between
+attempts and the kernel gave it a different name — `sdc1` became `sdb1` — and the library
+came back regardless. That is the entire reason the record is keyed on `PARTUUID` rather
+than a device name, and it was demonstrated by an unrelated replug rather than by a test.
+
+**Playback failed at first with `s4032 (Manifest)`, and the cause was the browser.** Three
+hypotheses were raised and all three were wrong; each was killed by evidence rather than by
+argument, and the sequence is the lesson.
+
+*Mount ordering* — the idea that a library bind-mounted under `/var/media` after Plex was
+confined is unreachable. **Disproved on hardware**: a second bind mount over the same files,
+made twelve hours after Plex started, plays. The kernel said so first —
+`security/landlock/fs.c:899` walks up and calls `follow_up()` at a mount root, so the walk
+reaches the `/var/media` dentry in the parent mount and finds the rule there. ADR-0021's
+"mount before Plex starts" is sound caution and is **not** load-bearing this way; nothing
+about adding a library needs a reboot.
+
+*The certificate on 32400* — disproved by the log: the browser reaches Plex over TLS and
+every request returns 200. It did surface a real defect elsewhere, below.
+
+*EasyAudioEncoder* — disproved by the log, which shows EAE converting E-AC3 to WAV. The
+fifth instance of that trap did not happen.
+
+What it actually was: **Microsoft Edge on Linux advertises HEVC it cannot decode**, and the
+browser's own console says so in as many words. The capture below is from the Linux build,
+the one that fails; **the same browser on macOS makes the same claim and can back it up**,
+which is what makes the platform rather than the browser the variable. `s4032` is Shaka's
+`CONTENT_UNSUPPORTED_BY_BROWSER` — documented as "the content container or codecs are not
+supported by this browser… for example, if the content uses HEVC" — so the client refused a
+stream whose codec it had itself offered. `[MDE] Augmented profile` is where it offered it:
+`hevc` under both `directPlay` and `directStream`, `hvc1`/`hev1`, `maxBitDepth: 10`,
+4096x2160.
+
+**Plex was not copying, though — it transcoded, to HEVC, because the client asked it to.**
+That correction moves the fault a step further from this machine than the first account of
+it did. Direct play and both direct streams were refused by the *client's own quality
+settings* — `[MDE] Cannot direct play: allowDirectPlay`, then "option is disabled" three
+times — so Plex re-encoded, and `X-Plex-Client-Profile-Extra` carried
+`append-transcode-target-codec(…protocol=dash&videoCodec=hevc)`, which names HEVC as the
+**output**. The appliance produced exactly what was requested and the requester could not
+play it. The same `s4032` killed the first attempt *and* the transcode fallback after it,
+which is what rules out the file, the mount and the decode path in one line.
+
+iOS works, Firefox works (it does not claim HEVC, so Plex converts to H.264), and the *same
+Edge on macOS* works. Entirely client-side, nothing to do with this appliance, and it would
+not happen on an H.264 file.
+
+Two things worth keeping from how long it took.
+
+**`Transcode runner appears to have died` is an effect, not a cause.** It was read as the
+fault for an hour. The context around it shows Plex killing its own job with SIGKILL after
+`Client stopped playback` — the reaper then notices the death Plex ordered. `grep` for a
+warning gives the line; only the lines around it give the direction of causation.
+
+**The client is a variable, and it is the one to control first.** Three hours went into the
+appliance — mounts, Landlock, certificates, codecs, permissions, free space — and the
+difference was which browser was pointed at it. Where a fault involves something outside
+this machine, vary that before taking the machine apart.
+
+**And the client keeps a log.** Every server-side log in this repository was read before
+anybody opened the browser's console — where the answer was sitting in plain words, twice:
+the profile in which Edge claims HEVC, and Shaka naming the codec as the reason it gave up.
+The appliance's logs could not contain it, because from the appliance's side nothing failed:
+it was asked for HEVC and it delivered HEVC. When a fault is *between* two machines, the
+half that is not this one has a log too.
+
+**The console's Plex link was a certificate warning, and the code had predicted it.**
+`plexUrl` built a TLS address from the bare host, and the comment above it said that whether
+Plex accepts one was a question this repository could not settle and that the remedy would
+be that one line. Settled now: Plex answers TLS on 32400 with a real Let's Encrypt
+certificate whose only SAN is `*.<hash>.plex.direct` — no address in it, so every browser
+refuses. It hands out cleartext now, deliberately, on the LAN this console already says it
+is the only thing fit for; the alternative was a warning people learn to dismiss. The
+address Plex itself wants needs a hash from Plex's configuration and public DNS, and a link
+that depends on public DNS fails on the isolated network this appliance is built for.
 
 **There is no way to put films on the appliance's own disk**, and somebody asked on the
 first day the drives card existed. No SSH, no Samba, no `nfs-utils`; `curl` and `wget` are

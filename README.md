@@ -1,7 +1,24 @@
-# MediaLith
+<p align="center">
+  <img src="docs/brand/medialith-lockup.svg" width="330" alt="MediaLith">
+</p>
 
-An immutable, atomically-updated Linux appliance built to run Plex Media Server well —
-and to say clearly what is wrong when it does not.
+<p align="center">
+  <strong>A Linux appliance that runs Plex Media Server — and says clearly when
+  something is wrong.</strong>
+</p>
+
+<p align="center">
+  <a href="../../releases/latest"><b>Download the Technical Preview</b></a>
+  &nbsp;·&nbsp; x86-64 &nbsp;·&nbsp; UEFI &nbsp;·&nbsp; ~194 MB compressed
+</p>
+
+> **Technical Preview.** It boots, installs itself, provisions Plex, transcodes 4K HDR on
+> the GPU, and supports signed A/B updates with automatic rollback. It has run on four
+> machines. **There is no update service yet** — a preview is updated from a bundle by
+> hand, and the appliance never goes looking on its own. Try it on a spare box, not on the
+> only copy of anything you care about.
+
+![The MediaLith console](docs/screenshots/overview.png)
 
 A general-purpose distribution running Plex has one characteristic failure: hardware
 transcoding stops working and **nothing says so**. Plex falls back to software, the CPU
@@ -11,11 +28,91 @@ and the fault is that Plex does not.
 
 MediaLith is a whole system built around not doing that.
 
+| | |
+| --- | --- |
+| **Write it and boot it** | One image. No distribution to install, no packages to choose |
+| **Plex from a browser** | Downloaded from Plex's own endpoint, its signature checked against a pinned key, started confined — cgroup v2, Landlock, uid 900 |
+| **Hardware transcoding, or a reason** | Every diagnostic names a remedy. A report that says "unavailable" and stops has reproduced the problem this project exists to fix |
+| **Updates that undo themselves** | Two slots and a signed manifest. A bad update boots three times, fails a health gate, and hands the machine back with nobody at it. Applied by hand in the preview — there is no update service yet |
+| **Films where they already are** | The Windows partition of the machine's own disk, or a USB drive. Mounted read-only, browsed from the console |
+| **Sealed** | `/usr` is a read-only image verified by dm-verity on every boot, and its root hash lives inside a signed kernel image |
+
 > MediaLith is an independent community project and is not affiliated with, endorsed by,
 > or sponsored by Plex Inc. Plex and Plex Media Server are trademarks of Plex Inc.
-> Previously developed under the working name PlexOS; some internal identifiers still use
-> the legacy `plexos` namespace, deliberately — see [Names that did not
-> change](#names-that-did-not-change).
+> Previously developed under the working name PlexOS; internal identifiers still use the
+> `plexos` namespace, deliberately — see [ADR-0022](docs/adr/0022-medialith-is-the-product-plexos-is-the-namespace.md).
+
+---
+
+## Try MediaLith
+
+The shortest path from this page to a running appliance. Nothing is built and nothing is
+installed on the computer's own disks unless you ask for it.
+
+1. **Download** the image and `SHA256SUMS` from [Releases](../../releases/latest), and
+   check what you got: `sha256sum -c SHA256SUMS` on Linux, `shasum -a 256 -c SHA256SUMS`
+   on macOS.
+2. **Decompress** it: `xz -d MediaLith-*.img.xz`
+3. **Write it to a USB stick.** ⚠️ **This erases the stick completely, partition table and
+   all.** It is the whole disk, never a partition.
+
+   <details><summary><b>Linux</b></summary>
+
+   Find the device with `lsblk`, then — check the name twice, `dd` does not ask:
+
+   ```sh
+   sudo dd if=MediaLith-*.img of=/dev/sdX bs=4M status=progress conv=fsync
+   ```
+   </details>
+
+   <details><summary><b>macOS</b></summary>
+
+   `diskutil list` to find it, then unmount it — do not eject it, the device has to stay
+   present. `rdiskN` is the raw device and is many times faster than `diskN`. macOS `dd`
+   has no `status=progress`; press Ctrl-T to see where it is.
+
+   ```sh
+   diskutil list
+   diskutil unmountDisk /dev/diskN
+   sudo dd if=MediaLith-*.img of=/dev/rdiskN bs=4m
+   ```
+
+   [Balena Etcher](https://etcher.balena.io) does the same thing with a dialog.
+   </details>
+
+   <details><summary><b>Windows</b></summary>
+
+   [Rufus](https://rufus.ie) or [Balena Etcher](https://etcher.balena.io). Pick the
+   decompressed `.img` and write it in DD mode.
+   </details>
+4. **Turn Secure Boot off** in the machine's firmware, and boot the stick in **UEFI** mode.
+5. **Read the screen.** MediaLith prints its own address and a code to sign in with.
+
+   ![The MediaLith console on the machine's own screen, captured in QEMU](docs/screenshots/console-first-boot.png)
+
+   *Captured in a virtual machine, which is why it reports no hardware transcoding.*
+
+6. **Open that address** in a browser on the same network. Press **P** at the machine for a
+   QR code that signs a phone in, or type the recovery code it printed.
+
+From there the console installs Plex, finds your drives and sets the machine up. If
+something is wrong, it says what and what to do about it.
+
+Building from source is a different job and needs a Linux host with real network access —
+see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
+## What it looks like
+
+The web console shots are the current build on real hardware. The first-boot console
+below is a QEMU capture and is labelled as one — the physical console is a text console on
+`tty1` and there is no way to photograph it from here. Nothing anywhere is mocked up.
+
+| | |
+| --- | --- |
+| **Hardware transcoding, watched live.** 4K HEVC HDR10 down to 1080p, decode and encode both on the GPU. The account, device and title are blurred; nothing else is. | ![](docs/screenshots/plex-hardware-transcode.png) |
+| **A library on a drive in the machine.** An NTFS partition mounted read-only, and the six volumes belonging to MediaLith itself refused. | ![](docs/screenshots/storage.png) |
+| **Two slots, and what happens between them.** Shown mid-update: the boot entry renamed, the try counter cleared, this slot made permanent. | ![](docs/screenshots/system.png) |
+| **Three questions a browser cannot ask.** Whether the appliance has a route, which resolver it is using, and whether a name it needs actually resolves. | ![](docs/screenshots/network.png) |
 
 ---
 
@@ -42,7 +139,7 @@ It runs. Specifics, because "it runs" is the kind of claim this project distrust
   the previous release by itself. A second experiment, where the image booted fine but
   Plex could not start, ended the same way.
 
-Seven crates, **827 tests**, and roughly 39 packages in the base image.
+Seven crates, **1215 tests**, and roughly 39 packages in the base image.
 
 > ### The management console is for a trusted LAN
 >
@@ -96,13 +193,13 @@ the base.
 
 | Crate | Role | Tests |
 | --- | --- | --- |
-| `plexos-sys` | The kernel-interface layer: verity, dm ioctls, mount, execve, Landlock, privilege dropping, PTYs, reaping | 95 |
-| `plexos-init` | PID 1. Plans and executes the boot, then supervises what it started | 84 |
-| `plexosd` | The console: HTTP server, status, installer, updater, settings, terminal, TLS | 357 |
+| `plexos-sys` | The kernel-interface layer: verity, dm ioctls, mount, execve, Landlock, privilege dropping, PTYs, reaping | 123 |
+| `plexos-init` | PID 1. Plans and executes the boot, then supervises what it started | 91 |
+| `plexosd` | The console: HTTP server, status, installer, updater, settings, terminal, TLS, local drives | 690 |
 | `plexos-plex` | Provisioning Plex from its own signed packages, and confining it | 106 |
-| `plexos-update` | A/B updates, the signed trust chain, anti-rollback, revocation | 65 |
-| `plexos-types` | Every on-disk and on-wire format, plus the GPT writer | 65 |
-| `plexos-gpu` | Whether hardware transcoding works, and if not, what to do | 53 |
+| `plexos-update` | A/B updates, the signed trust chain, anti-rollback, revocation | 68 |
+| `plexos-types` | Every on-disk and on-wire format, plus the GPT writer | 74 |
+| `plexos-gpu` | Whether hardware transcoding works, and if not, what to do | 57 |
 
 The crate names are the legacy `plexos-*` namespace and stay that way for now — see [Names
 that did not change](#names-that-did-not-change).
@@ -222,7 +319,9 @@ fail and hand the machine back to an older one.
 | Crate and binary names — `plexos-sys`, `plexosd`, … | A large diff, no user-visible benefit, and every build script, package definition and image assembly step is an opportunity to break something that works. The daemon is *the MediaLith management daemon*; the executable is still `plexosd` |
 
 Public branding does not have to match an on-disk namespace, and here it deliberately does
-not. Internal namespaces can migrate later, as a change designed for that purpose.
+not. **This is settled rather than pending**: [ADR-0022](docs/adr/0022-medialith-is-the-product-plexos-is-the-namespace.md)
+records it as an accepted decision, including why migrating only the cheap half would be
+worse than either end state.
 
 ## What is not done
 
@@ -230,14 +329,13 @@ not. Internal namespaces can migrate later, as a change designed for that purpos
 - **The root signing key is a development key.** Its private half sits on a build host,
   and every place that reports a signature says so.
 - **Arc and AMD are unverified.** One has no hardware here; the other is not built.
-- **CI runs, and the newest work has not been through it.** `.github/workflows/ci.yml`
-  checks formatting, clippy, the test suite and the docs, on pushes to `main` and on pull
-  requests, and it has passed on both. This line used to say it had never fired once,
-  which was true the day it was written and stopped being true on the very push that added
-  it — a sentence describing a state its own commit ended. What is true now is narrower:
-  development happens on a branch, `main` last moved on 2026-08-11, and everything since
-  is unverified by CI until that branch is merged. It covers the Rust workspace only; image
-  builds need a Buildroot host and are still tested by being put on machines.
+- **Image builds are not in CI.** `.github/workflows/ci.yml` checks formatting, clippy,
+  the test suite and the documentation on every pull request and every push to `main`, and
+  `main` is protected so nothing lands without it. It covers the Rust workspace only.
+  Building an image needs 24 GB of working tree against the 14 GB a GitHub-hosted runner
+  offers, so images are built on a machine with a Buildroot tree and tested by being put on
+  hardware. This line has been wrong twice before by describing a state its own commit
+  ended; what is written here was measured on 2026-08-14.
 
 ## Licensing
 
@@ -268,5 +366,5 @@ hosts. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 ## Reading further
 
 Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), then
-[docs/adr/](docs/adr/) for why anything is the way it is. Sixteen decision records, each
+[docs/adr/](docs/adr/) for why anything is the way it is. Twenty-two decision records, each
 with the context that forced it.

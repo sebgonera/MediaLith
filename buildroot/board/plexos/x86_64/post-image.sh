@@ -305,11 +305,37 @@ check_factory_accounts() {
 # MediaLith product rename. VERSION_ID is untouched for the sharper reason that the
 # updater's anti-rollback floor is read from it.
 stage_os_release() {
+    # The source this image was built from, recorded *inside* it.
+    #
+    # A version stamp says which build; it does not say which source. The two come apart
+    # the moment an output tree outlives the checkout that made it — a release assembled
+    # from a stale `output-generic/` while the repository sits on a newer commit would name
+    # a commit that never produced those bytes, and nothing downstream could tell.
+    #
+    # So the commit is written here, in the same stage as the version and for the same
+    # reason: this runs before the /usr image is built, so it lands inside the erofs that
+    # dm-verity covers. An image cannot then disagree with itself about where it came from,
+    # and `tools/make-preview-release.sh` reads it back out of the built image rather than
+    # trusting the working tree.
+    #
+    # `SOURCE_STATE` is the honest half. A build from a tree with uncommitted changes gets
+    # `dirty`, and the release tool refuses to package one.
+    local commit state
+    commit="$(git -C "${BOARD_DIR}/../../.." rev-parse HEAD 2>/dev/null || printf 'unknown')"
+    if [ -n "$(git -C "${BOARD_DIR}/../../.." status --porcelain 2>/dev/null)" ]; then
+        state="dirty"
+    elif [ "${commit}" = "unknown" ]; then
+        state="unknown"
+    else
+        state="clean"
+    fi
+
     msg "stamping the version into os-release"
-    printf 'NAME="MediaLith"\nID=plexos\nVERSION_ID=%s\nPRETTY_NAME="MediaLith %s"\nSORT_KEY=plexos\n' \
-        "${PLEXOS_VERSION}" "${PLEXOS_VERSION}" > "${WORK}/os-release"
+    printf 'NAME="MediaLith"\nID=plexos\nVERSION_ID=%s\nPRETTY_NAME="MediaLith %s"\nSORT_KEY=plexos\nMEDIALITH_COMMIT=%s\nMEDIALITH_SOURCE_STATE=%s\n' \
+        "${PLEXOS_VERSION}" "${PLEXOS_VERSION}" "${commit}" "${state}" > "${WORK}/os-release"
     install -D -m 0644 "${WORK}/os-release" "${TARGET_DIR}/usr/lib/os-release"
     msg "  VERSION_ID=${PLEXOS_VERSION}"
+    msg "  source ${commit} (${state})"
 }
 
 # --------------------------------------------------------------------------
