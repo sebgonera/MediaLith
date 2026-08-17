@@ -35,3 +35,11 @@ secrets/
 
 # Agent working directory, including worktrees of this repository
 /.claude/
+
+# There is no Node in this project: no build step, no test runner, nothing served. The
+# tests that check the console page's script parse it with whatever engine is on PATH and
+# skip when there is none, which is the only reason `node` is ever mentioned. A
+# package.json, a lock file and a node_modules/ were committed here once, by a mistyped
+# `npm install` in the repository root, and sat in a public tree for a week. Root-anchored
+# and directory-only, in the style of `/output*/` above.
+/node_modules/

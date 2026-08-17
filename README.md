@@ -1,5 +1,15 @@
+<!-- The lockup takes currentColor, which is right everywhere it is inlined and means
+     nothing here: an image referenced from a page has no parent to inherit from, so
+     currentColor resolves to black — fine on a white ground and invisible on GitHub's
+     dark themes. These two are the same drawing with one ink each; docs/brand/README.md
+     records why they exist and docs/brand/medialith-lockup.svg is still the file to
+     edit. -->
 <p align="center">
-  <img src="docs/brand/medialith-lockup.svg" width="330" alt="MediaLith">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/github/medialith-lockup-light-ink.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/brand/github/medialith-lockup-dark-ink.svg">
+    <img src="docs/brand/github/medialith-lockup-dark-ink.svg" width="330" alt="MediaLith">
+  </picture>
 </p>
 
 <p align="center">
