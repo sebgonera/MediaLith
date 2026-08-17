@@ -26,6 +26,29 @@ gradient. They take `currentColor`, so there is no light file, no dark file and 
 file — the mark is whatever colour the text around it is. That is also what makes the
 knockouts true knockouts: whatever is behind the mark shows through the triangle.
 
+### The two derived files, and the one place `currentColor` fails
+
+`currentColor` needs a parent to inherit from. Inline in a page it has one; referenced from
+outside a page it does not, and resolves to the initial value of `color`, which is black.
+So there is one class of surface where the rule above cannot hold, and `docs/brand/github/`
+is it:
+
+| File | What it is |
+| --- | --- |
+| `github/medialith-lockup-dark-ink.svg` | The lockup at `#14171b`, for GitHub's light themes |
+| `github/medialith-lockup-light-ink.svg` | The lockup at `#e8eaed`, for GitHub's dark themes |
+
+Both are **generated, not designed** — the canonical lockup with its one fill attribute set
+to a literal, same paths, same `viewBox`, same proportions. `README.md` picks between them
+with a `<picture>` element and `prefers-color-scheme`. `medialith-lockup.svg` is still the
+file anybody edits; a test in `plexosd`'s console module compares the drawing of all three
+and fails if they drift apart, because the mark already exists in three places with nothing
+relating them and these are the fourth and fifth.
+
+This is not a new exception. The favicon below already takes it, for the same reason and in
+the same words: browser chrome is not the page, so `currentColor` buys nothing there. The
+rule holds wherever the mark is *inlined*, which is everywhere it is drawn in the product.
+
 ## Where it is used
 
 - **The console page** — `crates/plexosd/src/ui/console.html`, twice: inline in the header
@@ -50,7 +73,11 @@ this image does not have. If it is ever added, it is added with a machine to try
 
 ## Rules
 
-1. One colour. It inherits `currentColor` and needs no variants.
+1. One colour. It inherits `currentColor` and needs no variants — anywhere it is inlined.
+   The one exception is a surface with nothing to inherit from, which is the favicon and
+   `docs/brand/github/`, and there the variant is *derived* from this file rather than
+   drawn. Two inks exist in this project, `#14171b` and `#e8eaed`, and a third would be a
+   new decision that needs making rather than copying.
 2. Clear space of half the mark's width on every side.
 3. Swap to the small variant below 40 px. Do not scale the primary down and hope.
 4. Never colour the two stones differently, and never fill the triangle. Both were tried:

@@ -2737,6 +2737,175 @@ mod tests {
         }
     }
 
+    /// The lockup as it is drawn wherever the colour cascades in.
+    const LOCKUP: &str = include_str!("../../../docs/brand/medialith-lockup.svg");
+    /// The two files README.md picks between, which are that one with a literal ink.
+    const LOCKUP_DARK_INK: &str =
+        include_str!("../../../docs/brand/github/medialith-lockup-dark-ink.svg");
+    const LOCKUP_LIGHT_INK: &str =
+        include_str!("../../../docs/brand/github/medialith-lockup-light-ink.svg");
+
+    /// The body of every comment in an SVG.
+    fn comments(svg: &str) -> Vec<&str> {
+        let mut found = Vec::new();
+        let mut rest = svg;
+        while let Some(open) = rest.find("<!--") {
+            let after = &rest[open + "<!--".len()..];
+            let Some(close) = after.find("-->") else {
+                break;
+            };
+            found.push(&after[..close]);
+            rest = &after[close + "-->".len()..];
+        }
+        found
+    }
+
+    /// An SVG with its comments taken out.
+    ///
+    /// The scan below reads attributes, and prose that happens to contain `name="value"`
+    /// reads to it exactly like an attribute. That is not hypothetical: the first draft of
+    /// the derived files explained which fill had been replaced by quoting it, and this
+    /// test duly found two fills in a file that has one. Same shape as the console page's
+    /// own comment, which may not write the tag it is about.
+    fn without_comments(svg: &str) -> String {
+        let mut out = String::with_capacity(svg.len());
+        let mut rest = svg;
+        while let Some(open) = rest.find("<!--") {
+            out.push_str(&rest[..open]);
+            let Some(close) = rest[open..].find("-->") else {
+                return out;
+            };
+            rest = &rest[open + close + "-->".len()..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    #[test]
+    fn the_brand_files_are_comments_a_strict_xml_parser_accepts() {
+        // A standalone SVG is parsed as XML and XML forbids a double hyphen inside a
+        // comment, so one ASCII dash too many stops the whole file parsing and a file
+        // that does not parse draws nothing. The derived lockups shipped that way for
+        // ten minutes: prose written with `--` where the canonical file uses an em dash,
+        // in files whose paths, viewBox and ink were all provably correct. Nothing that
+        // reads an SVG as text can see it -- only something that parses it.
+        for (name, svg) in [
+            ("medialith-lockup.svg", LOCKUP),
+            ("github/medialith-lockup-dark-ink.svg", LOCKUP_DARK_INK),
+            ("github/medialith-lockup-light-ink.svg", LOCKUP_LIGHT_INK),
+        ] {
+            for comment in comments(svg) {
+                assert!(
+                    !comment.contains("--"),
+                    "docs/brand/{name} has a comment containing a double hyphen, which \
+                     XML forbids. The file will not parse and the mark will not draw. \
+                     Use an em dash, as the canonical file does."
+                );
+            }
+        }
+    }
+
+    /// Every `name="value"` in an SVG, in document order.
+    fn attributes(svg: &str) -> Vec<(&str, &str)> {
+        let mut found = Vec::new();
+        let mut rest = svg;
+        while let Some(at) = rest.find("=\"") {
+            let (before, after) = rest.split_at(at);
+            let name = before
+                .rsplit(|c: char| c.is_whitespace() || c == '<')
+                .next()
+                .unwrap_or_default();
+            let Some((value, tail)) = after["=\"".len()..].split_once('"') else {
+                break;
+            };
+            found.push((name, value));
+            rest = tail;
+        }
+        found
+    }
+
+    /// What an SVG draws and how large: geometry and proportions, not colour.
+    fn drawing(svg: &str) -> Vec<(&str, &str)> {
+        attributes(svg)
+            .into_iter()
+            .filter(|(name, _)| matches!(*name, "viewBox" | "width" | "height" | "d" | "transform"))
+            .collect()
+    }
+
+    /// The value of every `fill`, and deliberately not of `fill-rule`, which is a
+    /// different attribute that a prefix match would sweep in.
+    fn fills(svg: &str) -> Vec<&str> {
+        attributes(svg)
+            .into_iter()
+            .filter_map(|(name, value)| (name == "fill").then_some(value))
+            .collect()
+    }
+
+    #[test]
+    fn the_github_lockups_draw_the_canonical_lockup_in_a_different_ink() {
+        // The mark already lived in three places -- docs/brand/medialith-lockup.svg, the
+        // inline header SVG in this crate's page, and the favicon's data URI -- with
+        // nothing relating any of them, so a change to one was a silent divergence from
+        // the other two. README.md needs two more copies, because it embeds the lockup
+        // from outside a page and currentColor has nothing to inherit from there. This is
+        // what stops the five drifting: the derived files may differ from the canonical
+        // one in their ink and in nothing else.
+        let canonical = without_comments(LOCKUP);
+        assert_eq!(
+            fills(&canonical),
+            ["currentColor"],
+            "the canonical lockup is the one that inherits its colour; if that changed, \
+             these derived files are the wrong answer to a question nobody asked again"
+        );
+
+        for (name, variant, ink) in [
+            ("dark ink", LOCKUP_DARK_INK, "#14171b"),
+            ("light ink", LOCKUP_LIGHT_INK, "#e8eaed"),
+        ] {
+            let variant = without_comments(variant);
+            assert_eq!(
+                drawing(&variant),
+                drawing(&canonical),
+                "the {name} lockup must be the canonical drawing -- same paths, same \
+                 viewBox, same proportions. Re-derive it from docs/brand/medialith-lockup.svg \
+                 rather than editing it."
+            );
+            assert_eq!(
+                fills(&variant),
+                [ink],
+                "the {name} lockup carries exactly one colour, and it is the one the \
+                 console page's favicon already uses for this surface"
+            );
+        }
+    }
+
+    #[test]
+    fn the_readme_shows_a_lockup_that_survives_both_of_githubs_themes() {
+        const README: &str = include_str!("../../../README.md");
+
+        // The failure this prevents is not a broken page: it is a page that looks right.
+        // An externally referenced SVG resolves currentColor to black, which is correct
+        // on GitHub's light theme and invisible on every dark one, so the only version
+        // anybody writing the README is likely to look at is the one that works.
+        assert!(
+            !README.contains("src=\"docs/brand/medialith-lockup.svg\""),
+            "README embeds the lockup from outside a page, where currentColor resolves to \
+             black. Use docs/brand/github/ through a picture element instead."
+        );
+        for ink in ["dark-ink", "light-ink"] {
+            assert!(
+                README.contains(&format!("docs/brand/github/medialith-lockup-{ink}.svg")),
+                "the README must offer the {ink} lockup for the theme it is for"
+            );
+        }
+        assert!(
+            README.contains("(prefers-color-scheme: dark)")
+                && README.contains("(prefers-color-scheme: light)"),
+            "both themes must be named; a picture element with one source leaves the \
+             other theme on whatever the fallback happens to be"
+        );
+    }
+
     #[test]
     fn the_token_field_outlives_the_flow_that_first_needed_it() {
         // It began inside the Plex install card, which renders as a single link once Plex
