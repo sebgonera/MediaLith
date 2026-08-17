@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><b>Download the Technical Preview</b></a>
+  <a href="https://github.com/sebgonera/MediaLith/releases/tag/v0.1.0-technical-preview-1"><b>Download the Technical Preview</b></a>
   &nbsp;·&nbsp; x86-64 &nbsp;·&nbsp; UEFI &nbsp;·&nbsp; ~194 MB compressed
 </p>
 
@@ -49,7 +49,7 @@ MediaLith is a whole system built around not doing that.
 The shortest path from this page to a running appliance. Nothing is built and nothing is
 installed on the computer's own disks unless you ask for it.
 
-1. **Download** the image and `SHA256SUMS` from [Releases](../../releases/latest), and
+1. **Download** the image and `SHA256SUMS` from [Releases](https://github.com/sebgonera/MediaLith/releases/tag/v0.1.0-technical-preview-1), and
    check what you got: `sha256sum -c SHA256SUMS` on Linux, `shasum -a 256 -c SHA256SUMS`
    on macOS.
 2. **Decompress** it: `xz -d MediaLith-*.img.xz`
